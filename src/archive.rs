@@ -642,33 +642,33 @@ fn ordered(nodes: Vec<Value>) -> Result<Vec<Value>> {
 }
 /// Read every reply recursively, including replies not present in the Issue's root connection.
 /// The graph is bounded at 20,000 comments; repeated IDs must carry identical records.
+/// Each identity's child connection is read once and the final records are sorted by ID.
 async fn threaded(store: &Store, roots: Vec<Value>) -> Result<Vec<Value>> {
-    let mut nodes = ordered(roots)?;
-    let mut index = 0;
-    let mut seen = BTreeSet::new();
-    while index < nodes.len() {
+    let mut queue = VecDeque::from(ordered(roots)?);
+    let mut nodes = BTreeMap::new();
+    while let Some(node) = queue.pop_front() {
+        let id = identity(&node)?.to_owned();
+        if let Some(previous) = nodes.get(&id) {
+            require(
+                previous == &node,
+                "SOURCE_CHANGED",
+                "Repeated comment identity carries different data",
+            )?;
+            continue;
+        }
+        nodes.insert(id.clone(), node);
         require(
             nodes.len() <= 20_000,
             "INCOMPLETE_DATA",
             "Comment tree exceeds archive budget",
         )?;
-        let id = identity(&nodes[index])?.to_owned();
-        if seen.insert(id.clone()) {
-            let replies = store
+        queue.extend(
+            store
                 .pages("QArchiveReplies", "/comment/children", json!({"id":id}))
-                .await?;
-            nodes.extend(replies);
-            nodes = ordered(nodes)?;
-            // Ordering can insert before the current cursor; scan every unseen ID again.
-            index = 0;
-            while index < nodes.len() && seen.contains(identity(&nodes[index])?) {
-                index += 1;
-            }
-        } else {
-            index += 1;
-        }
+                .await?,
+        );
     }
-    Ok(nodes)
+    Ok(nodes.into_values().collect())
 }
 /// Collect one source's fully paginated details; no remote mutation or credential extraction occurs.
 async fn item(store: &Store, work: &Work) -> Result<ArchiveItem> {

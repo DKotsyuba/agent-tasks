@@ -268,3 +268,93 @@ async fn archive_preservation_rejects_source_and_provenance_conflicts() {
         task
     );
 }
+
+/// Section queries omit full bodies, return at most20 code-aware matches and tell callers to narrow.
+#[tokio::test]
+async fn archive_document_queries_are_bounded_and_truthful() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let body = format!(
+        "## Items\n{}\n```\n### fake needle\n```",
+        (0..25)
+            .map(|i| format!("### Item {i}\nneedle body {i}\n"))
+            .collect::<String>()
+    );
+    let doc = f
+        .ok(
+            "save_document",
+            json!({"project_id":project,"title":"Archive","content":body}),
+        )
+        .await;
+    let result = f
+        .ok(
+            "get_context",
+            json!({"type":"document","id":doc["id"],"query":"NEEDLE"}),
+        )
+        .await;
+    assert!(result.get("content").is_none());
+    let rows = result["section_query"]["matches"].as_array().unwrap();
+    assert_eq!(rows.len(), 20);
+    assert_eq!(result["section_query"]["has_more"], true);
+    assert!(
+        rows.iter().all(|r| r["heading"] != "fake needle"
+            && r["snippet"].as_str().unwrap().chars().count() <= 202)
+    );
+    let output = agent_tasks::render::render_outcome(
+        "get_context",
+        &json!({"type":"document","id":doc["id"],"query":"NEEDLE"}),
+        &agent_tasks::model::Outcome::ok(result),
+    );
+    assert!(output.contains("narrow the query") && output.contains("Whole document"));
+    let empty = f
+        .ok(
+            "get_context",
+            json!({"type":"document","id":doc["id"],"query":"absent"}),
+        )
+        .await;
+    assert_eq!(empty["section_query"]["matches"], json!([]));
+    assert_eq!(empty["section_query"]["has_more"], false);
+    let bad = f
+        .call(
+            "get_context",
+            json!({"type":"document","id":doc["id"],"query":"needle","section":"Items"}),
+        )
+        .await;
+    assert_eq!(bad.status, "blocked");
+    let exactly = (0..20)
+        .map(|i| format!("## {i}\nmatch\n"))
+        .collect::<String>();
+    assert!(
+        !agent_tasks::sections::matching_sections(&exactly, "match")
+            .unwrap()
+            .1
+    );
+}
+/// An over-budget native Document search retries one item with the original cursor and preserves pagination.
+#[tokio::test]
+async fn archive_document_search_reduces_large_native_pages() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    {
+        let mut db = f.db.lock().await;
+        for index in 0..3 {
+            let id = format!("00000000-0000-4000-8000-00000000000{}", index + 1);
+            db.documents.insert(id.clone(),json!({"id":id,"title":"large archive target","content":"x".repeat(4_300_000),"project":{"id":project},"updatedAt":"fixture","archivedAt":null,"hiddenAt":null}));
+        }
+    }
+    let first = f
+        .ok(
+            "search",
+            json!({"type":"document","query":"target","project_id":project,"first":3}),
+        )
+        .await;
+    assert_eq!(first["native_page_size"], 1);
+    assert_eq!(first["effective_first"], 1);
+    assert_eq!(first["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(first["pageInfo"]["hasNextPage"], true);
+    let next=f.ok("search",json!({"type":"document","query":"target","project_id":project,"first":3,"after":first["pageInfo"]["endCursor"]})).await;
+    assert_eq!(next["native_page_size"], 1);
+    assert_ne!(next["nodes"][0]["id"], first["nodes"][0]["id"]);
+    assert_eq!(next["pageInfo"]["hasNextPage"], true);
+    assert_eq!(f.db.lock().await.operation_counts["QSearchDocuments"], 4);
+}

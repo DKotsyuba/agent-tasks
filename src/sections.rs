@@ -148,6 +148,42 @@ pub fn find_section<'a>(content: &'a str, heading_text: &str) -> Result<Section<
     })
 }
 
+/// Find up to 20 sections whose heading or complete body contains literal `query`,
+/// case-insensitively. Returns document-order matches with exact bodies/index/count,
+/// plus `has_more` when a 21st match exists: callers must narrow the query.
+/// Empty queries refuse. Duplicate headings remain distinguishable by index;
+/// fenced/indented headings are ignored by the shared CommonMark parser. No I/O occurs.
+pub fn matching_sections<'a>(content: &'a str, query: &str) -> Result<(Vec<Section<'a>>, bool)> {
+    require(
+        !query.trim().is_empty(),
+        "INVALID_INPUT",
+        "Section query must be nonempty",
+    )?;
+    let wanted = query.trim().to_lowercase();
+    let items = headings(content);
+    let mut matches = vec![];
+    for (index, heading) in items.iter().enumerate() {
+        let end = items[index + 1..]
+            .iter()
+            .find(|h| h.level <= heading.level)
+            .map(|h| h.start)
+            .unwrap_or(content.len());
+        let body = &content[heading.body_start..end];
+        if heading.text.to_lowercase().contains(&wanted) || body.to_lowercase().contains(&wanted) {
+            if matches.len() == 20 {
+                return Ok((matches, true));
+            }
+            matches.push(Section {
+                heading: heading.text.clone(),
+                index: index + 1,
+                count: items.len(),
+                body,
+            });
+        }
+    }
+    Ok((matches, false))
+}
+
 /// Replace only the body of the section matching `heading_text`, preserving the heading line
 /// and every byte outside the section's range unchanged.
 pub fn replace_section(content: &str, heading_text: &str, new_body: &str) -> Result<String> {

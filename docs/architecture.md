@@ -25,6 +25,16 @@ clock; an optional applied timestamp must be captured by the caller once.
 overflow. Exact section bodies are measured with the same CommonMark parser
 used by reads; the archive is never truncated or divided into multiple files.
 
+`get_context(type=document, query=...)` searches real CommonMark section
+headings and their complete bodies case-insensitively. It returns up to 20
+document-order heading/index/snippet matches, omits the full body, and sets
+`has_more` when another match exists. That flag means narrow the query; it is
+not a claim that every match was returned. Exact `section` reads remain full
+and are mutually exclusive with `query`. Document search retries an upstream
+response-budget failure with `first=1` at the same native cursor. The returned
+page uses that smaller page's native size and unchanged truthful pagination;
+a still-oversize single result refuses normally.
+
 ## MCP result presentation
 
 The resident HTTP Handler and the stdio Bridge expose the same static catalogue.

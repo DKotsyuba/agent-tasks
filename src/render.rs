@@ -118,12 +118,32 @@ pub fn render_outcome(tool: &str, request: &Value, outcome: &Outcome) -> String 
         .unwrap_or_else(|_| presentation_fallback(tool, request, outcome))
 }
 
+/// Require full Document content or a complete bounded section-query shape, including honest more metadata.
+fn document_shape(data: &Value) -> bool {
+    data["id"].is_string()
+        && (data["content"].is_string()
+            || (data["section_query"]["query"].is_string()
+                && data["section_query"]["has_more"].is_boolean()
+                && data["section_query"]["matches"]
+                    .as_array()
+                    .is_some_and(|rows| {
+                        rows.len() <= 20
+                            && (!data["section_query"]["has_more"].as_bool().unwrap_or(false)
+                                || rows.len() == 20)
+                            && rows.iter().all(|r| {
+                                r["heading"].is_string()
+                                    && r["index"].as_u64().is_some_and(|i| i > 0)
+                                    && r["snippet"].is_string()
+                            })
+                    })))
+}
+
 /// Reject essential missing read fields before an otherwise empty success page can be emitted.
 /// An omitted `type` infers the same envelopes the resolver selected from a native URL.
 fn valid_success_shape(tool: &str, request: &Value, data: &Value) -> bool {
     match tool {
         "get_context" => match request["type"].as_str() {
-            Some("document") => data["id"].is_string() && data["content"].is_string(),
+            Some("document") => document_shape(data),
             Some("project") => data["project"]["id"].is_string(),
             Some("project_update") => data["project_update"]["id"].is_string(),
             Some("issue") => data["issue"]["id"].is_string(),
@@ -131,7 +151,7 @@ fn valid_success_shape(tool: &str, request: &Value, data: &Value) -> bool {
                 data["issue"]["id"].is_string()
                     || data["project"]["id"].is_string()
                     || data["project_update"]["id"].is_string()
-                    || (data["id"].is_string() && data["content"].is_string())
+                    || document_shape(data)
             }
         },
         "get_overview" => data["project_id"].is_string() && data["cursor"].is_string(),
@@ -461,8 +481,8 @@ fn context_projection(request: &Value, data: &Value) -> Value {
     "discrepancies":data["discrepancies"].as_array().cloned().unwrap_or_default(),
     "transitions":data["transitions"].as_array().cloned().unwrap_or_default(),
     "actor":data["activity"]["actor"],"reason":data["activity"]["reason"],
-    "section":item["section"],
-    "whole_document_route":if item["section"].is_object() {
+    "section":item["section"],"section_query":item["section_query"],
+    "whole_document_route":if item["section"].is_object() || item["section_query"].is_object() {
         json!(format!("get_context type=document id={}", item["id"].as_str().unwrap_or("")))
     } else {
         Value::Null
