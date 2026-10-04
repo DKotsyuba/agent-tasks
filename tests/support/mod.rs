@@ -212,9 +212,9 @@ async fn graphql(
             .find(|v| v["id"] == id || v["identifier"] == id)
             .cloned()
             .map(|v| ("issue", v)),
-        "QIssueRelations" => Some((
+        "QIssueRelations" | "QArchiveRelations" => Some((
             "issue",
-            json!({"relations":issue_page(db.relations.values().filter(|r| r["issue"]["id"] == id).cloned().collect(),v)}),
+            json!({"relations":issue_page(db.relations.values().filter(|r| r["issue"]["id"] == id && (op == "QArchiveRelations" || r["archivedAt"].is_null())).cloned().collect(),v)}),
         )),
         "QAttachmentById" => db.attachments.get(id).cloned().map(|v| ("attachment", v)),
         "QArtifact" => db.attachments.get(id).cloned().map(|v| ("attachment", v)),

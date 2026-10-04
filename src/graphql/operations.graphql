@@ -98,6 +98,8 @@ query QArchiveDocumentComments($id:String!,$first:Int!,$after:String) {document(
 
 query QArchiveInverseRelations($id:String!,$first:Int!,$after:String) {issue(id:$id) {inverseRelations(first:$first,after:$after,includeArchived:true) {nodes{id type archivedAt issue{id} relatedIssue{id}} pageInfo{hasNextPage endCursor}}}}
 
+query QArchiveRelations($id:String!,$first:Int!,$after:String) {issue(id:$id) {relations(first:$first,after:$after,includeArchived:true) {nodes{id type archivedAt issue{id} relatedIssue{id}} pageInfo{hasNextPage endCursor}}}}
+
 query QArchiveHistory($id:String!,$first:Int!,$after:String) {issue(id:$id) {history(first:$first,after:$after,includeArchived:true) {nodes{id createdAt updatedAt actor{id name} botActor{id name} changes updatedDescription descriptionUpdatedBy{id name} fromTitle toTitle fromPriority toPriority fromStateId toStateId fromParentId toParentId fromProjectId toProjectId fromTeamId toTeamId fromAssigneeId toAssigneeId fromCycleId toCycleId fromDueDate toDueDate fromEstimate toEstimate addedLabelIds removedLabelIds addedToReleaseIds removedFromReleaseIds attachmentId archived trashed relationChanges{type}} pageInfo{hasNextPage endCursor}}}}
 
 mutation MArchiveProbeDelete($id:String!) {issueDelete(id:$id,permanentlyDelete:false) {success}}

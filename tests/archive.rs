@@ -18,6 +18,8 @@ async fn archive_collects_full_pages_and_explicit_unmanaged_blockers() {
     let unmanaged = id();
     {
         let mut db = f.db.lock().await;
+        let relation = id();
+        db.relations.insert(relation.clone(), json!({"id":relation,"issue":{"id":task},"relatedIssue":{"id":module},"type":"related","archivedAt":"2026-01-01T00:00:00Z"}));
         for index in 0..151 {
             let cid = if index == 0 { root.clone() } else { id() };
             db.comments.insert(cid.clone(),json!({"id":cid,"body":format!("full comment {index}"),"issue":{"id":task},"parent":null,"reactions":[{"id":format!("reaction-{index}"),"emoji":"👍"}],"user":{"id":"author","name":"Author"}}));
@@ -53,6 +55,8 @@ async fn archive_collects_full_pages_and_explicit_unmanaged_blockers() {
     let item = set.items.iter().find(|n| n.native["id"] == task).unwrap();
     assert_eq!(item.comments.len(), 202);
     assert_eq!(item.history.len(), 101);
+    assert_eq!(item.relations.len(), 1);
+    assert!(item.relations[0]["archivedAt"].is_string());
     assert_eq!(item.documents.len(), 1);
     assert_eq!(item.documents[0]["comments"].as_array().unwrap().len(), 101);
     assert!(

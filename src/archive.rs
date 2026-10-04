@@ -728,7 +728,7 @@ async fn item(store: &Store, work: &Work) -> Result<ArchiveItem> {
     }
     let mut relations = store
         .pages(
-            "QIssueRelations",
+            "QArchiveRelations",
             "/issue/relations",
             json!({"id":work.id()}),
         )
