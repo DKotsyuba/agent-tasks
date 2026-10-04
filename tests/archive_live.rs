@@ -80,7 +80,8 @@ impl Probe {
         let result = self.store.linear.call(op, args).await;
         match &result {
             Ok(v) => {
-                self.report["steps"][step] = json!({"operation":op,"state":"confirmed","result":v,"elapsed_ms":started.elapsed().as_millis()})
+                let safe = evidence_response(op, v);
+                self.report["steps"][step] = json!({"operation":op,"state":"confirmed","result":safe,"elapsed_ms":started.elapsed().as_millis()})
             }
             Err(f) => {
                 self.report["steps"][step]["fault"] =
@@ -149,6 +150,51 @@ impl Probe {
         Ok(v)
     }
 }
+
+/// Copy a native response for durable evidence, removing ephemeral signed upload credentials.
+fn evidence_response(operation: &str, native: &Value) -> Value {
+    let mut safe = native.clone();
+    if operation == "MFileUpload"
+        && let Some(slot) = safe["fileUpload"]["uploadFile"].as_object_mut()
+    {
+        slot.remove("uploadUrl");
+        slot.remove("headers");
+    }
+    safe
+}
+/// Prove native pagination using two records per page and a small quota-aware fixture.
+/// Missing or repeated cursors refuse; at most 200 pages are read and no writes occur.
+async fn small_pages(store: &Store, query: &str, pointer: &str, id: &str) -> Result<Vec<Value>> {
+    let mut nodes = vec![];
+    let mut after = Value::Null;
+    for _ in 0..200 {
+        let response = store
+            .linear
+            .call(query, json!({"id":id,"first":2,"after":after}))
+            .await?;
+        let page = response
+            .pointer(pointer)
+            .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "probe page missing"))?;
+        nodes.extend(
+            page["nodes"]
+                .as_array()
+                .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "probe nodes missing"))?
+                .iter()
+                .cloned(),
+        );
+        if page["pageInfo"]["hasNextPage"] == false {
+            return Ok(nodes);
+        }
+        let next = page["pageInfo"]["endCursor"].clone();
+        observed(
+            next.is_string() && next != after,
+            "probe cursor did not advance",
+        )?;
+        after = next;
+    }
+    Err(Fault::new("INCOMPLETE_DATA", "probe page budget exceeded"))
+}
+
 /// Convert a measurement mismatch into an explicit blocked gate without fabricating a limit.
 fn observed(condition: bool, message: &str) -> Result<()> {
     agent_tasks::model::require(condition, "GATE_BLOCKED", message)
@@ -280,6 +326,13 @@ async fn gate_paging(p: &mut Probe, issue: &str, peer: &str) -> Result<Value> {
         .await?;
     }
     p.call("g4-relation","MCreateIssueRelation",json!({"input":{"id":p.id("relation"),"issueId":issue,"relatedIssueId":peer,"type":"related"}})).await?;
+    for index in 0..3 {
+        let target = p
+            .issue(&format!("relation-peer-{index}"), None, false)
+            .await?;
+        p.call(&format!("g4-extra-relation-{index}"),"MCreateIssueRelation",json!({"input":{"id":p.id(&format!("extra-relation-{index}")),"issueId":issue,"relatedIssueId":target,"type":"related"}})).await?;
+        p.call(&format!("g4-extra-inverse-{index}"),"MCreateIssueRelation",json!({"input":{"id":p.id(&format!("extra-inverse-{index}")),"issueId":target,"relatedIssueId":peer,"type":"related"}})).await?;
+    }
     let comments = p
         .store
         .pages("QArchiveComments", "/issue/comments", json!({"id":issue}))
@@ -292,24 +345,20 @@ async fn gate_paging(p: &mut Probe, issue: &str, peer: &str) -> Result<Value> {
         .store
         .pages("QArchiveHistory", "/issue/history", json!({"id":issue}))
         .await?;
-    let relations = p
-        .store
-        .pages("QIssueRelations", "/issue/relations", json!({"id":issue}))
-        .await?;
-    let inverse = p
-        .store
-        .pages(
-            "QArchiveInverseRelations",
-            "/issue/inverseRelations",
-            json!({"id":peer}),
-        )
-        .await?;
+    let relations = small_pages(&p.store, "QIssueRelations", "/issue/relations", issue).await?;
+    let inverse = small_pages(
+        &p.store,
+        "QArchiveInverseRelations",
+        "/issue/inverseRelations",
+        peer,
+    )
+    .await?;
     observed(
         comments.len() >= 101 && replies.len() >= 51,
         "comment/reply paging missing records",
     )?;
     Ok(
-        json!({"comments":comments.len(),"replies":replies.len(),"history":history.len(),"history_over_100":history.len()>100,"history_grouping":"native may group edits; false means gate still incomplete","relations":relations,"inverse_relations":inverse,"reaction_observed":comments.iter().any(|c|c["reactions"].as_array().is_some_and(|r|!r.is_empty())),"relations_over_100":"UNKNOWN: quota-aware follow-up required","document_comments_over_100":"UNKNOWN: follow-up gate below"}),
+        json!({"comments":comments.len(),"replies":replies.len(),"history":history.len(),"history_over_100":history.len()>100,"history_grouping":"native may group edits; false means gate still incomplete","relations":relations,"inverse_relations":inverse,"reaction_observed":comments.iter().any(|c|c["reactions"].as_array().is_some_and(|r|!r.is_empty())),"relations_native_page_size":2,"relations_multiple_pages":relations.len()>2&&inverse.len()>2,"document_comments_over_100":"UNKNOWN: follow-up gate below"}),
     )
 }
 /// Observe whether each native comment/reaction/document edit changes the owning Issue timestamp.
@@ -608,4 +657,17 @@ fn archive_fixture_identity_and_payload_are_bounded() {
     assert!(body.len() >= 1024 && body.len() < 1200);
     assert!(agent_tasks::sections::find_section(&body, "literal").is_err());
     assert_eq!(child_id(run, "subject"), child_id(run, "subject"));
+}
+
+/// Signed PUT URLs and upload headers never reach a durable fixture report.
+#[test]
+fn archive_report_removes_signed_upload_credentials() {
+    let raw = json!({"fileUpload":{"uploadFile":{"assetUrl":"https://uploads.linear.app/canonical","uploadUrl":"SIGNED_CANARY","headers":[{"value":"HEADER_CANARY"}]}}});
+    let safe = evidence_response("MFileUpload", &raw).to_string();
+    assert!(!safe.contains("SIGNED_CANARY") && !safe.contains("HEADER_CANARY"));
+    assert!(safe.contains("canonical"));
+    assert_eq!(
+        raw["fileUpload"]["uploadFile"]["uploadUrl"],
+        "SIGNED_CANARY"
+    );
 }
