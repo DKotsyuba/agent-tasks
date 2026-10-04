@@ -39,3 +39,21 @@ confirms it remains untrashed; existing failed/unknown intents are preserved.
 The native trash field is nullable. Sentinel and cleanup checks accept present
 `false` or `null` as untrashed; missing/invalid fields are incomplete. A deletion
 is confirmed only by an exact-ID read with a present `true`, never by absence.
+
+## Targeted followup on an existing report
+
+After reviewing the pending native mutation by exact readback, the operator can
+use the SAME report/team with `ATL_ARCHIVE_FOLLOWUP=renderer-and-resources` and
+run `archive_native_followup` with `--ignored --exact --nocapture`. A new report
+or fixture is not created. The old `g6-1` pending intent remains unchanged; a
+separate read-only observation records whether the old accepted metadata is
+still present. No retry of that mutation is made.
+
+The followup creates one managed Epic target in the existing fixture Project,
+one small source artifact, its copied artifact and one readable renderer proof
+Document. It runs the actual production prepare/attach/readback and compact
+Document reparent/readback helpers, then renders and validates the full native
+canonical archive. Existing comment/history volume is reused. It performs no
+Issue deletion; sentinel/ownership checks bracket the work. Unknown effects stop
+with their new exact action/intent preserved. These observations do not prove
+post-deletion retention or quota relief.

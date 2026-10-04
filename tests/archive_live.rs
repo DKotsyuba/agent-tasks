@@ -56,6 +56,50 @@ impl Probe {
         p.save();
         p
     }
+
+    /// Open only an explicitly opted-in existing fixture report; do not create a new run or replay old steps.
+    fn resume() -> Self {
+        assert_eq!(
+            std::env::var("ATL_ARCHIVE_LIVE").as_deref(),
+            Ok("disposable-fixture")
+        );
+        assert_eq!(
+            std::env::var("ATL_ARCHIVE_FOLLOWUP").as_deref(),
+            Ok("renderer-and-resources")
+        );
+        let path =
+            PathBuf::from(std::env::var("ATL_LIVE_REPORT").expect("existing report required"));
+        assert!(
+            path.is_absolute()
+                && std::fs::metadata(&path).expect("existing report").len() <= 32 * 1024 * 1024
+        );
+        let report: Value = serde_json::from_slice(&std::fs::read(&path).expect("read report"))
+            .expect("report JSON");
+        validate_existing_report(
+            &report,
+            &std::env::var("ATL_LIVE_TEAM_ID").expect("same team required"),
+        )
+        .expect("exact existing fixture inventory");
+        let key = std::env::var("LINEAR_API_KEY")
+            .ok()
+            .or_else(|| {
+                std::env::var("LINEAR_API_KEY_FILE").ok().map(|p| {
+                    std::fs::read_to_string(p)
+                        .expect("protected provider")
+                        .trim()
+                        .to_owned()
+                })
+            })
+            .expect("protected provider required");
+        Self {
+            store: Store {
+                linear: Linear::new(Some(key), false).expect("native client"),
+            },
+            path,
+            report,
+        }
+    }
+
     /// Derive a fixture-owned identity from the recorded run and a stable purpose.
     fn id(&self, purpose: &str) -> String {
         child_id(self.report["run"].as_str().expect("run"), purpose)
@@ -143,6 +187,94 @@ impl Probe {
         validate_sentinel(&v, &self.report["sentinel_project"])?;
         Ok(v)
     }
+}
+
+/// Check every report identity before credential access; the followup cannot adopt an unrelated run or invent targets.
+fn validate_existing_report(report: &Value, team: &str) -> Result<()> {
+    let run = report["run"]
+        .as_str()
+        .ok_or_else(|| Fault::new("STATE_INVALID", "Existing run missing"))?;
+    Uuid::parse_str(run).map_err(|_| Fault::new("STATE_INVALID", "Invalid existing run"))?;
+    observed(
+        report["version"] == 1 && report["team"] == team,
+        "Existing report belongs to another team/version",
+    )?;
+    observed(
+        report["fixture_project"] == child_id(run, "project")
+            && report["sentinel_project"] == child_id(run, "sentinel-project"),
+        "Existing Project identity mismatch",
+    )?;
+    let items = report["issues"]
+        .as_array()
+        .ok_or_else(|| Fault::new("STATE_INVALID", "Existing inventory missing"))?;
+    for item in items {
+        let purpose = item["purpose"]
+            .as_str()
+            .ok_or_else(|| Fault::new("STATE_INVALID", "Inventory purpose missing"))?;
+        observed(
+            item["id"] == child_id(run, purpose),
+            "Inventory identity mismatch",
+        )?;
+        let expected = if item["sentinel"] == true {
+            &report["sentinel_project"]
+        } else {
+            &report["fixture_project"]
+        };
+        observed(item["project"] == *expected, "Inventory Project mismatch")?;
+    }
+    for purpose in ["subject", "survivor", "sentinel"] {
+        observed(
+            items.iter().any(|item| item["purpose"] == purpose),
+            "Required existing owned fixture missing",
+        )?;
+    }
+    Ok(())
+}
+/// Verify one exact owned existing Issue before a followup write; missing/trash/foreign data refuses.
+async fn owned_followup_issue(p: &Probe, purpose: &str) -> Result<Value> {
+    let id = p.id(purpose);
+    let native = p.store.linear.object("QArchiveIssue", "issue", &id).await?;
+    observed(
+        native["id"] == id
+            && native["team"]["id"] == p.report["team"]
+            && native["project"]["id"] == p.report["fixture_project"]
+            && !agent_tasks::archive::is_trashed(&native)?
+            && native["description"]
+                .as_str()
+                .is_some_and(|s| s.contains(p.report["run"].as_str().expect("run"))),
+        "Existing followup Issue ownership/state mismatch",
+    )?;
+    Ok(native)
+}
+/// Journal one real preservation action before invoking the production helper; never replay an existing attempt.
+async fn preservation_step(
+    p: &mut Probe,
+    key: &str,
+    action: &agent_tasks::archive::PreservationAction,
+) -> Result<agent_tasks::archive::PreservationEffect> {
+    observed(
+        p.report["steps"][key].is_null(),
+        "Preservation step already attempted; reconcile explicitly",
+    )?;
+    p.report["steps"][key] =
+        json!({"operation":"execute_preservation","action":action,"state":"pending"});
+    p.save();
+    let result = agent_tasks::archive::execute_preservation(&p.store, action).await;
+    match &result {
+        Ok(effect) => {
+            p.report["steps"][key] =
+                json!({"operation":"execute_preservation","state":"confirmed","effect":effect})
+        }
+        Err(f) => {
+            p.report["steps"][key]["fault"] =
+                json!({"code":f.code,"message":f.message,"uncertain":f.uncertain})
+        }
+    }
+    p.save();
+    if result.as_ref().is_err_and(|f| f.uncertain) {
+        panic!("unknown preservation effect; inspect the saved exact action");
+    }
+    result
 }
 
 /// Verify the expected sentinel's native project/title and nullable untrashed flag.
@@ -592,6 +724,188 @@ async fn archive_native_gates() {
     );
     p.save();
 }
+
+/// Continue only the same owned report with bounded actual renderer/preservation probes.
+/// Creates one managed Epic target, one source file, one copy and one readable proof Document;
+/// reparents the existing size Document. It never deletes an Issue, repeats comment/history
+/// volume, retries g6-1 or overwrites its pending journal. Root review/opt-in is required.
+#[tokio::test]
+#[ignore = "root-owned targeted existing fixture followup; no deletion"]
+async fn archive_native_followup() {
+    let mut p = Probe::resume();
+    let sentinel = p.id("sentinel");
+    p.sentinel(&sentinel)
+        .await
+        .expect("initial existing sentinel");
+    owned_followup_issue(&p, "subject")
+        .await
+        .expect("owned subject");
+    owned_followup_issue(&p, "survivor")
+        .await
+        .expect("owned survivor");
+    let pending = p.report["steps"]["g6-1"].clone();
+    observed(
+        pending["operation"] == "MUpdateAttachment"
+            && pending["state"] == "pending"
+            && pending["variables"]["id"] == p.id("metadata"),
+        "Expected pending metadata probe missing",
+    )
+    .expect("same run2 pending probe");
+    let existing = p
+        .store
+        .linear
+        .object("QArtifact", "attachment", &p.id("metadata"))
+        .await
+        .expect("exact metadata readback");
+    observed(existing["issue"]["id"]==p.id("survivor")&&existing["metadata"]==p.report["steps"]["g6-0"]["result"]["attachmentCreate"]["attachment"]["metadata"],"Metadata no longer equals prior confirmed intent").expect("pending probe observation");
+    p.report["followup_observations"]["g6-1"] = json!({"read_only":true,"current_json_bytes":serde_json::to_vec(&existing["metadata"]).unwrap().len(),"equals_previous_confirmed":true,"equals_unknown_proposal":existing["metadata"]==pending["variables"]["input"]["metadata"],"configured_total_metadata_budget":agent_tasks::archive::METADATA_BUDGET_BYTES});
+    p.save();
+    let epic = p.id("followup-epic");
+    let input = json!({"request_id":epic,"actor":"codex:archive-fixture","project_id":p.report["fixture_project"],"team_id":p.report["team"],"title":"Archive retention fixture","fields":{"description":format!("Archive fixture {}",p.report["run"].as_str().unwrap()),"business_requirements":"Controlled native renderer/preservation measurement only","acceptance_criteria":"Exact payload and byte readback; no deletion"}});
+    observed(
+        p.report["steps"]["followup-create-epic"].is_null(),
+        "Followup already attempted; do not recreate",
+    )
+    .unwrap();
+    let fixture_project = p.report["fixture_project"].clone();
+    p.report["issues"].as_array_mut().unwrap().push(
+        json!({"id":epic,"purpose":"followup-epic","sentinel":false,"project":fixture_project}),
+    );
+    p.report["steps"]["followup-create-epic"] =
+        json!({"operation":"create_epic","arguments":input,"state":"pending"});
+    p.save();
+    let gateway =
+        agent_tasks::gateway::Gateway::new(p.store.linear.clone()).expect("fixture gateway");
+    let created = gateway.call("create_epic", input).await;
+    p.report["steps"]["followup-create-epic"]["outcome"] = serde_json::to_value(&created).unwrap();
+    p.save();
+    assert_eq!(
+        created.status, "ok",
+        "managed target creation failed; reconcile exact saved intent"
+    );
+    p.report["steps"]["followup-create-epic"]["state"] = json!("confirmed");
+    p.save();
+    let bytes = b"actual preservation fixture\0binary".to_vec();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let slot=p.call("followup-reserve-source","MFileUpload",json!({"contentType":"application/octet-stream","filename":"followup-resource.bin","size":bytes.len(),"makePublic":false})).await.expect("source reservation")["fileUpload"]["uploadFile"].clone();
+    p.report["steps"]["followup-put-source"] =
+        json!({"state":"pending","asset_url":slot["assetUrl"],"sha256":digest});
+    p.save();
+    p.store
+        .linear
+        .put_upload(&slot, bytes.clone())
+        .await
+        .expect("source PUT; unknown attempt stays recorded");
+    p.report["steps"]["followup-put-source"]["state"] = json!("confirmed");
+    p.save();
+    let source = p.id("followup-source-file");
+    let artifact = json!({"filename":"followup-resource.bin","content_type":"application/octet-stream","size_bytes":bytes.len(),"sha256":digest,"title":"Preservation source","note":null});
+    p.call("followup-source-file","MCreateArtifact",json!({"input":{"id":source,"issueId":p.id("subject"),"title":"Preservation source","url":slot["assetUrl"],"metadata":{"artifact":artifact}}})).await.expect("source attachment");
+    let origin = p
+        .store
+        .work(&p.id("subject"))
+        .await
+        .expect("source identity");
+    let source_item = agent_tasks::archive::collect_item(&p.store, &origin)
+        .await
+        .expect("actual source snapshot");
+    let root = p.store.work(&epic).await.expect("managed target");
+    let mut set = agent_tasks::archive::ArchiveSet {
+        epic: agent_tasks::archive::collect_item(&p.store, &root)
+            .await
+            .unwrap(),
+        items: vec![],
+        assets: vec![],
+        blockers: vec![],
+    };
+    // Capture through the production collector after binding this managed source is intentionally avoided:
+    // the primitive receives the exact owned native attachment and verified source bytes.
+    let asset = agent_tasks::archive::ArchiveAsset {
+        issue_id: p.id("subject"),
+        identifier: origin.native["identifier"].as_str().unwrap().into(),
+        origin: source.clone(),
+        url: slot["assetUrl"].as_str().unwrap().into(),
+        size: bytes.len() as u64,
+        digest: digest.clone(),
+        filename: "followup-resource.bin".into(),
+        content_type: artifact["content_type"].as_str().unwrap().into(),
+        artifact,
+    };
+    let action = agent_tasks::archive::PreservationAction::PrepareCopy {
+        target_issue: epic.clone(),
+        attachment_id: child_id(
+            &epic,
+            &format!("compact-file:{}:{}", asset.issue_id, asset.origin),
+        ),
+        asset,
+    };
+    let prepared = preservation_step(&mut p, "followup-prepare-copy", &action)
+        .await
+        .expect("actual prepare helper");
+    let attach = prepared.next.expect("canonical publish action");
+    preservation_step(&mut p, "followup-attach-copy", &attach)
+        .await
+        .expect("actual attach helper");
+    agent_tasks::archive::preservation_readback(&p.store, &attach)
+        .await
+        .expect("actual copied byte/readback proof");
+    let source_document = source_item
+        .documents
+        .iter()
+        .find(|d| d["id"] == p.id("size-document"))
+        .expect("existing size Document")
+        .clone();
+    let move_doc = agent_tasks::archive::PreservationAction::ReparentDocument {
+        target_issue: epic.clone(),
+        document: agent_tasks::archive::document_fingerprint(&source_document)
+            .expect("compact exact witness"),
+    };
+    preservation_step(&mut p, "followup-reparent-document", &move_doc)
+        .await
+        .expect("actual reparent helper");
+    agent_tasks::archive::preservation_readback(&p.store, &move_doc)
+        .await
+        .expect("actual reparent readback");
+    set.epic = agent_tasks::archive::collect_item(&p.store, &p.store.work(&epic).await.unwrap())
+        .await
+        .unwrap();
+    let expected = agent_tasks::archive::render(&set, None).expect("actual production renderer");
+    assert!(
+        expected.len() < 2 * 1024 * 1024,
+        "fixed existing fixture exceeded followup document budget"
+    );
+    let doc = p.id("followup-renderer-document");
+    p.call("followup-renderer-document","MCreateDocument",json!({"input":{"id":doc,"issueId":epic,"title":"Readable archive format proof","content":expected}})).await.expect("readable renderer Document");
+    let native = p
+        .store
+        .linear
+        .object("QDocument", "document", &doc)
+        .await
+        .expect("exact canonical renderer readback");
+    agent_tasks::archive::verify_readback(&expected, native["content"].as_str().unwrap())
+        .expect("exact source payload/structure proof; do not approve on hash alone");
+    let blockers = agent_tasks::archive::validate_readback(
+        &set,
+        &expected,
+        &native,
+        agent_tasks::archive::ArchiveLimits {
+            archive_max_bytes: Some(native["content"].as_str().unwrap().len()),
+            section_max_bytes: Some(agent_tasks::render::TEXT_BUDGET_BYTES - 64 * 1024),
+        },
+    )
+    .expect("canonical complete section/wire checks");
+    assert!(blockers.is_empty(), "canonical readback bounds failed");
+    p.report["followup_observations"]["renderer"] = json!({"document_id":doc,"request_bytes":expected.len(),"canonical_bytes":native["content"].as_str().unwrap().len(),"literal_payload_proof":true,"complete_section_replies":true,"canonical_content":native["content"],"no_deletion":true,"quota_relief":"UNPROVEN"});
+    assert_eq!(
+        p.report["steps"]["g6-1"], pending,
+        "old pending journal must remain unchanged"
+    );
+    p.sentinel(&sentinel)
+        .await
+        .expect("unchanged existing sentinel");
+    p.save();
+}
+
 /// Soft-clean only validated deterministic fixture Issue IDs; preserve the separate sentinel and Projects.
 #[tokio::test]
 #[ignore = "explicit cleanup of the saved fixture inventory only"]
@@ -779,4 +1093,25 @@ fn archive_nullable_sentinel_and_cleanup_flags_are_explicit() {
         cleanup_step(&report, "subject", &missing).unwrap_err().code,
         "INCOMPLETE_DATA"
     );
+}
+
+/// Existing-report followups reject another run/team or changed owned identity without clearing old pending evidence.
+#[test]
+fn archive_followup_inventory_is_exact_and_pending_is_preserved() {
+    let run = "00000000-0000-4000-8000-000000000001";
+    let team = "00000000-0000-4000-8000-000000000002";
+    let project = child_id(run, "project");
+    let sentinel_project = child_id(run, "sentinel-project");
+    let mut report = json!({"version":1,"run":run,"team":team,"fixture_project":project,"sentinel_project":sentinel_project,"issues":[],
+        "steps":{"g6-1":{"state":"pending","fault":{"uncertain":true}}}});
+    for purpose in ["subject", "survivor", "sentinel"] {
+        let is_sentinel = purpose == "sentinel";
+        report["issues"].as_array_mut().unwrap().push(json!({"purpose":purpose,"id":child_id(run,purpose),"sentinel":is_sentinel,"project":if is_sentinel {&sentinel_project}else{&project}}));
+    }
+    let pending = report["steps"]["g6-1"].clone();
+    validate_existing_report(&report, team).unwrap();
+    assert_eq!(report["steps"]["g6-1"], pending);
+    assert!(validate_existing_report(&report, "another team").is_err());
+    report["issues"][0]["id"] = json!(child_id(run, "sentinel"));
+    assert!(validate_existing_report(&report, team).is_err());
 }
