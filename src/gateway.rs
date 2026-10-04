@@ -949,7 +949,7 @@ impl Gateway {
         for value in f.as_object().into_iter().flat_map(|o| o.values()) {
             if let Some(s) = value.as_str() {
                 require(
-                    crate::sections::level_two_sections(s).is_empty(),
+                    !crate::sections::has_field_boundary(s),
                     "INVALID_INPUT",
                     "Use level-three or deeper headings inside field values",
                 )?;
@@ -1493,20 +1493,8 @@ impl Gateway {
             .unwrap()
             .iter()
             .map(|(key, value)| {
-                // Native level-two headings delimit workflow fields, so source headings render deeper.
-                let body = value
-                    .as_str()
-                    .unwrap()
-                    .lines()
-                    .map(|line| {
-                        if line.starts_with("## ") {
-                            format!("#{line}")
-                        } else {
-                            line.to_owned()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                // Actual H1/H2 headings delimit fields; normalize ATX/setext while retaining code.
+                let body = crate::sections::nest_field_headings(value.as_str().unwrap());
                 (key.clone(), json!(body))
             })
             .collect::<serde_json::Map<_, _>>();

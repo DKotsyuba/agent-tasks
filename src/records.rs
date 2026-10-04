@@ -52,21 +52,39 @@ pub fn child_id(parent: &str, purpose: &str) -> String {
 /// Patch recognized level-two fields; preserve all unrelated prose and code bytes.
 /// Null removes a field. Reject duplicate real managed headings before producing a patch.
 /// String values are Markdown; other values are serialized as fenced JSON.
+/// The generated description must round-trip every intended field; escaping headings or code
+/// fences that swallow generated boundaries are refused before a caller may persist metadata.
 pub fn patch_description(original: &str, patch: &Value) -> Result<String> {
-    read_fields(original)?;
+    let mut expected = read_fields(original)?;
     let mut output = original.to_owned();
     for (key, label) in FIELDS {
         let Some(value) = patch.get(*key) else {
             continue;
         };
         let rendered = if value.is_null() {
+            expected.as_object_mut().unwrap().remove(*key);
             String::new()
         } else {
             let body = value
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("```json\n{value}\n```"));
-            format!("## {label}\n{body}\n\n")
+            require(
+                !crate::sections::has_field_boundary(&body),
+                "INVALID_INPUT",
+                "Use level-three or deeper headings inside field values",
+            )?;
+            let rendered = format!("## {label}\n{body}\n\n");
+            let field = read_fields(&rendered)?;
+            require(
+                field
+                    .as_object()
+                    .is_some_and(|fields| fields.len() == 1 && fields.contains_key(*key)),
+                "INVALID_INPUT",
+                "Field content escapes its managed section",
+            )?;
+            expected[*key] = field[*key].clone();
+            rendered
         };
         if let Some(section) = crate::sections::level_two_sections(&output)
             .into_iter()
@@ -80,6 +98,11 @@ pub fn patch_description(original: &str, patch: &Value) -> Result<String> {
             output.push_str(&rendered);
         }
     }
+    require(
+        read_fields(&output)? == expected,
+        "INVALID_INPUT",
+        "Field content changes generated section boundaries",
+    )?;
     Ok(output)
 }
 /// Native persistence with fresh reads; no local workflow database or signed receipts.
@@ -300,8 +323,9 @@ impl Store {
         ))
     }
     /// Read the whole project hierarchy, including archived children needed for frozen membership.
-    /// Reads one bulk page of state attachments (bounded chunks by deterministic ID) instead of
-    /// one request per issue; a project's request count no longer scales with its issue count.
+    /// Ordinary records use bounded bulk attachment reads instead of one lookup per issue.
+    /// Each null-provenance duplicate transfer adds bounded source/target and full relation-page
+    /// corroboration reads; request count can therefore grow with those exceptions and pagination.
     pub async fn graph(&self, project: &str) -> Result<Vec<Work>> {
         let nodes = self
             .pages(

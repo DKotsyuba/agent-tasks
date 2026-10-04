@@ -488,7 +488,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -824,7 +824,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -1238,7 +1238,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -1649,7 +1649,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -1975,7 +1975,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -2299,7 +2299,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -2681,7 +2681,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -3060,7 +3060,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [

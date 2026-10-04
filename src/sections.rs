@@ -101,6 +101,42 @@ fn headings(content: &str) -> Vec<Heading> {
     out
 }
 
+/// Whether actual level-one/two headings can escape a managed field's section body.
+/// CommonMark code headings remain literal; ATX indentation and setext syntax are recognized.
+pub fn has_field_boundary(content: &str) -> bool {
+    headings(content).iter().any(|heading| heading.level <= 2)
+}
+
+/// Nest real level-one/two report headings as level three before placing reports inside fields.
+/// ATX marker changes retain inline Markdown; setext titles become ATX with folded soft breaks.
+/// Fenced and indented code bytes and every non-heading byte remain unchanged.
+pub fn nest_field_headings(content: &str) -> String {
+    let mut output = content.to_owned();
+    for heading in headings(content).into_iter().rev().filter(|h| h.level <= 2) {
+        let source = &content[heading.start..heading.body_start];
+        let trimmed = source.trim_start();
+        let markers = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+        if markers == usize::from(heading.level)
+            && trimmed
+                .as_bytes()
+                .get(markers)
+                .is_none_or(u8::is_ascii_whitespace)
+        {
+            let start = heading.start + source.len() - trimmed.len();
+            output.replace_range(start..start + markers, "###");
+        } else {
+            let title = source
+                .trim_end_matches(['\r', '\n'])
+                .rsplit_once('\n')
+                .map(|(title, _)| title)
+                .unwrap_or(source);
+            let title = title.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+            output.replace_range(heading.start..heading.body_start, &format!("### {title}\n"));
+        }
+    }
+    output
+}
+
 /// Exact level-two section boundaries in the original Markdown; code headings are excluded.
 /// The body ends at the next heading of level one or two, or at the document end.
 pub struct FieldSection {
