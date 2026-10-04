@@ -76,6 +76,8 @@ pub struct Database {
     pub assets: BTreeMap<String, Vec<u8>>,
     /// Calls received per operation name, for request-count regression checks.
     pub operation_counts: BTreeMap<String, u32>,
+    /// MIME values actually sent to native upload reservation, for transport contract regressions.
+    pub upload_content_types: Vec<String>,
 }
 /// Native standard workflow names in the fixture.
 pub const STATES: [&str; 7] = [
@@ -169,15 +171,52 @@ async fn graphql(
             ),
         )),
         "QTeams" => Some(("teams", page(db.teams.values().cloned().collect()))),
+        "QArchiveIssue" => db.issues.get(id).cloned().map(|mut n| {
+            if n.get("trashed").is_none() {
+                n["trashed"] = json!(false);
+            }
+            if n["reactions"].is_null() {
+                n["reactions"] = json!([]);
+            }
+            ("issue", n)
+        }),
+        "QArchiveChildren" => Some((
+            "issue",
+            json!({"children":issue_page(db.issues.values().filter(|n|n["parent"]["id"]==id).map(|n|json!({"id":n["id"]})).collect(),v)}),
+        )),
+        "QArchiveComments" => Some((
+            "issue",
+            json!({"comments":issue_page(db.comments.values().filter(|n|n["issue"]["id"]==id && n["parent"]["id"].is_null()).cloned().collect(),v)}),
+        )),
+        "QArchiveReplies" => Some((
+            "comment",
+            json!({"children":issue_page(db.comments.values().filter(|n|n["parent"]["id"]==id).cloned().collect(),v)}),
+        )),
+        "QArchiveDocuments" => Some((
+            "issue",
+            json!({"documents":issue_page(db.documents.values().filter(|n|n["issue"]["id"]==id).cloned().collect(),v)}),
+        )),
+        "QArchiveDocumentComments" => Some((
+            "document",
+            json!({"comments":issue_page(db.comments.values().filter(|n|n["document"]["id"]==id && n["parent"]["id"].is_null()).cloned().collect(),v)}),
+        )),
+        "QArchiveInverseRelations" => Some((
+            "issue",
+            json!({"inverseRelations":issue_page(db.relations.values().filter(|r|r["relatedIssue"]["id"]==id).cloned().collect(),v)}),
+        )),
+        "QArchiveHistory" => Some((
+            "issue",
+            json!({"history":issue_page(db.issues.get(id).and_then(|n|n["history"].as_array()).cloned().unwrap_or_default(),v)}),
+        )),
         "QIssue" => db
             .issues
             .values()
             .find(|v| v["id"] == id || v["identifier"] == id)
             .cloned()
             .map(|v| ("issue", v)),
-        "QIssueRelations" => Some((
+        "QIssueRelations" | "QArchiveRelations" => Some((
             "issue",
-            json!({"relations":issue_page(db.relations.values().filter(|r| r["issue"]["id"] == id).cloned().collect(),v)}),
+            json!({"relations":issue_page(db.relations.values().filter(|r| r["issue"]["id"] == id && (op == "QArchiveRelations" || r["archivedAt"].is_null())).cloned().collect(),v)}),
         )),
         "QAttachmentById" => db.attachments.get(id).cloned().map(|v| ("attachment", v)),
         "QArtifact" => db.attachments.get(id).cloned().map(|v| ("attachment", v)),
@@ -472,6 +511,8 @@ async fn graphql(
             ))
         }
         "MFileUpload" => {
+            db.upload_content_types
+                .push(v["contentType"].as_str().unwrap().to_owned());
             let filename = v["filename"].as_str().unwrap();
             Some((
                 "fileUpload",
@@ -733,6 +774,12 @@ pub struct Fixture {
     pub team: String,
 }
 impl Fixture {
+    /// Construct an independent read-only Store against this fixture's native HTTP boundary.
+    pub fn store(&self) -> agent_tasks::records::Store {
+        agent_tasks::records::Store {
+            linear: Linear::mock(&self.endpoint).expect("fixture endpoint"),
+        }
+    }
     /// Start the native HTTP fixture without any real credentials.
     pub async fn new() -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

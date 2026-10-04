@@ -1,5 +1,33 @@
 # Recovering an interrupted request
 
+## Archive preservation actions
+
+Archive preservation exposes a deterministic plan and one-action execution,
+reconciliation and readback helpers. The caller records each in-flight action
+before executing it and records confirmation before advancing. No helper loops
+through an entire plan or deletes any Issue.
+
+`PrepareCopy` verifies source bytes, reserves and PUTs a temporary upload, then
+returns an `AttachCopy` action containing only the canonical asset URL. Signed
+PUT URLs and headers remain in memory and must never enter workflow receipts,
+reports or logs. A lost temporary reservation/PUT response may leave an orphan
+temporary upload; an explicitly recorded fresh prepare attempt is permissible
+after reconciling the deterministic published attachment by exact ID. There is
+no invented native reservation lookup. `AttachCopy` publishes one artifact on
+the permanent Epic and preserves the existing `metadata.artifact` intent plus
+self-contained `compacted_from` provenance. Confirmation re-downloads the bytes
+and checks exact size/digest, ownership and metadata. A lost publication reply
+reconciles that same ID before another mutation.
+
+`ReparentDocument` checks current ownership, timestamp, title, visibility and
+complete content, then changes only ownership to the Epic and clears Project
+ownership. A lost reply reads that Document by exact ID. Concurrent edits refuse;
+unchanged confirmed reparents replay without a second write. Original Document
+content and comments also remain in the complete archive.
+Its journal carries a compact exact content/comment/metadata fingerprint, rather
+than repeating those full bodies. Current canonical native text is compared
+exactly; fuzzy Markdown equivalence cannot authorize a reparent or deletion.
+
 Keep the `request_id` and the complete original arguments until the outcome is known. `outcome_unknown` is never success.
 
 1. Keep one gateway writer. Restart it on the same fixed loopback port if it stopped.

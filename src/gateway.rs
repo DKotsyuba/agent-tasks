@@ -2140,7 +2140,8 @@ impl Gateway {
     /// and its own `includeArchived` covers only archived, not hidden, so both are applied here
     /// against one native page; `matched_in_page` may then be smaller than `native_page_size`,
     /// including zero, while `pageInfo.hasNextPage` still promises more native results to check,
-    /// so a filtered page is never mistaken for an exhausted, empty search.
+    /// so a filtered page is never mistaken for an exhausted, empty search. An over-budget
+    /// provider page retries at first=1 with the same cursor and returns that truthful smaller page.
     async fn search_documents(&self, a: &Value) -> Result<Value> {
         let query = text(a, "query")?;
         let project_id = match a["project_id"].as_str() {
@@ -2152,20 +2153,27 @@ impl Gateway {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let first = a.get("first").and_then(Value::as_u64).unwrap_or(10).min(25);
-        let page = self
+        let mut variables = json!({"term":query,"first":first,"after":a.get("after").unwrap_or(&Value::Null),"includeArchived":include_archived});
+        let response = match self
             .store
             .linear
-            .call(
-                "QSearchDocuments",
-                json!({
-                    "term": query,
-                    "first": first,
-                    "after": a.get("after").unwrap_or(&Value::Null),
-                    "includeArchived": include_archived,
-                }),
-            )
-            .await?["searchDocuments"]
-            .clone();
+            .call("QSearchDocuments", variables.clone())
+            .await
+        {
+            Err(f)
+                if first > 1
+                    && f.code == "INCOMPLETE_DATA"
+                    && f.message == "Linear response exceeds the request budget" =>
+            {
+                variables["first"] = json!(1);
+                self.store
+                    .linear
+                    .call("QSearchDocuments", variables.clone())
+                    .await?
+            }
+            other => other?,
+        };
+        let page = response["searchDocuments"].clone();
         let nodes = page["nodes"]
             .as_array()
             .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "Document search page is missing"))?;
@@ -2184,6 +2192,7 @@ impl Gateway {
             "pageInfo": page["pageInfo"],
             "native_page_size": nodes.len(),
             "matched_in_page": matched.len(),
+            "effective_first":variables["first"],
         });
         if let Some(pid) = &project_id {
             result["scoped_to_project"] = json!(pid);
@@ -2282,7 +2291,9 @@ impl Gateway {
     /// Legacy type/ID calls keep their original response; optional lead/reviewer views add a
     /// bounded assignment and evidence projection; detail=brief returns one compact current
     /// slice with recovery state and explicit routes to full content. Derived counts are
-    /// withheld when native membership differs from the recorded graph.
+    /// withheld when native membership differs from the recorded graph. Document query returns
+    /// at most 20 matching sections with bounded snippets and honest has_more, excluding content;
+    /// it is mutually exclusive with a complete section read and invalid for other entities.
     async fn context(&self, a: &Value) -> Result<Value> {
         require(
             !(a["id"].is_string() && a["url"].is_string()),
@@ -2324,6 +2335,16 @@ impl Gateway {
             a["section"].is_null() || kind == "document",
             "INVALID_INPUT",
             "section is only valid with type=document",
+        )?;
+        require(
+            a["query"].is_null() || kind == "document",
+            "INVALID_INPUT",
+            "query is only valid with type=document",
+        )?;
+        require(
+            a["query"].is_null() || a["section"].is_null(),
+            "INVALID_INPUT",
+            "Choose a section or a section query",
         )?;
         match kind {
             "project" => {
@@ -2375,6 +2396,22 @@ impl Gateway {
                     .linear
                     .object("QDocument", "document", id)
                     .await?;
+                if let Some(query) = a["query"].as_str() {
+                    let content = document["content"].as_str().unwrap_or("");
+                    let (matches, has_more) = crate::sections::matching_sections(content, query)?;
+                    let rows:Vec<_>=matches.iter().map(|section|{
+                        let (snippet,source)=Self::document_snippet(&section.heading,section.body,query);
+                        json!({"heading":section.heading,"index":section.index,"snippet":snippet,"match_source":source})
+                    }).collect();
+                    let mut selected = document.clone();
+                    selected
+                        .as_object_mut()
+                        .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "Document shape is invalid"))?
+                        .remove("content");
+                    selected["section_query"] =
+                        json!({"query":query,"matches":rows,"has_more":has_more});
+                    return Ok(selected);
+                }
                 let Some(heading) = a["section"].as_str() else {
                     return Ok(document);
                 };

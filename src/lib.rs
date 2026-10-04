@@ -1,6 +1,7 @@
 //! Explicit MCP workflow over native Linear Projects, Issues, Documents and activity.
 
 pub mod activity;
+pub mod archive;
 pub mod catalog;
 pub mod config;
 pub mod context;

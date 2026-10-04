@@ -1,5 +1,62 @@
 # Native Linear workflow
 
+## Complete archive collection
+
+`archive::collect` is read-only. It combines paginated native descendants with
+recorded children, retaining canceled and archived sources. Missing, unmanaged,
+moved, foreign, nonterminal, drifting or pending sources are explicit blockers.
+Managed items retain their concrete kind and complete selected native fields,
+workflow reports/reviews, recursively paginated comment threads and reactions,
+Document content/comments, attachment records, both relation directions and
+available native history actors/changes. No native document revision history is
+claimed. Active external native relations and active same-Project managed
+references block preservation/deletion. Asset reads use the existing host,
+byte-size and timeout guards and capture exact size and SHA-256 before planning.
+Collection cannot qualify unmeasured native limits or perform any deletion.
+The native Issue trash flag is nullable: a present `true` confirms trash,
+while present `false` or `null` means untrashed after an exact-ID read. Missing
+or invalid flag data refuses as incomplete and never confirms deletion.
+
+Native archive readback is verified by complete Markdown structure and exact
+literal source payloads. Only generated outer code-fence style/language and a
+single known framing newline can normalize. Original strings, metadata,
+record order/counts and thread associations cannot change. The canonical native
+body is retained only after that proof and all escaped-wire/section reply bounds
+are rechecked. Issue timestamps alone never certify an unchanged source: a
+compaction caller must compare complete source snapshots again before deletion
+and account only for its precisely recorded effects.
+
+The conservative metadata operating budget is 16,384 UTF-8 JSON bytes for the
+complete outgoing metadata object, including existing workflow and compaction
+state. Larger scopes refuse before effects. This deliberately stays below the
+accepted probe envelope and does not claim an undocumented native maximum.
+`archive::collect_item` recollects one surviving managed source without walking
+recorded children. A compaction caller owns receipt-aware membership and all
+terminal/review/pending guards; the helper retains identity/drift/trash/page
+checks and returns complete details. Compare those details, including comments
+and Documents, instead of treating Issue timestamps as a change counter.
+
+`archive::render` emits one deterministic full Markdown Document: Summary,
+Contents, a level-two section per native identifier/kind and seven uniquely
+named level-three detail sections. Descriptions, comment/reply bodies and
+Document content are retained inside fences longer than every original
+backtick run. Metadata, actors, reactions and available history remain alongside
+those bodies. Original links are explicitly historical. Rendering reads no
+clock; an optional applied timestamp must be captured by the caller once.
+`validate_limits` refuses unknown measured document/section bounds and any
+overflow. Exact section bodies are measured with the same CommonMark parser
+used by reads; the archive is never truncated or divided into multiple files.
+
+`get_context(type=document, query=...)` searches real CommonMark section
+headings and their complete bodies case-insensitively. It returns up to 20
+document-order heading/index/snippet matches, omits the full body, and sets
+`has_more` when another match exists. That flag means narrow the query; it is
+not a claim that every match was returned. Exact `section` reads remain full
+and are mutually exclusive with `query`. Document search retries an upstream
+response-budget failure with `first=1` at the same native cursor. The returned
+page uses that smaller page's native size and unchanged truthful pagination;
+a still-oversize single result refuses normally.
+
 ## MCP result presentation
 
 The resident HTTP Handler and the stdio Bridge expose the same static catalogue.
