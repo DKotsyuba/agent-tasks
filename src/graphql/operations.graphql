@@ -83,3 +83,27 @@ mutation MCreateProjectUpdate($input:ProjectUpdateCreateInput!) {projectUpdateCr
 mutation MUpdateProjectUpdate($id:String!,$input:ProjectUpdateUpdateInput!) {projectUpdateUpdate(id:$id,input:$input) {success projectUpdate {id url body health createdAt updatedAt archivedAt project {id} user {id name}}}}
 
 mutation MCreateIssueLabel($input:IssueLabelCreateInput!) {issueLabelCreate(input:$input) {success issueLabel {id name}}}
+
+query QArchiveIssue($id:String!) {issue(id:$id) {id identifier title description url updatedAt archivedAt trashed startedAt completedAt priority team{id} project{id} parent{id} state{id name type} reactions{id emoji createdAt updatedAt archivedAt user{id name}}}}
+
+query QArchiveChildren($id:String!,$first:Int!,$after:String) {issue(id:$id) {children(first:$first,after:$after,includeArchived:true) {nodes{id} pageInfo{hasNextPage endCursor}}}}
+
+query QArchiveComments($id:String!,$first:Int!,$after:String) {issue(id:$id) {comments(first:$first,after:$after,includeArchived:true) {nodes{id url body createdAt updatedAt resolvedAt resolvingCommentId parent{id} user{id name} botActor{id name} reactions{id emoji createdAt updatedAt archivedAt user{id name}}} pageInfo{hasNextPage endCursor}}}}
+
+query QArchiveReplies($id:String!,$first:Int!,$after:String) {comment(id:$id) {children(first:$first,after:$after,includeArchived:true) {nodes{id url body createdAt updatedAt resolvedAt resolvingCommentId parent{id} user{id name} botActor{id name} reactions{id emoji createdAt updatedAt archivedAt user{id name}}} pageInfo{hasNextPage endCursor}}}}
+
+query QArchiveDocuments($id:String!,$first:Int!,$after:String) {issue(id:$id) {documents(first:$first,after:$after,includeArchived:true) {nodes{id title content url updatedAt archivedAt hiddenAt documentContentId project{id} issue{id}} pageInfo{hasNextPage endCursor}}}}
+
+query QArchiveDocumentComments($id:String!,$first:Int!,$after:String) {document(id:$id) {comments(first:$first,after:$after,includeArchived:true) {nodes{id url body createdAt updatedAt resolvedAt resolvingCommentId parent{id} user{id name} botActor{id name} reactions{id emoji createdAt updatedAt archivedAt user{id name}}} pageInfo{hasNextPage endCursor}}}}
+
+query QArchiveInverseRelations($id:String!,$first:Int!,$after:String) {issue(id:$id) {inverseRelations(first:$first,after:$after,includeArchived:true) {nodes{id type archivedAt issue{id} relatedIssue{id}} pageInfo{hasNextPage endCursor}}}}
+
+query QArchiveHistory($id:String!,$first:Int!,$after:String) {issue(id:$id) {history(first:$first,after:$after,includeArchived:true) {nodes{id createdAt updatedAt actor{id name} botActor{id name} changes updatedDescription descriptionUpdatedBy{id name} fromTitle toTitle fromPriority toPriority fromStateId toStateId fromParentId toParentId fromProjectId toProjectId fromTeamId toTeamId fromAssigneeId toAssigneeId fromCycleId toCycleId fromDueDate toDueDate fromEstimate toEstimate addedLabelIds removedLabelIds addedToReleaseIds removedFromReleaseIds attachmentId archived trashed relationChanges{type}} pageInfo{hasNextPage endCursor}}}}
+
+mutation MArchiveProbeDelete($id:String!) {issueDelete(id:$id,permanentlyDelete:false) {success}}
+
+mutation MArchiveProbeRestore($id:String!) {issueUnarchive(id:$id) {success}}
+
+mutation MArchiveProbeReaction($input:ReactionCreateInput!) {reactionCreate(input:$input) {success reaction{id emoji}}}
+
+mutation MArchiveProbeCommentEdit($id:String!,$input:CommentUpdateInput!) {commentUpdate(id:$id,input:$input) {success comment{id body updatedAt}}}
