@@ -221,8 +221,22 @@ fn managed_launcher(launcher: &Path, product: &str) -> Result<bool> {
         }
     }
 }
+/// Activate an already verified release through its managed launcher and current symlink.
+/// Errors clean only temporary paths created here; existing PID-named foreign paths remain.
 #[cfg(unix)]
 fn activate(base: &Path, manifest: &Manifest, bin_dir: &Path) -> Result<()> {
+    activate_with(base, manifest, bin_dir, |from, to| fs::rename(from, to))
+}
+
+/// Execute activation with a rename callback for deterministic native rename faults in tests.
+/// The callback must preserve rename semantics on success; no service is restarted.
+#[cfg(unix)]
+fn activate_with(
+    base: &Path,
+    manifest: &Manifest,
+    bin_dir: &Path,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
     use std::os::unix::{fs::PermissionsExt, fs::symlink};
     if !bin_dir.is_absolute() {
         return Err("bin directory must be absolute".into());
@@ -285,16 +299,29 @@ fn activate(base: &Path, manifest: &Manifest, bin_dir: &Path) -> Result<()> {
         .write(true)
         .create_new(true)
         .open(&temp_launcher)?;
-    file.write_all(body.as_bytes())?;
-    file.sync_all()?;
-    fs::set_permissions(&temp_launcher, fs::Permissions::from_mode(0o755))?;
     let next = base.join(format!(".current-{}", std::process::id()));
-    symlink(Path::new("releases").join(&manifest.version), &next)?;
-    // Both versions use the same target-specific asset name. Existing services are not restarted.
-    fs::rename(&temp_launcher, &launcher)?;
-    fs::rename(&next, current)?;
-    Ok(())
+    let mut own_next = false;
+    let result = (|| -> Result<()> {
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        fs::set_permissions(&temp_launcher, fs::Permissions::from_mode(0o755))?;
+        symlink(Path::new("releases").join(&manifest.version), &next)?;
+        own_next = true;
+        // Both versions use the same target-specific asset name. Existing services are not restarted.
+        rename(&temp_launcher, &launcher)?;
+        rename(&next, &current)?;
+        Ok(())
+    })();
+    drop(file);
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_launcher);
+        if own_next {
+            let _ = fs::remove_file(&next);
+        }
+    }
+    result
 }
+/// Refuse activation on unsupported platforms without creating any temporary paths.
 #[cfg(not(unix))]
 fn activate(_: &Path, _: &Manifest, _: &Path) -> Result<()> {
     Err("installer supports Unix only".into())
@@ -302,7 +329,8 @@ fn activate(_: &Path, _: &Manifest, _: &Path) -> Result<()> {
 /// Stage the release payload into the immutable versions tree under an
 /// already-held installation lock. Every install-side refusal (conflicting
 /// immutable version, damaged bundle) happens here, before anything at the
-/// launcher path is touched.
+/// launcher path is touched. Errors remove only the newly created staging directory;
+/// a pre-existing staging path is refused and never removed.
 fn stage_release(base: &Path, bundle: &Path, manifest: &Manifest) -> Result<()> {
     let destination = base.join("releases").join(&manifest.version);
     if fs::symlink_metadata(&destination).is_ok() {
@@ -312,21 +340,28 @@ fn stage_release(base: &Path, bundle: &Path, manifest: &Manifest) -> Result<()> 
     } else {
         let stage = base.join(format!(".install-{}", std::process::id()));
         fs::create_dir(&stage)?;
-        fs::copy(bundle.join(&manifest.binary), stage.join(&manifest.binary))?;
-        fs::copy(
-            bundle.join("release-manifest.json"),
-            stage.join("release-manifest.json"),
-        )?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(
-                stage.join(&manifest.binary),
-                fs::Permissions::from_mode(0o755),
+        let result = (|| -> Result<()> {
+            fs::copy(bundle.join(&manifest.binary), stage.join(&manifest.binary))?;
+            fs::copy(
+                bundle.join("release-manifest.json"),
+                stage.join("release-manifest.json"),
             )?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(
+                    stage.join(&manifest.binary),
+                    fs::Permissions::from_mode(0o755),
+                )?;
+            }
+            verify(&stage)?;
+            fs::rename(&stage, &destination)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&stage);
         }
-        verify(&stage)?;
-        fs::rename(stage, &destination)?;
+        result?;
     }
     Ok(())
 }
@@ -484,6 +519,75 @@ mod tests {
         .unwrap();
         bundle
     }
+
+    /// Rename failures at either activation boundary leave no owned temporary paths and remain retryable.
+    #[cfg(unix)]
+    #[test]
+    fn activation_faults_clean_only_owned_temps() {
+        for fail_at in [1, 2] {
+            let t = tempfile::tempdir().unwrap();
+            let bundle = fixture(t.path(), "0.1.0", 0);
+            let manifest = verify(&bundle).unwrap();
+            let (base, _lock) = layout(&t.path().join("home")).unwrap();
+            let bin = t.path().join("bin");
+            fs::create_dir(&bin).unwrap();
+            stage_release(&base, &bundle, &manifest).unwrap();
+            let mut step = 0;
+            assert!(
+                activate_with(&base, &manifest, &bin, |from, to| {
+                    step += 1;
+                    if step == fail_at {
+                        Err(std::io::Error::other("injected rename fault"))
+                    } else {
+                        fs::rename(from, to)
+                    }
+                })
+                .is_err()
+            );
+            assert!(
+                !bin.join(format!(".agent-test.install-{}", std::process::id()))
+                    .exists()
+            );
+            assert!(
+                fs::symlink_metadata(base.join(format!(".current-{}", std::process::id())))
+                    .is_err()
+            );
+            activate(&base, &manifest, &bin).unwrap();
+        }
+        let t = tempfile::tempdir().unwrap();
+        let bundle = fixture(t.path(), "0.1.0", 0);
+        let manifest = verify(&bundle).unwrap();
+        let (base, _lock) = layout(&t.path().join("home")).unwrap();
+        let bin = t.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        stage_release(&base, &bundle, &manifest).unwrap();
+        let foreign = base.join(format!(".current-{}", std::process::id()));
+        fs::write(&foreign, b"foreign").unwrap();
+        assert!(activate(&base, &manifest, &bin).is_err());
+        assert_eq!(fs::read(foreign).unwrap(), b"foreign");
+        assert!(
+            !bin.join(format!(".agent-test.install-{}", std::process::id()))
+                .exists()
+        );
+    }
+
+    /// Copy faults clean a newly created staging directory but never a foreign pre-existing stage.
+    #[test]
+    fn staging_faults_preserve_foreign_paths() {
+        let t = tempfile::tempdir().unwrap();
+        let bundle = fixture(t.path(), "0.1.0", 0);
+        let manifest = verify(&bundle).unwrap();
+        let (base, _lock) = layout(&t.path().join("home")).unwrap();
+        fs::remove_file(bundle.join("release-manifest.json")).unwrap();
+        let stage = base.join(format!(".install-{}", std::process::id()));
+        assert!(stage_release(&base, &bundle, &manifest).is_err());
+        assert!(!stage.exists());
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("foreign"), b"keep").unwrap();
+        assert!(stage_release(&base, &bundle, &manifest).is_err());
+        assert_eq!(fs::read(stage.join("foreign")).unwrap(), b"keep");
+    }
+
     #[test]
     fn verified_bundle() {
         let t = tempfile::tempdir().unwrap();

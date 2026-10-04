@@ -204,8 +204,8 @@ Search uses Linear's native ranking and indexing; it does not guarantee
 exhaustive substring retrieval or immediate discovery of a newly written
 opaque token. Use a known Document URL with `get_context` for exact retrieval.
 
-File operations are three focused tools: `upload_file` reads one local file
-(host-side absolute path, bounded to 10,000,000 bytes), reserves a
+File operations are three focused tools: `upload_file` reads one opened local file
+(host-side absolute path, at most 10,000,001 captured bytes before rejecting an oversize stream), computes size/digest from those bytes, and reserves a
 deterministic native attachment ID per issue/request, and compares replay
 intent (filename, content type, size, digest, title, note) before treating a
 retry as identical; changed intent is `REQUEST_CONFLICT`. `list_files` returns
@@ -213,7 +213,7 @@ only user artifacts for one work item, excluding internal workflow
 attachments. `get_file` resolves and validates artifact ownership/type,
 downloads through the canonical authenticated asset URL while verifying the
 bytes against the digest recorded at upload time, writes through a sibling
-temporary file, and never silently overwrites a different existing file at
+temporary file, removes only its own temporary sibling on write/publication error, and never silently overwrites a different existing file at
 the same destination (`FILE_EXISTS` on conflict, `replayed: true` only for
 byte-identical content). None of these three tools returns binary content, a
 signed URL or a secret in its text response; artifact attachments live in

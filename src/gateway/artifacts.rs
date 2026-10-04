@@ -9,7 +9,10 @@ use crate::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::{
+    io::{Read, Write},
+    path::Path,
+};
 
 /// Map a filename extension to a content type; unknown or missing extensions are opaque bytes.
 /// Extend this list when a genuinely new artifact type is needed.
@@ -42,11 +45,39 @@ fn intent(filename: &str, content_type: &str, size: u64, digest: &str, a: &Value
         "title":a.get("title"),"note":a.get("note"),
     })
 }
+
+/// Capture at most cap+1 bytes from one opened source, refusing empty/oversized streams.
+/// Size and digest must be derived from these captured bytes, never separate path metadata.
+fn read_upload(reader: impl std::io::Read) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(FILE_SIZE_CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Fault::new("FILE_UNREADABLE", "Local file is not readable"))?;
+    require(
+        !bytes.is_empty() && bytes.len() as u64 <= FILE_SIZE_CAP,
+        "INVALID_INPUT",
+        format!("File size must be 1..={FILE_SIZE_CAP} bytes"),
+    )?;
+    Ok(bytes)
+}
+
 /// Publish `bytes` at `destination` without ever overwriting different existing content.
 /// Writes a sibling temporary file, then links it into place: `link(2)`/`CreateHardLink`
 /// fail closed when the destination already exists, so no exists-check-then-rename race
 /// can replace another file. Returns whether an identical file already occupied the spot.
+/// Errors remove only this operation's successfully created temporary file.
 fn publish(destination: &str, bytes: &[u8]) -> Result<bool> {
+    publish_with(destination, bytes, |file, bytes| file.write_all(bytes))
+}
+
+/// Publish with one bounded writer callback, allowing deterministic partial-write faults in tests.
+/// The callback owns no path; only the newly reserved temporary file is removed on failure.
+fn publish_with(
+    destination: &str,
+    bytes: &[u8],
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<bool> {
     let destination = Path::new(destination);
     require(
         destination.is_absolute(),
@@ -62,8 +93,20 @@ fn publish(destination: &str, bytes: &[u8]) -> Result<bool> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| Fault::new("INVALID_INPUT", "destination needs a file name"))?;
     let tmp = parent.join(format!(".{name}.part-{}", uuid::Uuid::new_v4()));
-    std::fs::write(&tmp, bytes)
-        .map_err(|_| Fault::new("FILE_UNREADABLE", "Could not write the temporary download"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|_| Fault::new("FILE_UNREADABLE", "Could not create the temporary download"))?;
+    let written = write(&mut file, bytes);
+    drop(file);
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Fault::new(
+            "FILE_UNREADABLE",
+            "Could not write the temporary download",
+        ));
+    }
     let linked = std::fs::hard_link(&tmp, destination);
     let _ = std::fs::remove_file(&tmp);
     match linked {
@@ -91,6 +134,7 @@ impl Gateway {
     /// Attach one local file to a work item as a durable native artifact. A retry with the
     /// deterministic per-request attachment ID and identical intent (filename, content type,
     /// size, digest, title, note) replays the existing record; changed intent conflicts.
+    /// A single opened file is read with a cap+1 bound; captured bytes own the size and digest.
     pub(super) async fn upload_file(&self, a: &Value) -> Result<Value> {
         let work_id = self.resolve("issue", text(a, "work_id")?).await?;
         let work = self.store.work(&work_id).await?;
@@ -101,16 +145,10 @@ impl Gateway {
             "INVALID_INPUT",
             "path must be an absolute path",
         )?;
-        let size = std::fs::metadata(source)
-            .map_err(|_| Fault::new("FILE_UNREADABLE", "Local file is not readable"))?
-            .len();
-        require(
-            size > 0 && size <= FILE_SIZE_CAP,
-            "INVALID_INPUT",
-            format!("File size must be 1..={FILE_SIZE_CAP} bytes"),
-        )?;
-        let bytes = std::fs::read(source)
+        let file = std::fs::File::open(source)
             .map_err(|_| Fault::new("FILE_UNREADABLE", "Local file is not readable"))?;
+        let bytes = read_upload(file)?;
+        let size = bytes.len() as u64;
         let digest = format!("{:x}", Sha256::digest(&bytes));
         let filename = source
             .file_name()
@@ -229,5 +267,56 @@ impl Gateway {
             "file_name":artifact["filename"],"content_type":artifact["content_type"],
             "size_bytes":artifact["size_bytes"],"path":destination,"replayed":replayed,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Seek, Write};
+
+    /// Growth after opening cannot bypass the cap, and path replacement cannot change the opened bytes.
+    #[test]
+    fn capture_bounds_growth_and_keeps_opened_source_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::write(&source, b"x").unwrap();
+        let mut opened = std::fs::File::open(&source).unwrap();
+        assert_eq!(opened.metadata().unwrap().len(), 1);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_len(FILE_SIZE_CAP + 20)
+            .unwrap();
+        assert!(read_upload(&mut opened).is_err());
+        assert_eq!(opened.stream_position().unwrap(), FILE_SIZE_CAP + 1);
+        std::fs::write(&source, b"original").unwrap();
+        let opened = std::fs::File::open(&source).unwrap();
+        std::fs::rename(&source, root.path().join("old")).unwrap();
+        std::fs::write(&source, b"replacement").unwrap();
+        assert_eq!(read_upload(opened).unwrap(), b"original");
+    }
+
+    /// Partial write and failed publication remove only this operation's temporary sibling.
+    #[test]
+    fn failed_publish_removes_own_temp_and_keeps_foreign_files() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("destination");
+        let foreign = root.path().join(".destination.part-foreign");
+        std::fs::write(&foreign, b"retain").unwrap();
+        assert!(
+            publish_with(destination.to_str().unwrap(), b"content", |file, bytes| {
+                file.write_all(&bytes[..2])?;
+                Err(std::io::Error::other("injected write fault"))
+            })
+            .is_err()
+        );
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        std::fs::create_dir(&destination).unwrap();
+        assert!(publish(destination.to_str().unwrap(), b"content").is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read(foreign).unwrap(), b"retain");
     }
 }
