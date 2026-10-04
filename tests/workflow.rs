@@ -538,6 +538,142 @@ fn init_repo(name: &str) -> std::path::PathBuf {
     path
 }
 
+/// Public create/edit producers refuse field escapes without leaving issue or attachment writes.
+#[tokio::test]
+async fn generated_description_boundaries_are_checked_before_writes() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let atom = f.work("atomic", &project, None).await;
+    for fields in [
+        json!({"result":"# Heading\noutput"}),
+        json!({"result":"intro\nHeading\n=======\noutput"}),
+        json!({"description":"```text\nexample"}),
+    ] {
+        let before = f.db.lock().await.issues.clone();
+        let state = f.db.lock().await.attachments.clone();
+        assert_eq!(
+            f.call("edit_atomic", json!({"id":atom,"fields":fields}))
+                .await
+                .status,
+            "blocked"
+        );
+        assert_eq!(f.db.lock().await.issues, before);
+        assert_eq!(f.db.lock().await.attachments, state);
+    }
+    let count = f.db.lock().await.issues.len();
+    assert_eq!(f.call("create_atomic",json!({"project_id":project,"team_id":f.team,"title":"Unsafe","fields":{"description":"```text\nexample"}})).await.status,"blocked");
+    assert_eq!(f.db.lock().await.issues.len(), count);
+}
+
+/// Imported report headings normalize by actual Markdown syntax; reopen clears outputs without duplicate fields.
+#[tokio::test]
+async fn commit_report_commonmark_headings_import_and_reopen_safely() {
+    let repo = init_repo("report heading fixture");
+    let reports = [
+        "# Результат\nfirst",
+        "Результат\n----------\nsecond",
+        "  ## Результат\nthird",
+    ];
+    let mut hashes = vec![];
+    for (n, result) in reports.iter().enumerate() {
+        let message = format!(
+            "fix(report): case {n}\n\nResult:\n{result}\n\n```md\n## Результат\nliteral\n```\n\nChecks:\n  ## Проверка\npassed\n"
+        );
+        git_at(
+            &repo,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                &message,
+            ],
+        );
+        hashes.push(
+            String::from_utf8(git_at(&repo, &["rev-parse", "HEAD"]))
+                .unwrap()
+                .trim()
+                .to_owned(),
+        );
+    }
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let module = f.work("module", &project, None).await;
+    f.ok(
+        "edit_module",
+        json!({"id":module,"fields":{"repository_path":repo,"worktree":repo}}),
+    )
+    .await;
+    f.mv(&module, "In Progress").await;
+    let task = f.work("task", &project, Some(&module)).await;
+    f.ok(
+        "edit_task",
+        json!({"id":task,"fields":{"work_type":"code"}}),
+    )
+    .await;
+    f.mv(&task, "In Progress").await;
+    f.ok("record_commits", json!({"work_id":task,"commits":hashes}))
+        .await;
+    let context = f.ok("get_context", json!({"type":"issue","id":task})).await;
+    let fields =
+        agent_tasks::records::read_fields(context["issue"]["description"].as_str().unwrap())
+            .unwrap();
+    assert_eq!(fields["result"], context["fields"]["result"]);
+    assert_eq!(fields["check_result"], context["fields"]["check_result"]);
+    assert!(
+        fields["result"]
+            .as_str()
+            .unwrap()
+            .contains("### Результат\nsecond")
+    );
+    assert!(
+        fields["result"]
+            .as_str()
+            .unwrap()
+            .contains("```md\n## Результат\nliteral\n```")
+    );
+    assert!(
+        context["git_reports"][1]["original_message"]
+            .as_str()
+            .unwrap()
+            .contains(reports[1])
+    );
+    f.mv(&task, "Done").await;
+    f.ok(
+        "edit_module",
+        json!({"id":module,"fields":{"pr_url":"https://github.com/example/product/pull/1"}}),
+    )
+    .await;
+    f.mv(&module, "In Review").await;
+    let submitted = f
+        .ok("get_context", json!({"type":"issue","id":module}))
+        .await;
+    let parsed =
+        agent_tasks::records::read_fields(submitted["issue"]["description"].as_str().unwrap())
+            .unwrap();
+    assert_eq!(parsed["result"], submitted["fields"]["result"]);
+    assert_eq!(parsed["check_result"], submitted["fields"]["check_result"]);
+    assert!(
+        parsed["result"]
+            .as_str()
+            .unwrap()
+            .contains("```md\n## Результат\nliteral\n```")
+    );
+    f.mv(&module, "In Progress").await;
+    f.mv(&task, "In Progress").await;
+    let reopened = f.ok("get_context", json!({"type":"issue","id":task})).await;
+    let parsed =
+        agent_tasks::records::read_fields(reopened["issue"]["description"].as_str().unwrap())
+            .unwrap();
+    assert!(parsed.get("result").is_none());
+    assert!(parsed.get("check_result").is_none());
+    std::fs::remove_dir_all(repo).unwrap();
+}
+
 /// list_items(type: team) discovers native teams without a Project/Issue filter.
 #[tokio::test]
 async fn list_items_discovers_teams() {
@@ -2502,7 +2638,9 @@ async fn uncertain_creates_reviews_and_frozen_reparenting() {
     assert!(history.iter().all(|r| !r.formal_review));
     f.result("atomic", &atom).await;
     f.mv(&atom, "In Review").await;
-    assert_eq!(f.call("record_review", review).await.status, "blocked");
+    let historical = f.ok("record_review", review).await;
+    assert_eq!(historical["historical"], true);
+    assert!(historical["review"].is_null());
 }
 
 /// A successful native envelope with unapplied fields never publishes a false workflow result.

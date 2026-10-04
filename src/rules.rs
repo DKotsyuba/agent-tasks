@@ -142,7 +142,7 @@ pub fn discrepancies(w: &Work, graph: &[Work]) -> Vec<String> {
         return vec!["Issue has no MCP workflow data".into()];
     };
     let mut e = vec![];
-    if m.pending.is_some() {
+    if m.pending.is_some() || m.pending_review.is_some() {
         e.push("A write is pending; retry the same request_id and arguments".into());
     }
     if w.status().ok() != Some(m.status) {
@@ -374,9 +374,44 @@ fn result(e: &mut Vec<String>, w: &Work) {
         needs(e, &w.fields, &["artifact_url"]);
     }
 }
+
+/// Validate a native description-only change and return an adopted in-memory candidate.
+/// Unknown prose remains exact; full field schema and cross-field references must be valid.
+/// No round/revision or native state changes occur here; transition execution owns invalidation.
+pub fn adopt_description(w: &Work, graph: &[Work]) -> Result<Work> {
+    let m = w.managed()?;
+    let description = w.native["description"].as_str().unwrap_or("");
+    let fields = crate::records::read_fields(description)?;
+    crate::catalog::Catalog::new()?.validate_fields(m.kind, &fields)?;
+    crate::gateway::Gateway::check_fields(m.kind, &fields, m.parent_id.as_deref(), graph)?;
+    let mut candidate = w.clone();
+    candidate.fields = fields.clone();
+    if let Some(meta) = &mut candidate.meta {
+        meta.fields = fields;
+        meta.description = description.to_owned();
+    }
+    Ok(candidate)
+}
+
 /// Evaluate an explicit transition; context uses this same function for check-only output.
 /// `role` is trusted caller attribution, not an authentication permission system.
 pub fn transition(w: &Work, graph: &[Work], target: Status, role: &str) -> Vec<String> {
+    let adopted;
+    let w = if target == Status::InProgress
+        && w.meta.as_ref().is_some_and(|m| {
+            matches!(m.status, Status::InReview | Status::Done)
+                && w.native["description"] != m.description
+        }) {
+        match adopt_description(w, graph) {
+            Ok(candidate) => {
+                adopted = candidate;
+                &adopted
+            }
+            Err(error) => return vec![error.to_string()],
+        }
+    } else {
+        w
+    };
     let Some(m) = &w.meta else {
         return vec!["Unmanaged work cannot be moved".into()];
     };
@@ -394,8 +429,10 @@ pub fn transition(w: &Work, graph: &[Work], target: Status, role: &str) -> Vec<S
     if target == Status::InProgress && m.kind != Kind::Task && role != "orchestrator" {
         e.push("Only the orchestrator starts Epic, Module or Atomic work".into());
     }
-    if matches!(target, Status::InReview | Status::Done)
-        && let Some(p) = parent(w).and_then(|id| find(graph, id))
+    if matches!(
+        target,
+        Status::InReview | Status::Done | Status::Canceled | Status::Duplicate
+    ) && let Some(p) = parent(w).and_then(|id| find(graph, id))
     {
         if p.status().ok() != Some(Status::InProgress) {
             e.push("Keep the parent In Progress until its children finish".into());

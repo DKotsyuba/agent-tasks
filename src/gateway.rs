@@ -463,8 +463,17 @@ impl Gateway {
         let content = patch_description(
             "",
             &json!({"description":description,"repository_path":a["repository_path"],"repository_url":a["repository_url"]}),
-        );
+        )?;
         let project = if let Some(p) = self.store.optional("QProject", "project", id).await? {
+            let teams = self
+                .store
+                .pages("QProjectTeams", "/project/teams", json!({"id":id}))
+                .await?;
+            require(
+                teams.len() == 1 && teams[0]["id"] == a["team_id"],
+                "REQUEST_CONFLICT",
+                "Existing Project team membership differs from this request",
+            )?;
             require(
                 p["name"] == title
                     && markdown_equivalent(&content, p["content"].as_str().unwrap_or("")),
@@ -570,7 +579,7 @@ impl Gateway {
             input["content"] = json!(patch_description(
                 p["content"].as_str().unwrap_or(""),
                 &fields
-            ));
+            )?);
         }
         require(
             !input.as_object().unwrap().is_empty(),
@@ -835,7 +844,7 @@ impl Gateway {
             crate::git::validate_repository(path)?;
         }
         Self::check_fields(kind, &fields, parent, &graph)?;
-        let description = patch_description("", &fields);
+        let description = patch_description("", &fields)?;
         let native = if let Some(existing) = self.store.optional("QIssue", "issue", id).await? {
             require(
                 existing["project"]["id"] == project
@@ -884,6 +893,7 @@ impl Gateway {
             creation: a.clone(),
             last_request: None,
             pending: None,
+            pending_review: None,
         };
         self.store
             .save(&native, &meta)
@@ -922,8 +932,15 @@ impl Gateway {
         }
         self.store.save(&w.native, &m).await
     }
-    /// Validate cross-field references before any write, without requiring readiness in Backlog/Todo.
-    fn check_fields(kind: Kind, f: &Value, parent: Option<&str>, graph: &[Work]) -> Result<()> {
+    /// Validate cross-field references and true nested headings before any write.
+    /// Code headings remain literal; field readiness is checked separately when starting.
+    /// Shared by edits/creates and description adoption; invalid ownership/type references fail.
+    pub(crate) fn check_fields(
+        kind: Kind,
+        f: &Value,
+        parent: Option<&str>,
+        graph: &[Work],
+    ) -> Result<()> {
         require(
             f["work_type"].is_string(),
             "INVALID_INPUT",
@@ -932,7 +949,7 @@ impl Gateway {
         for value in f.as_object().into_iter().flat_map(|o| o.values()) {
             if let Some(s) = value.as_str() {
                 require(
-                    !s.lines().any(|line| line.starts_with("## ")),
+                    !crate::sections::has_field_boundary(s),
                     "INVALID_INPUT",
                     "Use level-three or deeper headings inside field values",
                 )?;
@@ -1026,6 +1043,11 @@ impl Gateway {
     /// Continue only the identical prepared write; another request must resolve the uncertainty first.
     async fn resume(&self, w: &Work, request: &Value) -> Result<Option<Value>> {
         let m = w.managed()?;
+        require(
+            m.pending_review.is_none(),
+            "PENDING_OPERATION",
+            "Retry the pending review request with unchanged arguments first",
+        )?;
         if let Some(p) = &m.pending {
             require(
                 p.request == *request,
@@ -1225,7 +1247,10 @@ impl Gateway {
             .map_err(Fault::uncertain)
     }
     /// Apply one managed issue edit for `kind`; missing title normalizes the existing title, missing priority preserves it, and priority zero clears it.
-    /// Empty or title/priority-only edits preserve native descriptions, stored fields and review identity in any status, without validating or adopting legacy content; requirement/parent edits validate content, invalidate review and require reopening reviewed work, except the existing Module merge-report allowance. Returns the confirmed issue outcome or a safe conflict/write fault.
+    /// Empty calls and title/priority-only edits preserve descriptions and review identity without adopting legacy content.
+    /// Explicit fields (including an empty object) adopt changed native descriptions as content edits;
+    /// requirement/parent changes invalidate review and require reopening reviewed work, except Module merge reports.
+    /// Returns the confirmed outcome or a safe validation/conflict/write fault.
     /// Explicit repository_path edits validate the local Git checkout before preparing a write.
     async fn edit_work(&self, kind: Kind, a: &Value) -> Result<Value> {
         let (w, graph) = self
@@ -1256,7 +1281,12 @@ impl Gateway {
         };
         let parent_changed =
             parent_supplied && resolved_parent.as_deref() != m.parent_id.as_deref();
-        let presentation_only = patch.as_object().is_some_and(|o| o.is_empty()) && !parent_changed;
+        let presentation_only = patch.as_object().is_some_and(|o| o.is_empty())
+            && !parent_changed
+            && (a.get("fields").is_none()
+                || a.get("title").is_some()
+                || a.get("priority").is_some()
+                || parent_supplied);
         let mut fields = if w.native["description"] == m.description || presentation_only {
             m.fields.clone()
         } else {
@@ -1270,7 +1300,9 @@ impl Gateway {
             && a.get("priority").is_none()
             && !parent_supplied
             && w.native["description"] == m.description;
-        let content_edit = !patch.as_object().unwrap().is_empty() || parent_changed;
+        let content_edit = !patch.as_object().unwrap().is_empty()
+            || parent_changed
+            || (!presentation_only && w.native["description"] != m.description);
         require(
             !matches!(m.status, Status::InReview | Status::Done) || merge_only || !content_edit,
             "REOPEN_REQUIRED",
@@ -1324,7 +1356,7 @@ impl Gateway {
         next.fields = fields;
         if !presentation_only {
             next.description =
-                patch_description(w.native["description"].as_str().unwrap_or(""), &patch);
+                patch_description(w.native["description"].as_str().unwrap_or(""), &patch)?;
         }
         if content_edit && !merge_only {
             next.revision += 1;
@@ -1461,20 +1493,8 @@ impl Gateway {
             .unwrap()
             .iter()
             .map(|(key, value)| {
-                // Native level-two headings delimit workflow fields, so source headings render deeper.
-                let body = value
-                    .as_str()
-                    .unwrap()
-                    .lines()
-                    .map(|line| {
-                        if line.starts_with("## ") {
-                            format!("#{line}")
-                        } else {
-                            line.to_owned()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                // Actual H1/H2 headings delimit fields; normalize ATX/setext while retaining code.
+                let body = crate::sections::nest_field_headings(value.as_str().unwrap());
                 (key.clone(), json!(body))
             })
             .collect::<serde_json::Map<_, _>>();
@@ -1490,7 +1510,7 @@ impl Gateway {
             next.fields[key] = value.clone();
         }
         next.description =
-            patch_description(w.native["description"].as_str().unwrap_or(""), &patch);
+            patch_description(w.native["description"].as_str().unwrap_or(""), &patch)?;
         if changed {
             next.revision += 1;
             next.review = None;
@@ -1504,6 +1524,8 @@ impl Gateway {
     }
 
     /// Guard and explicitly move work; check_only never persists intent, labels or changes.
+    /// Reopening reviewed/Done work validates and adopts the current native description,
+    /// preserves unknown prose and invalidates the round once; structural drift still refuses.
     /// Module submission stores the same derived current-child result used by context/readiness,
     /// preserving a real PR requirement and binding review to the resulting content revision.
     async fn move_status(&self, a: &Value) -> Result<Value> {
@@ -1519,18 +1541,39 @@ impl Gateway {
                 .with_guidance(v, w.id(), &graph, text(a, "actor_role")?)
                 .await);
         }
-        let errors = rules::transition(&w, &graph, target, text(a, "actor_role")?);
+        let adopted;
+        let w = if target == Status::InProgress
+            && matches!(w.managed()?.status, Status::InReview | Status::Done)
+            && w.native["description"] != w.managed()?.description
+        {
+            adopted = match rules::adopt_description(&w, &graph) {
+                Ok(candidate) => candidate,
+                Err(_) if a["check_only"] == true => {
+                    return Ok(crate::guidance::preview_effects(
+                        &w,
+                        &graph,
+                        target,
+                        text(a, "actor_role")?,
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
+            &adopted
+        } else {
+            &w
+        };
+        let errors = rules::transition(w, &graph, target, text(a, "actor_role")?);
         if a["check_only"] == true {
             // The preview shares the exact guards and, when allowed, the exact effect plan
             // the executing transition follows; it performs no write.
             let mut preview =
-                crate::guidance::preview_effects(&w, &graph, target, text(a, "actor_role")?);
+                crate::guidance::preview_effects(w, &graph, target, text(a, "actor_role")?);
             preview["status"] = json!(target);
             return Ok(preview);
         }
         rules::enforce(errors)?;
         let m = w.managed()?;
-        if w.status()? == target && m.status == target && !rules::restart_integration(&w, &graph) {
+        if w.status()? == target && m.status == target && !rules::restart_integration(w, &graph) {
             return Ok(self
                 .with_guidance(
                     json!({"issue":w.native,"unchanged":true}),
@@ -1541,7 +1584,7 @@ impl Gateway {
                 .await);
         }
         if target == Status::Duplicate {
-            self.duplicate_target(&w, &m.fields).await?;
+            self.duplicate_target(w, &m.fields).await?;
         }
         let states = self
             .states(w.native["team"]["id"].as_str().unwrap())
@@ -1551,7 +1594,7 @@ impl Gateway {
         next.status = target;
         let mut input = json!({"stateId":state});
         if target == Status::InReview && m.kind == Kind::Module {
-            let report = crate::reports::module_report(&w, &graph)?;
+            let report = crate::reports::module_report(w, &graph)?;
             let patch = json!({"result":report.summary,"check_result":report.reported_checks});
             self.catalog.validate_fields(Kind::Module, &patch)?;
             if next.fields["result"] != patch["result"]
@@ -1560,7 +1603,7 @@ impl Gateway {
                 next.fields["result"] = patch["result"].clone();
                 next.fields["check_result"] = patch["check_result"].clone();
                 next.description =
-                    patch_description(w.native["description"].as_str().unwrap_or(""), &patch);
+                    patch_description(w.native["description"].as_str().unwrap_or(""), &patch)?;
                 next.revision += 1;
                 next.review = None;
                 input["description"] = json!(next.description);
@@ -1570,6 +1613,7 @@ impl Gateway {
             next.round += 1;
             next.review = None;
             next.completed_at = None;
+            next.integration.clear();
             if next.kind == Kind::Epic && next.frozen_modules.is_none() {
                 next.frozen_modules = Some(
                     rules::children(&graph, w.id())
@@ -1587,7 +1631,7 @@ impl Gateway {
                 for k in remove.as_object().unwrap().keys() {
                     next.fields.as_object_mut().unwrap().remove(k);
                 }
-                next.description = patch_description(&m.description, &remove);
+                next.description = patch_description(&m.description, &remove)?;
                 input["description"] = json!(next.description);
                 next.revision += 1;
             }
@@ -1600,7 +1644,7 @@ impl Gateway {
                     .collect();
             }
         }
-        let confirmed = self.update(&w, next, input, request).await?;
+        let confirmed = self.update(w, next, input, request).await?;
         Ok(self
             .with_guidance(confirmed, w.id(), &graph, text(a, "actor_role")?)
             .await)
@@ -1903,41 +1947,20 @@ impl Gateway {
         Ok(json!({"comment":changed,"replayed":false}))
     }
 
-    /// Persist a native review activity comment and current-round decision, returning its
-    /// permalink without implicitly transitioning work or adding Task review.
+    /// Publish a review through a schema-three intent before its native comment side effect.
+    /// Identical retries resume the captured predecessor; older reports return historical NOOP.
+    /// Legacy comments recover only at the current clean stamp and with strictly newer native time.
+    /// No review moves work status; competing mutations must finish this pending request first.
     async fn review(&self, a: &Value) -> Result<Value> {
         let (w, graph) = self
             .loaded(&self.resolve("issue", text(a, "id")?).await?)
             .await?;
         let m = w.managed()?;
         let request = Self::request("record_review", a);
-        if self.resume(&w, &request).await?.is_some() {
-            let restored = self.store.work(w.id()).await.map_err(Fault::uncertain)?;
-            let comment = self
-                .store
-                .linear
-                .object("QComment", "comment", text(a, "request_id")?)
-                .await
-                .map_err(Fault::uncertain)?;
-            return Ok(self
-                .with_guidance(
-                    json!({"review":restored.managed()?.review,"issue_id":w.id(),"comment":comment,"url":comment["url"],"replayed":true}),
-                    w.id(),
-                    &graph,
-                    "reviewer",
-                )
-                .await);
-        }
-        rules::enforce(rules::discrepancies(&w, &graph))?;
         require(
-            m.kind != Kind::Task,
-            "NO_TASK_REVIEW",
-            "Review the entire Module instead",
-        )?;
-        require(
-            w.status()? == Status::InReview,
-            "NOT_IN_REVIEW",
-            "Move this work to In Review first",
+            m.pending.is_none(),
+            "PENDING_OPERATION",
+            "Retry the pending native write first",
         )?;
         let id = text(a, "request_id")?;
         let content = format!(
@@ -1948,51 +1971,183 @@ impl Gateway {
                 .filter(|v| !v.trim().is_empty())
                 .unwrap_or("None")
         );
-        let body = crate::activity::render(
-            "review",
-            "reviewer",
-            text(a, "actor")?,
-            &content,
-            &json!({"reviewer":a["reviewer"],"session":a["session"],"verdict":a["verdict"],
-                "round":m.round,"revision":m.revision,"source_links":a["artifacts"]}),
-        )?;
-        if let Some(comment) = self.store.optional("QComment", "comment", id).await? {
+        let body_at = |round, revision| {
+            crate::activity::render(
+                "review",
+                "reviewer",
+                text(a, "actor")?,
+                &content,
+                &json!({"reviewer":a["reviewer"],"session":a["session"],"verdict":a["verdict"],
+                "round":round,"revision":revision,"source_links":a["artifacts"]}),
+            )
+        };
+        let mut existing = self.store.optional("QComment", "comment", id).await?;
+        let intent = if let Some(pending) = &m.pending_review {
             require(
-                comment["issue"]["id"] == w.id()
-                    && markdown_equivalent(&body, comment["body"].as_str().unwrap_or("")),
-                "REQUEST_CONFLICT",
-                "Review request_id already names another report",
+                pending.request == request,
+                "PENDING_OPERATION",
+                "Retry the pending review with unchanged arguments",
             )?;
+            require(
+                m.review == pending.predecessor
+                    && m.round == pending.review.round
+                    && m.revision == pending.review.revision,
+                "PENDING_CONFLICT",
+                "Review predecessor or content stamp changed",
+            )?;
+            pending.clone()
         } else {
+            if let Some(comment) = &existing {
+                let activity = crate::activity::record(comment, None)?;
+                let round = activity.round.ok_or_else(|| {
+                    Fault::new("REQUEST_CONFLICT", "Review comment has no original round")
+                })?;
+                let revision = activity.revision.ok_or_else(|| {
+                    Fault::new(
+                        "REQUEST_CONFLICT",
+                        "Review comment has no original revision",
+                    )
+                })?;
+                require(
+                    comment["issue"]["id"] == w.id()
+                        && markdown_equivalent(
+                            &body_at(round, revision)?,
+                            comment["body"].as_str().unwrap_or(""),
+                        ),
+                    "REQUEST_CONFLICT",
+                    "Review request_id already names another report",
+                )?;
+                let mut historical = round != m.round || revision != m.revision;
+                if let Some(previous) = &m.review {
+                    if previous.id == id {
+                        historical = true;
+                    } else if !historical {
+                        let predecessor = self
+                            .store
+                            .linear
+                            .object("QComment", "comment", &previous.id)
+                            .await?;
+                        let created = comment["createdAt"]
+                            .as_str()
+                            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+                        let before = predecessor["createdAt"]
+                            .as_str()
+                            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+                        require(
+                            created.is_some() && before.is_some(),
+                            "REQUEST_CONFLICT",
+                            "Review order is unknown",
+                        )?;
+                        if created < before {
+                            historical = true;
+                        } else {
+                            require(
+                                created > before,
+                                "REQUEST_CONFLICT",
+                                "Review timestamps do not establish order",
+                            )?;
+                        }
+                    }
+                }
+                if historical {
+                    return Ok(self
+                        .with_guidance(
+                            json!({"review":m.review,"issue_id":w.id(),"comment":comment,
+                        "url":comment["url"],"replayed":true,"historical":true}),
+                            w.id(),
+                            &graph,
+                            "reviewer",
+                        )
+                        .await);
+                }
+            }
+            crate::model::PendingReview {
+                request: request.clone(),
+                predecessor: m.review.clone(),
+                review: Review {
+                    id: id.into(),
+                    round: m.round,
+                    revision: m.revision,
+                    accepted: a["verdict"] == "accepted",
+                },
+                body: body_at(m.round, m.revision)?,
+            }
+        };
+        let mut guarded = w.clone();
+        if let Some(meta) = &mut guarded.meta {
+            meta.pending_review = None;
+        }
+        rules::enforce(rules::discrepancies(&guarded, &graph))?;
+        require(
+            m.kind != Kind::Task,
+            "NO_TASK_REVIEW",
+            "Review the entire Module instead",
+        )?;
+        require(
+            w.status()? == Status::InReview,
+            "NOT_IN_REVIEW",
+            "Move this work to In Review first",
+        )?;
+        if m.pending_review.is_none() && existing.is_none() {
+            let mut prepared = m.clone();
+            prepared.schema = 3;
+            prepared.pending_review = Some(intent.clone());
+            self.store
+                .save(&w.native, &prepared)
+                .await
+                .map_err(Fault::uncertain)?;
+        }
+        if existing.is_none() {
             self.store
                 .linear
                 .call(
                     "MCreateComment",
-                    json!({"input":{"id":id,"issueId":w.id(),"body":body}}),
+                    json!({"input":{"id":id,"issueId":w.id(),"body":intent.body}}),
                 )
                 .await?;
+            existing = Some(
+                self.store
+                    .linear
+                    .object("QComment", "comment", id)
+                    .await
+                    .map_err(Fault::uncertain)?,
+            );
         }
-        let comment = self
-            .store
-            .linear
-            .object("QComment", "comment", id)
-            .await
-            .map_err(Fault::uncertain)?;
-        let mut next = m.clone();
-        next.review = Some(Review {
-            id: id.into(),
-            round: m.round,
-            revision: m.revision,
-            accepted: a["verdict"] == "accepted",
-        });
+        let comment =
+            existing.ok_or_else(|| Fault::new("RECORD_MISSING", "Review comment disappeared"))?;
+        require(
+            comment["issue"]["id"] == w.id()
+                && markdown_equivalent(&intent.body, comment["body"].as_str().unwrap_or("")),
+            "NATIVE_STATE_MISMATCH",
+            "Linear did not confirm the review body",
+        )
+        .map_err(Fault::uncertain)?;
+        let fresh = self.store.work(w.id()).await.map_err(Fault::uncertain)?;
+        let fresh_meta = fresh.managed()?;
+        require(
+            fresh_meta.review == intent.predecessor
+                && fresh_meta.round == intent.review.round
+                && fresh_meta.revision == intent.review.revision,
+            "PENDING_CONFLICT",
+            "Review predecessor changed before finalization",
+        )?;
+        let mut clean = fresh.clone();
+        if let Some(meta) = &mut clean.meta {
+            meta.pending_review = None;
+        }
+        rules::enforce(rules::discrepancies(&clean, &graph))?;
+        let mut next = fresh_meta.clone();
+        next.review = Some(intent.review);
+        next.pending_review = None;
         next.last_request = Some(request);
         self.store
-            .save(&w.native, &next)
+            .save(&fresh.native, &next)
             .await
             .map_err(Fault::uncertain)?;
         Ok(self
             .with_guidance(
-                json!({"review":next.review,"issue_id":w.id(),"comment":comment,"url":comment["url"],"replayed":false}),
+                json!({"review":next.review,"issue_id":w.id(),"comment":comment,
+            "url":comment["url"],"replayed":false}),
                 w.id(),
                 &graph,
                 "reviewer",
@@ -2000,8 +2155,17 @@ impl Gateway {
             .await)
     }
     /// Load one complete Project graph and bounded native activity, then compose a read-only view.
-    /// The limit prevents a large Project from turning a single overview into unbounded API reads.
-    async fn overview_data(&self, project_id: &str) -> Result<(Value, BTreeMap<String, Value>)> {
+    /// Returns the full view, native Project, complete graph and bounded activity for optional comparison.
+    /// The limit prevents unbounded API reads; generated updates use only the view, never a snapshot.
+    async fn overview_data(
+        &self,
+        project_id: &str,
+    ) -> Result<(
+        Value,
+        Value,
+        Vec<Work>,
+        BTreeMap<String, Vec<crate::activity::ActivityRecord>>,
+    )> {
         let project = self.project(project_id).await?;
         let graph = self.store.graph(project_id).await?;
         require(
@@ -2046,16 +2210,23 @@ impl Gateway {
             activity.insert(id.to_owned(), records);
         }
         let overview = crate::context::project_overview(&project, &graph, &activity)?;
-        let snapshot = crate::context::compact_snapshot(&project, &graph, &activity)?;
-        Ok((overview, snapshot))
+        Ok((overview, project, graph, activity))
     }
 
     /// Return a full overview or a same-Project delta and a fresh opaque comparison point.
     /// Missing process-local baselines fall back to a full response with baseline_expired=true;
-    /// neither branch writes to Linear or launches background activity.
+    /// Oversized snapshots return the full view with null cursor and baseline_unavailable.
+    /// Neither branch writes to Linear or launches background activity.
     async fn overview(&self, a: &Value) -> Result<Value> {
         let project_id = self.resolve("project", text(a, "project_id")?).await?;
-        let (mut full, snapshot) = self.overview_data(&project_id).await?;
+        let (mut full, project, graph, activity) = self.overview_data(&project_id).await?;
+        let Some(snapshot) = crate::context::compact_snapshot(&project, &graph, &activity)? else {
+            full["observed_at"] = json!(chrono::Utc::now().to_rfc3339());
+            full["cursor"] = Value::Null;
+            full["baseline_expired"] = json!(false);
+            full["baseline_unavailable"] = json!("Comparison snapshot exceeds 256 KiB");
+            return Ok(full);
+        };
         let comparison = self
             .baselines
             .lock()

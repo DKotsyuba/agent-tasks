@@ -62,6 +62,12 @@ pub struct Database {
     pub tick: u64,
     /// Mutation operation whose response should be lost after applying its write.
     pub lose: Option<String>,
+    /// Lose the Nth matching response after its side effect, for multi-save crash boundaries.
+    pub lose_nth: Option<(String, u32)>,
+    /// Delay the next matching request before its mock side effect without holding the database lock.
+    pub delay_next: Option<(String, std::time::Duration)>,
+    /// True while that injected provider delay is active, for deterministic process interruption.
+    pub delay_active: bool,
     /// Override only the next created Comment payload body, leaving native storage intact.
     pub comment_response_body: Option<String>,
     /// Override only the next returned ProjectUpdate payload body, leaving storage intact.
@@ -119,8 +125,27 @@ async fn graphql(
     State(db): State<Arc<Mutex<Database>>>,
     Json(request): Json<Value>,
 ) -> Json<Value> {
-    let mut db = db.lock().await;
     let op = request["operationName"].as_str().unwrap();
+    let delay = {
+        let mut state = db.lock().await;
+        if state
+            .delay_next
+            .as_ref()
+            .is_some_and(|(name, _)| name == op)
+        {
+            state.delay_active = true;
+            state.delay_next.take().map(|(_, duration)| duration)
+        } else {
+            None
+        }
+    };
+    if let Some(duration) = delay {
+        tokio::time::sleep(duration).await;
+    }
+    let mut db = db.lock().await;
+    if delay.is_some() {
+        db.delay_active = false;
+    }
     *db.operation_counts.entry(op.to_owned()).or_insert(0) += 1;
     let v = &request["variables"];
     let id = v["id"].as_str().unwrap_or("");
@@ -169,6 +194,10 @@ async fn graphql(
             ),
         )),
         "QTeams" => Some(("teams", page(db.teams.values().cloned().collect()))),
+        "QProjectTeams" => Some((
+            "project",
+            json!({"teams":issue_page(db.projects[id]["teams"]["nodes"].as_array().unwrap().clone(),v)}),
+        )),
         "QIssue" => db
             .issues
             .values()
@@ -677,6 +706,15 @@ async fn graphql(
         }
         _ => panic!("Unimplemented fixture operation: {op}"),
     };
+    if let Some((name, left)) = &mut db.lose_nth
+        && name == op
+    {
+        *left -= 1;
+        if *left == 0 {
+            db.lose = Some(op.into());
+            db.lose_nth = None;
+        }
+    }
     if db.lose.as_deref() == Some(op) {
         db.lose = None;
         return Json(json!({"errors":[{"message":"simulated response loss"}]}));
@@ -760,6 +798,10 @@ impl Fixture {
             task,
             team,
         }
+    }
+    /// Return the loopback mock GraphQL endpoint for a separate production-server test process.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
     }
     /// Replace all process memory while retaining only native Linear data.
     pub fn restart(&mut self) {

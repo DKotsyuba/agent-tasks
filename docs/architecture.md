@@ -37,6 +37,10 @@ Project creation also creates native `Runbook` and `Решения` documents. R
 
 ## Public data fields
 
+Managed fields own recognized level-two CommonMark sections only. Fenced and indented code headings stay literal; unknown sections and prose retain their source bytes. `sections::level_two_sections` exposes exact heading/body/end spans; `records::read_fields` rejects duplicate real fields, and `patch_description` returns a validation error before changing ambiguous content. Nested prose headings should use level three or deeper.
+
+Both real level-one and level-two headings end field bodies. Producers reject those headings inside values and verify the complete generated field map before any native write; a code fence that swallows generated siblings fails validation. Imported Git reports normalize actual ATX/setext H1/H2 headings to H3 while preserving code literals and inline Markdown; original commit messages remain immutable history.
+
 Create calls require `request_id`, `actor`, `title`, `project_id` and `team_id`; Task also requires `parent_id`. Issue titles are stored with exactly one leading kind marker (`[EPIC]`, `[MODULE]`, `[TASK]`, `[ATOMIC]`); repeated or wrong recognized markers are normalized, unrelated markers such as `[UI]` are preserved, and a marker without a title is rejected. Project titles remain unchanged. Issue `priority` is native Linear priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. Omitted create priority is 0; omitted edit priority preserves the native value and 0 clears it. Issue fields may be prepared in Backlog/Todo. Project creation instead requires `team_id`, `title` and `description`; both `repository_path` and `repository_url` are optional for planning. A supplied path must be an absolute existing local Git checkout; the optional external URL accepts HTTP(S), including non-GitHub hosts. Legacy URL-only calls remain valid.
 
 Issue create/edit calls accept a `fields` object. Omitted values are preserved; null removes a nullable value. `work_type` defaults to `code` for Module/Task/Atomic and `non_code` for Epic. Use `non_code` explicitly for document/administrative work and `integration` for an integration Atomic. Reference fields accept UUIDs or the native Linear permalinks of the agreed input matrix; permalinks are resolved and stored as normalized UUIDs. Permalink resolution rolls out with the coordinated runtime release — earlier v2 runtimes accept every UUID input unchanged.
@@ -87,9 +91,11 @@ Module review readiness uses that same composer and still requires every child f
 
 `get_overview(project_id)` loads one complete Project work graph, then bounded native activity (up to 300 work items and 100 updates). It reports active Epics with every frozen Module, active standalone Modules, Atomics, retired work, open questions and items awaiting review. Task progress comes only from `ModuleReport`; a missing frozen Module, recorded child or other native drift fails explicitly. The assigned lead is a reference to a session, not a claim that its process is running. The response contains an unpublished Markdown ProjectUpdate draft. `save_project_update` may omit `body` on creation and compose this draft during its explicit write; the caller must still select `health` and `reason`. Retries of that creation read the native update by request ID before regenerating a draft. Edits require an explicit body for exact retry behavior. Neither overview reads nor draft generation publish an update.
 
-Every overview includes an observation time and opaque cursor. A later call with that cursor returns status, assignment, result, review and discussion changes plus a new cursor; an unchanged result has an empty `changes` array only after a valid comparison. The gateway retains at most 32 compact snapshots of up to 256 KiB each for 30 minutes. A restart, expiry, eviction, unknown cursor or cursor from another Project returns the full overview with `baseline_expired: true`; a first request without a cursor returns the full overview without an expiry flag. This process memory is only a comparison aid, never workflow storage. Reading an overview never writes to Linear or runs a watcher.
+Every overview includes an observation time. A compact snapshot over 256 KiB returns a full overview with a null cursor and explicit `baseline_unavailable`, without inventing an empty delta. Snapshot construction happens only in the overview read; generated ProjectUpdates do not require one. Otherwise the overview includes an opaque cursor. A later call with that cursor returns status, assignment, result, review and discussion changes plus a new cursor; an unchanged result has an empty `changes` array only after a valid comparison. The gateway retains at most 32 compact snapshots of up to 256 KiB each for 30 minutes. A restart, expiry, eviction, unknown cursor or cursor from another Project returns the full overview with `baseline_expired: true`; a first request without a cursor returns the full overview without an expiry flag. This process memory is only a comparison aid, never workflow storage. Reading an overview never writes to Linear or runs a watcher.
 
 Machine data lives on one small native attachment per managed issue: kind, expected parent/project/status, known children, frozen membership, implementation/review round, current review, integration completion snapshot and any prepared write. The attachment is selected by its deterministic UUID, never by title or current placement. Native Duplicate merges transfer attachments to the original issue; `Attachment.originalIssue` preserves their originating issue and takes precedence over current `issue` when validating reads and writes. Each original issue retains its own distinct canonical record. Recorded children remain visible to guards if moved to a different native Project. No signatures or proof certificates are used. The attachment links back to the issue. Native dates/history remain available in Linear; MCP does not maintain a second time-in-status system.
+
+When a transferred historical Duplicate record has `originalIssue` explicitly null, single and bulk readers require its canonical attachment UUID, completed Duplicate metadata, native Duplicate state, matching Project, stored target permalink and exactly one active directed native duplicate relation to its physical owner. All relation pages are read within existing bounds; missing, foreign or ambiguous provenance refuses. This read-only corroboration never repairs, relocates or grants write ownership: `save` still requires native attachment provenance.
 
 ## Epic composition
 
@@ -124,7 +130,11 @@ Activity comments show Kind, Role and Actor on separate lines, with optional Ses
 
 `record_review` requires In Review and a Module, Atomic or Epic. It records a native comment with reviewer, summary, findings, artifact links and `accepted`/`changes_requested`. It never changes status. A Task is reviewed only within its Module.
 
+Before creating a review comment, `Meta.pending_review` stores its normalized request, exact body, intended stamp and captured predecessor. Only that request may resume; completion checks the predecessor again. Historical repeats return the current decision without repointing it. A legacy comment whose save was interrupted is adopted only for a clean current In Review stamp; with a predecessor, its native creation time must be strictly newer. Equal or unavailable times conflict. Readers accept attachment schemas 2 and 3; new ordinary work remains schema 2, storing a review intent upgrades to 3, and later writes never downgrade 3. Older schema-two runtimes reject schema 3. Project creation replay reads every native team page and requires exactly the requested single team.
+
 The orchestrator returns work to In Progress after changes are requested. A new work round clears its current results/checks/artifacts and current review. Earlier native reports and history remain. New outputs and a new review are required. Editing reviewed content requires reopening; a Module's `merge_report` can be added after positive review without invalidating it.
+
+Reopening In Review/Done work validates and adopts the current native description before start guards. Unknown sections and literal code stay exact; new-round outputs are cleared from that adopted source, and the round/revision changes once. Structural drift and invalid fields still block. Explicit active description adoption through `fields: {}` invalidates content identity; title/priority or unchanged-parent presentation edits keep their existing identity. Changing a child's status to Canceled/Duplicate requires an In Progress parent without drift, just as closure does.
 
 PR links and merge facts remain trusted agent reports. MCP reads local commits but does not contact a remote host to verify a PR or merge. A local repository does not replace the Module's real PR, review or merge requirements. Shared bearer clients are trusted; reported roles are workflow attribution, not separate authorization principals.
 
@@ -198,8 +208,8 @@ Search uses Linear's native ranking and indexing; it does not guarantee
 exhaustive substring retrieval or immediate discovery of a newly written
 opaque token. Use a known Document URL with `get_context` for exact retrieval.
 
-File operations are three focused tools: `upload_file` reads one local file
-(host-side absolute path, bounded to 10,000,000 bytes), reserves a
+File operations are three focused tools: `upload_file` reads one opened local file
+(host-side absolute path, at most 10,000,001 captured bytes before rejecting an oversize stream), computes size/digest from those bytes, and reserves a
 deterministic native attachment ID per issue/request, and compares replay
 intent (filename, content type, size, digest, title, note) before treating a
 retry as identical; changed intent is `REQUEST_CONFLICT`. `list_files` returns
@@ -207,7 +217,7 @@ only user artifacts for one work item, excluding internal workflow
 attachments. `get_file` resolves and validates artifact ownership/type,
 downloads through the canonical authenticated asset URL while verifying the
 bytes against the digest recorded at upload time, writes through a sibling
-temporary file, and never silently overwrites a different existing file at
+temporary file, removes only its own temporary sibling on write/publication error, and never silently overwrites a different existing file at
 the same destination (`FILE_EXISTS` on conflict, `replayed: true` only for
 byte-identical content). None of these three tools returns binary content, a
 signed URL or a secret in its text response; artifact attachments live in

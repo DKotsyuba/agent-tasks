@@ -488,7 +488,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -824,7 +824,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -1238,7 +1238,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -1649,7 +1649,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -1975,7 +1975,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -2299,7 +2299,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -2681,7 +2681,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -3060,7 +3060,7 @@
           },
           "required": [],
           "additionalProperties": false,
-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
+          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
         }
       },
       "required": [
@@ -3148,7 +3148,7 @@
   },
   {
     "name": "get_overview",
-    "description": "Read one complete Project overview — active Epics with frozen Modules, standalone Modules, Atomics, retired work, open questions and work awaiting review — plus an unpublished ProjectUpdate draft and a fresh opaque cursor. A later call with that cursor returns only the changes and a new cursor; a lost, expired or foreign cursor returns the full overview with baseline_expired=true instead of guessing. Incomplete membership or native drift fails explicitly. Read-only; never publishes an update or starts work. Example: {\"project_id\":\"https://linear.app/team/project/passport\"}",
+    "description": "Read one complete Project overview — active Epics with frozen Modules, standalone Modules, Atomics, retired work, open questions and work awaiting review — plus an unpublished ProjectUpdate draft. Comparison snapshots over 256 KiB return the full overview with cursor=null and baseline_unavailable; no empty delta is invented. Otherwise a fresh opaque cursor is retained. A later call with that cursor returns only the changes and a new cursor; a lost, expired or foreign cursor returns the full overview with baseline_expired=true instead of guessing. Incomplete membership or native drift fails explicitly. Read-only; never publishes an update or starts work. Example: {\"project_id\":\"https://linear.app/team/project/passport\"}",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3670,7 +3670,7 @@
   },
   {
     "name": "move_status",
-    "description": "Check or perform one guarded status transition. check_only=true is a read-only preview returning allowed/conditions and writes nothing. Start parents before children and close children before parents; no transition ever cascades to children, and blocking conditions are reported explicitly from fresh native state. Retry an uncertain transition with identical request_id and arguments. Example: {\"request_id\":\"00000000-0000-4000-8000-000000000009\",\"actor\":\"codex:session\",\"actor_role\":\"worker\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"status\":\"In Progress\",\"check_only\":true}",
+    "description": "Check or perform one guarded status transition. check_only=true is a read-only preview returning allowed/conditions and writes nothing. Returning In Review/Done work to In Progress validates and adopts manual description-only changes while preserving unknown prose; structural drift blocks. Retirement requires an active clean parent. Start parents before children and close children before parents; no transition ever cascades to children, and blocking conditions are reported explicitly from fresh native state. Retry an uncertain transition with identical request_id and arguments. Example: {\"request_id\":\"00000000-0000-4000-8000-000000000009\",\"actor\":\"codex:session\",\"actor_role\":\"worker\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"status\":\"In Progress\",\"check_only\":true}",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3744,7 +3744,7 @@
   },
   {
     "name": "record_review",
-    "description": "Record an independent reviewer report for the current round of one In Review Module, Atomic or Epic as a native review comment: reviewer, verdict accepted/changes_requested, summary, findings and artifact links. Returns the comment permalink and never changes status — the orchestrator decides closure. Tasks have no separate review; a Task is reviewed within its Module. Example: {\"request_id\":\"00000000-0000-4000-8000-00000000000a\",\"actor\":\"codex:reviewer\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"reviewer\":\"codex:reviewer\",\"verdict\":\"accepted\",\"summary\":\"Matches the contract.\",\"findings\":\"No blockers.\",\"artifacts\":[\"https://example.com/report.txt\"]}",
+    "description": "Record an independent reviewer report for the current round of one In Review Module, Atomic or Epic as a native review comment: reviewer, verdict accepted/changes_requested, summary, findings and artifact links. Persists review intent before publication; identical retries resume it, historical reports never replace newer decisions, and legacy ordering ambiguity conflicts. Returns the comment permalink and never changes status — the orchestrator decides closure. Tasks have no separate review; a Task is reviewed within its Module. Example: {\"request_id\":\"00000000-0000-4000-8000-00000000000a\",\"actor\":\"codex:reviewer\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"reviewer\":\"codex:reviewer\",\"verdict\":\"accepted\",\"summary\":\"Matches the contract.\",\"findings\":\"No blockers.\",\"artifacts\":[\"https://example.com/report.txt\"]}",
     "inputSchema": {
       "type": "object",
       "properties": {

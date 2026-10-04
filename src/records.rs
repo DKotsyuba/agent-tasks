@@ -1,7 +1,7 @@
 //! Minimal native attachment state and lossless editing of readable Markdown sections.
 use crate::{
     linear::Linear,
-    model::{Fault, Meta, Result, Work, require},
+    model::{Fault, Meta, Result, Work, require, text},
 };
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use serde_json::{Value, json};
@@ -49,35 +49,48 @@ pub fn child_id(parent: &str, purpose: &str) -> String {
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     uuid::Uuid::from_bytes(bytes).to_string()
 }
-/// Patch only named level-two sections; all other prose and sections remain byte-for-byte.
-/// Null removes that field. Nested content should use level-three headings or deeper.
-pub fn patch_description(original: &str, patch: &Value) -> String {
+/// Patch recognized level-two fields; preserve all unrelated prose and code bytes.
+/// Null removes a field. Reject duplicate real managed headings before producing a patch.
+/// String values are Markdown; other values are serialized as fenced JSON.
+/// The generated description must round-trip every intended field; escaping headings or code
+/// fences that swallow generated boundaries are refused before a caller may persist metadata.
+pub fn patch_description(original: &str, patch: &Value) -> Result<String> {
+    let mut expected = read_fields(original)?;
     let mut output = original.to_owned();
     for (key, label) in FIELDS {
         let Some(value) = patch.get(*key) else {
             continue;
         };
-        let heading = format!("## {label}\n");
-        let positions: Vec<usize> = output
-            .match_indices(&heading)
-            .filter(|(i, _)| *i == 0 || output.as_bytes()[i - 1] == b'\n')
-            .map(|(i, _)| i)
-            .collect();
         let rendered = if value.is_null() {
+            expected.as_object_mut().unwrap().remove(*key);
             String::new()
         } else {
-            let body = value.as_str().map(str::to_owned).unwrap_or_else(|| {
-                format!("```json\n{}\n```", serde_json::to_string(value).unwrap())
-            });
-            format!("{heading}{body}\n\n")
+            let body = value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("```json\n{value}\n```"));
+            require(
+                !crate::sections::has_field_boundary(&body),
+                "INVALID_INPUT",
+                "Use level-three or deeper headings inside field values",
+            )?;
+            let rendered = format!("## {label}\n{body}\n\n");
+            let field = read_fields(&rendered)?;
+            require(
+                field
+                    .as_object()
+                    .is_some_and(|fields| fields.len() == 1 && fields.contains_key(*key)),
+                "INVALID_INPUT",
+                "Field content escapes its managed section",
+            )?;
+            expected[*key] = field[*key].clone();
+            rendered
         };
-        if let Some(&start) = positions.first() {
-            let body = start + heading.len();
-            let end = output[body..]
-                .find("\n## ")
-                .map(|i| body + i + 1)
-                .unwrap_or(output.len());
-            output.replace_range(start..end, &rendered);
+        if let Some(section) = crate::sections::level_two_sections(&output)
+            .into_iter()
+            .find(|s| s.heading == *label)
+        {
+            output.replace_range(section.start..section.end, &rendered);
         } else if !rendered.is_empty() {
             if !output.is_empty() && !output.ends_with("\n\n") {
                 output.push_str("\n\n");
@@ -85,7 +98,12 @@ pub fn patch_description(original: &str, patch: &Value) -> String {
             output.push_str(&rendered);
         }
     }
-    output
+    require(
+        read_fields(&output)? == expected,
+        "INVALID_INPUT",
+        "Field content changes generated section boundaries",
+    )?;
+    Ok(output)
 }
 /// Native persistence with fresh reads; no local workflow database or signed receipts.
 #[derive(Clone)]
@@ -109,15 +127,13 @@ fn validate_state_owner(attachment: &Value, id: &str) -> Result<()> {
         "State attachment belongs to another issue",
     )
 }
-/// Validate and parse one already-fetched state attachment for its known originating issue.
-/// Shared by the single `meta` lookup and the bulk `graph` read so both apply identical
-/// provenance/schema checks regardless of which query fetched the record.
-fn parse_state_attachment(attachment: &Value, id: &str) -> Result<Meta> {
-    validate_state_owner(attachment, id)?;
+/// Decode supported workflow metadata after the caller has corroborated attachment ownership.
+/// Invalid metadata or unsupported schemas fail without changing any native record.
+fn parse_state_metadata(attachment: &Value) -> Result<Meta> {
     let m: Meta = serde_json::from_value(attachment["metadata"]["workflow"].clone())
         .map_err(|_| Fault::new("STATE_INVALID", "Invalid workflow metadata"))?;
     require(
-        m.schema == 2,
+        matches!(m.schema, 2 | 3) && (m.schema == 3 || m.pending_review.is_none()),
         "STATE_INVALID",
         "Unsupported workflow data version",
     )?;
@@ -125,6 +141,79 @@ fn parse_state_attachment(attachment: &Value, id: &str) -> Result<Meta> {
 }
 
 impl Store {
+    /// Read one canonical attachment for `id`, preserving its deterministic originating identity.
+    /// Explicit native provenance is authoritative. With originalIssue explicitly null, a transferred
+    /// retired record is readable only when native Duplicate state, stored retirement fields and one
+    /// complete active directed duplicate relation agree with its current physical owner.
+    /// Missing, foreign or ambiguous facts refuse; this read-only fallback never enables `save`.
+    async fn read_state_attachment(&self, attachment: &Value, id: &str) -> Result<Meta> {
+        require(
+            attachment["id"] == child_id(id, "state"),
+            "STATE_INVALID",
+            "State attachment identity differs from its canonical owner",
+        )?;
+        if validate_state_owner(attachment, id).is_ok() {
+            return parse_state_metadata(attachment);
+        }
+        require(
+            attachment.get("originalIssue") == Some(&Value::Null)
+                && attachment["issue"]["id"].is_string(),
+            "STATE_INVALID",
+            "State attachment belongs to another issue",
+        )?;
+        let meta = parse_state_metadata(attachment)?;
+        require(
+            meta.status == crate::model::Status::Duplicate
+                && meta.pending.is_none()
+                && meta.pending_review.is_none(),
+            "STATE_INVALID",
+            "Transferred state lacks a completed duplicate retirement",
+        )?;
+        let source = self.linear.object("QIssue", "issue", id).await?;
+        require(
+            source["id"] == id
+                && source["state"]["type"] == "duplicate"
+                && source["project"]["id"] == meta.project_id,
+            "STATE_INVALID",
+            "Native issue does not corroborate duplicate provenance",
+        )?;
+        let owner = text(&attachment["issue"], "id")?;
+        let target = self.linear.object("QIssue", "issue", owner).await?;
+        let target_matches = meta.fields["duplicate_of"].as_str().and_then(|url| crate::context::parse_reference(url).ok())
+            .is_some_and(|reference| matches!(reference, crate::context::Reference::Issue { identifier, comment: None }
+                if target["id"] == owner && (target["id"] == identifier || target["identifier"] == identifier)));
+        require(
+            target_matches,
+            "STATE_INVALID",
+            "Stored duplicate target differs from the attachment owner",
+        )?;
+        let relations = self
+            .pages("QIssueRelations", "/issue/relations", json!({"id":id}))
+            .await?;
+        let duplicates: Vec<_> = relations
+            .iter()
+            .filter(|r| r["type"] == "duplicate")
+            .collect();
+        require(
+            duplicates.iter().all(|r| {
+                r.get("archivedAt").is_some()
+                    && r["issue"]["id"] == id
+                    && r["relatedIssue"]["id"].is_string()
+            }),
+            "STATE_INVALID",
+            "Duplicate relation provenance is incomplete",
+        )?;
+        let active: Vec<_> = duplicates
+            .into_iter()
+            .filter(|r| r["archivedAt"].is_null())
+            .collect();
+        require(
+            active.len() == 1 && active[0]["relatedIssue"]["id"] == owner,
+            "STATE_INVALID",
+            "Native duplicate relation does not uniquely corroborate the attachment owner",
+        )?;
+        Ok(meta)
+    }
     /// Read a native object, distinguishing absence from authentication and partial errors.
     pub async fn optional(&self, query: &str, field: &str, id: &str) -> Result<Option<Value>> {
         match self.linear.object(query, field, id).await {
@@ -142,7 +231,7 @@ impl Store {
         else {
             return Ok(None);
         };
-        parse_state_attachment(&a, id).map(Some)
+        self.read_state_attachment(&a, id).await.map(Some)
     }
     /// Read many deterministic state attachments in bounded chunks by native attachment ID,
     /// instead of one request per issue. A requested ID absent from the native page is simply
@@ -183,6 +272,11 @@ impl Store {
         let metadata = json!({"workflow":meta});
         if let Some(attachment) = self.optional("QAttachmentById", "attachment", &aid).await? {
             validate_state_owner(&attachment, id)?;
+            require(
+                attachment["metadata"]["workflow"]["schema"] != 3 || meta.schema == 3,
+                "STATE_INVALID",
+                "Workflow schema three must never be downgraded",
+            )?;
             self.linear
                 .call(
                     "MUpdateAttachment",
@@ -229,8 +323,9 @@ impl Store {
         ))
     }
     /// Read the whole project hierarchy, including archived children needed for frozen membership.
-    /// Reads one bulk page of state attachments (bounded chunks by deterministic ID) instead of
-    /// one request per issue; a project's request count no longer scales with its issue count.
+    /// Ordinary records use bounded bulk attachment reads instead of one lookup per issue.
+    /// Each null-provenance duplicate transfer adds bounded source/target and full relation-page
+    /// corroboration reads; request count can therefore grow with those exceptions and pagination.
     pub async fn graph(&self, project: &str) -> Result<Vec<Work>> {
         let nodes = self
             .pages(
@@ -254,7 +349,7 @@ impl Store {
         for (native, state_id) in nodes.into_iter().zip(state_ids.iter()) {
             let id = native["id"].as_str().unwrap().to_owned();
             let meta = match by_id.get(state_id) {
-                Some(a) => Some(parse_state_attachment(a, &id)?),
+                Some(a) => Some(self.read_state_attachment(a, &id).await?),
                 None => None,
             };
             let fields = meta.as_ref().map(|m| m.fields.clone()).unwrap_or(json!({}));
@@ -329,7 +424,7 @@ pub fn markdown_key(value: &str) -> String {
         )
     });
     let source = url_fields
-        .map(|fields| patch_description(value, &fields))
+        .and_then(|fields| patch_description(value, &fields).ok())
         .unwrap_or_else(|| value.to_owned());
     let events: Vec<_> = Parser::new(&source).into_offset_iter().collect();
     let ambiguous = events
@@ -638,24 +733,16 @@ fn link_end(text: &str, start: usize) -> Option<usize> {
 /// Invalid structured integration lists fail rather than retaining stale hidden values.
 pub fn read_fields(description: &str) -> Result<Value> {
     let mut fields = json!({});
+    let sections = crate::sections::level_two_sections(description);
     for (key, label) in FIELDS {
-        let heading = format!("## {label}\n");
-        let starts: Vec<_> = description
-            .match_indices(&heading)
-            .filter(|(i, _)| *i == 0 || description.as_bytes()[i - 1] == b'\n')
-            .collect();
+        let starts: Vec<_> = sections.iter().filter(|s| s.heading == *label).collect();
         require(
             starts.len() <= 1,
             "INVALID_INPUT",
             format!("Duplicate section: {label}"),
         )?;
-        if let Some((i, _)) = starts.first() {
-            let start = i + heading.len();
-            let end = description[start..]
-                .find("\n## ")
-                .map(|n| start + n)
-                .unwrap_or(description.len());
-            let body = description[start..end].trim();
+        if let Some(section) = starts.first() {
+            let body = description[section.body_start..section.end].trim();
             if !body.is_empty() {
                 fields[*key] = if *key == "integration_modules" {
                     let body = body

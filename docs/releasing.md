@@ -154,6 +154,8 @@ same bytes is a no-op; different bytes are refused. Rollback:
 `agent-tasks releases use <version> --home <home> --bin-dir <bin>`.
 Rolling back code never undoes Linear-side changes.
 
+Activation and staging errors remove only the temporary launcher, current symlink or staging directory successfully created by that operation. Pre-existing PID-named paths are refused and preserved. Failed activation remains retryable; no service restart or host configuration change is part of cleanup.
+
 The rename to `agent-tasks` does not touch the existing `agent-tasks-linear`
 0.5 installation: it is a separately named launcher and home, left running
 until the owner has verified the new install and chooses to retire it.
