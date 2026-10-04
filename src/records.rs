@@ -1,7 +1,7 @@
 //! Minimal native attachment state and lossless editing of readable Markdown sections.
 use crate::{
     linear::Linear,
-    model::{Fault, Meta, Result, Work, require},
+    model::{Fault, Meta, Result, Work, require, text},
 };
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use serde_json::{Value, json};
@@ -104,11 +104,9 @@ fn validate_state_owner(attachment: &Value, id: &str) -> Result<()> {
         "State attachment belongs to another issue",
     )
 }
-/// Validate and parse one already-fetched state attachment for its known originating issue.
-/// Shared by the single `meta` lookup and the bulk `graph` read so both apply identical
-/// provenance/schema checks regardless of which query fetched the record.
-fn parse_state_attachment(attachment: &Value, id: &str) -> Result<Meta> {
-    validate_state_owner(attachment, id)?;
+/// Decode supported workflow metadata after the caller has corroborated attachment ownership.
+/// Invalid metadata or unsupported schemas fail without changing any native record.
+fn parse_state_metadata(attachment: &Value) -> Result<Meta> {
     let m: Meta = serde_json::from_value(attachment["metadata"]["workflow"].clone())
         .map_err(|_| Fault::new("STATE_INVALID", "Invalid workflow metadata"))?;
     require(
@@ -120,6 +118,79 @@ fn parse_state_attachment(attachment: &Value, id: &str) -> Result<Meta> {
 }
 
 impl Store {
+    /// Read one canonical attachment for `id`, preserving its deterministic originating identity.
+    /// Explicit native provenance is authoritative. With originalIssue explicitly null, a transferred
+    /// retired record is readable only when native Duplicate state, stored retirement fields and one
+    /// complete active directed duplicate relation agree with its current physical owner.
+    /// Missing, foreign or ambiguous facts refuse; this read-only fallback never enables `save`.
+    async fn read_state_attachment(&self, attachment: &Value, id: &str) -> Result<Meta> {
+        require(
+            attachment["id"] == child_id(id, "state"),
+            "STATE_INVALID",
+            "State attachment identity differs from its canonical owner",
+        )?;
+        if validate_state_owner(attachment, id).is_ok() {
+            return parse_state_metadata(attachment);
+        }
+        require(
+            attachment.get("originalIssue") == Some(&Value::Null)
+                && attachment["issue"]["id"].is_string(),
+            "STATE_INVALID",
+            "State attachment belongs to another issue",
+        )?;
+        let meta = parse_state_metadata(attachment)?;
+        require(
+            meta.status == crate::model::Status::Duplicate
+                && meta.pending.is_none()
+                && meta.pending_review.is_none(),
+            "STATE_INVALID",
+            "Transferred state lacks a completed duplicate retirement",
+        )?;
+        let source = self.linear.object("QIssue", "issue", id).await?;
+        require(
+            source["id"] == id
+                && source["state"]["type"] == "duplicate"
+                && source["project"]["id"] == meta.project_id,
+            "STATE_INVALID",
+            "Native issue does not corroborate duplicate provenance",
+        )?;
+        let owner = text(&attachment["issue"], "id")?;
+        let target = self.linear.object("QIssue", "issue", owner).await?;
+        let target_matches = meta.fields["duplicate_of"].as_str().and_then(|url| crate::context::parse_reference(url).ok())
+            .is_some_and(|reference| matches!(reference, crate::context::Reference::Issue { identifier, comment: None }
+                if target["id"] == owner && (target["id"] == identifier || target["identifier"] == identifier)));
+        require(
+            target_matches,
+            "STATE_INVALID",
+            "Stored duplicate target differs from the attachment owner",
+        )?;
+        let relations = self
+            .pages("QIssueRelations", "/issue/relations", json!({"id":id}))
+            .await?;
+        let duplicates: Vec<_> = relations
+            .iter()
+            .filter(|r| r["type"] == "duplicate")
+            .collect();
+        require(
+            duplicates.iter().all(|r| {
+                r.get("archivedAt").is_some()
+                    && r["issue"]["id"] == id
+                    && r["relatedIssue"]["id"].is_string()
+            }),
+            "STATE_INVALID",
+            "Duplicate relation provenance is incomplete",
+        )?;
+        let active: Vec<_> = duplicates
+            .into_iter()
+            .filter(|r| r["archivedAt"].is_null())
+            .collect();
+        require(
+            active.len() == 1 && active[0]["relatedIssue"]["id"] == owner,
+            "STATE_INVALID",
+            "Native duplicate relation does not uniquely corroborate the attachment owner",
+        )?;
+        Ok(meta)
+    }
     /// Read a native object, distinguishing absence from authentication and partial errors.
     pub async fn optional(&self, query: &str, field: &str, id: &str) -> Result<Option<Value>> {
         match self.linear.object(query, field, id).await {
@@ -137,7 +208,7 @@ impl Store {
         else {
             return Ok(None);
         };
-        parse_state_attachment(&a, id).map(Some)
+        self.read_state_attachment(&a, id).await.map(Some)
     }
     /// Read many deterministic state attachments in bounded chunks by native attachment ID,
     /// instead of one request per issue. A requested ID absent from the native page is simply
@@ -254,7 +325,7 @@ impl Store {
         for (native, state_id) in nodes.into_iter().zip(state_ids.iter()) {
             let id = native["id"].as_str().unwrap().to_owned();
             let meta = match by_id.get(state_id) {
-                Some(a) => Some(parse_state_attachment(a, &id)?),
+                Some(a) => Some(self.read_state_attachment(a, &id).await?),
                 None => None,
             };
             let fields = meta.as_ref().map(|m| m.fields.clone()).unwrap_or(json!({}));
