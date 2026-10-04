@@ -806,9 +806,15 @@ async fn archive_native_followup() {
         .work(&p.id("subject"))
         .await
         .expect("source identity");
-    let source_item = agent_tasks::archive::collect_item(&p.store, &origin)
-        .await
-        .expect("actual source snapshot");
+    let source_document =
+        agent_tasks::archive::read_document_fingerprint(&p.store, &p.id("size-document"))
+            .await
+            .expect("exact existing native Document witness");
+    observed(
+        source_document.issue_id == p.id("subject"),
+        "Existing Document moved outside owned subject",
+    )
+    .expect("exact source Document ownership");
     let root = p.store.work(&epic).await.expect("managed target");
     let mut set = agent_tasks::archive::ArchiveSet {
         epic: agent_tasks::archive::collect_item(&p.store, &root)
@@ -849,16 +855,10 @@ async fn archive_native_followup() {
     agent_tasks::archive::preservation_readback(&p.store, &attach)
         .await
         .expect("actual copied byte/readback proof");
-    let source_document = source_item
-        .documents
-        .iter()
-        .find(|d| d["id"] == p.id("size-document"))
-        .expect("existing size Document")
-        .clone();
+
     let move_doc = agent_tasks::archive::PreservationAction::ReparentDocument {
         target_issue: epic.clone(),
-        document: agent_tasks::archive::document_fingerprint(&source_document)
-            .expect("compact exact witness"),
+        document: source_document,
     };
     preservation_step(&mut p, "followup-reparent-document", &move_doc)
         .await

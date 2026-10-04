@@ -282,8 +282,10 @@ pub fn document_fingerprint(document: &Value) -> Result<DocumentFingerprint> {
         metadata: json!({"id":document["id"],"title":document["title"],"url":document["url"],"archivedAt":document["archivedAt"],"hiddenAt":document["hiddenAt"],"createdAt":document["createdAt"],"creator":document["creator"]}),
     })
 }
-/// Fetch the same complete native Document witness, including paginated threaded comments.
-async fn read_document_fingerprint(store: &Store, id: &str) -> Result<DocumentFingerprint> {
+/// Fetch one exact native Document witness, including complete paginated threaded comments.
+/// Reading does not adopt its Issue, assign a kind or authorize a write; callers separately
+/// verify captured ownership and their managed preservation target before any native effect.
+pub async fn read_document_fingerprint(store: &Store, id: &str) -> Result<DocumentFingerprint> {
     let mut current = store.linear.object("QDocument", "document", id).await?;
     current["comments"] = json!(
         threaded(

@@ -663,3 +663,35 @@ async fn archive_limits_include_escaped_wire_and_summary_sections() {
             .is_empty()
     );
 }
+
+/// Reading a native Document witness does not require or manufacture workflow ownership on its Issue.
+#[tokio::test]
+async fn archive_document_witness_reads_without_adopting_unmanaged_issue() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let managed = f.work("atomic", &project, None).await;
+    let unmanaged = id();
+    {
+        let mut db = f.db.lock().await;
+        let mut native = db.issues[&managed].clone();
+        native["id"] = json!(unmanaged);
+        db.issues.insert(unmanaged.clone(), native);
+    }
+    let doc = f
+        .ok(
+            "save_document",
+            json!({"issue_id":unmanaged,"title":"Owned fixture document","content":"Exact source"}),
+        )
+        .await;
+    let store = f.store();
+    let witness = archive::read_document_fingerprint(&store, doc["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(witness.issue_id, unmanaged);
+    assert!(store.work(&unmanaged).await.unwrap().meta.is_none());
+    assert!(
+        archive::collect_item(&store, &store.work(&unmanaged).await.unwrap())
+            .await
+            .is_err()
+    );
+}
