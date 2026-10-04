@@ -76,6 +76,8 @@ pub struct Database {
     pub assets: BTreeMap<String, Vec<u8>>,
     /// Calls received per operation name, for request-count regression checks.
     pub operation_counts: BTreeMap<String, u32>,
+    /// MIME values actually sent to native upload reservation, for transport contract regressions.
+    pub upload_content_types: Vec<String>,
 }
 /// Native standard workflow names in the fixture.
 pub const STATES: [&str; 7] = [
@@ -509,6 +511,8 @@ async fn graphql(
             ))
         }
         "MFileUpload" => {
+            db.upload_content_types
+                .push(v["contentType"].as_str().unwrap().to_owned());
             let filename = v["filename"].as_str().unwrap();
             Some((
                 "fileUpload",

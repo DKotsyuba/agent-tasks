@@ -105,6 +105,202 @@ pub fn is_trashed(issue: &Value) -> Result<bool> {
     }
 }
 
+/// Conservative measured metadata JSON budget, below the accepted16KiB native probe envelope.
+/// The complete outgoing metadata object, including existing workflow state, must fit.
+/// This is an operating limit, not a claim about Linear's undocumented maximum.
+pub const METADATA_BUDGET_BYTES: usize = 16 * 1024;
+/// Encode the complete metadata value exactly as the provider's JSON serializer and enforce
+/// the conservative measured budget before a write. Returns total UTF-8 JSON bytes; unknown
+/// extra workflow state must be included by the caller, never measured as receipt-only data.
+pub fn metadata_budget(metadata: &Value) -> Result<usize> {
+    let bytes = serde_json::to_vec(metadata)
+        .map_err(|_| Fault::new("STATE_INVALID", "Metadata encoding failed"))?
+        .len();
+    require(
+        bytes <= METADATA_BUDGET_BYTES,
+        "RECEIPT_TOO_LARGE",
+        format!("Complete metadata is {bytes} bytes; conservative budget {METADATA_BUDGET_BYTES}"),
+    )?;
+    Ok(bytes)
+}
+/// Recover one original literal payload from this renderer's exact known fence framing.
+/// Source bytes are sliced directly, so CRLF/trailing spaces are not normalized by the parser.
+fn rendered_payload(content: &str, range: std::ops::Range<usize>) -> Result<String> {
+    let raw = content
+        .get(range)
+        .ok_or_else(|| Fault::new("ARCHIVE_READBACK_MISMATCH", "Expected code span is invalid"))?;
+    let (opening, body) = raw.split_once('\n').ok_or_else(|| {
+        Fault::new(
+            "ARCHIVE_READBACK_MISMATCH",
+            "Expected code framing is missing",
+        )
+    })?;
+    let fence = opening
+        .strip_suffix("text")
+        .filter(|s| s.len() >= 3 && s.bytes().all(|b| b == b'\x60'))
+        .ok_or_else(|| {
+            Fault::new(
+                "ARCHIVE_READBACK_MISMATCH",
+                "Expected block was not produced by the archive renderer",
+            )
+        })?;
+    body.strip_suffix(&format!("\n{fence}\n"))
+        .or_else(|| body.strip_suffix(&format!("\n{fence}")))
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Fault::new(
+                "ARCHIVE_READBACK_MISMATCH",
+                "Expected closing code framing is missing",
+            )
+        })
+}
+/// Capture complete non-payload Markdown structure and ordered code payloads without fuzzy comparison.
+/// Expected payloads come from raw generated fence spans; actual payloads are native code-node
+/// text. Only code wrapper style/language and parser text-fragment boundaries are normalized.
+fn readback_signature(content: &str, expected: bool) -> Result<(Vec<Event<'static>>, Vec<String>)> {
+    let mut structure = vec![];
+    let mut payloads = vec![];
+    let mut code: Option<String> = None;
+    for (event, range) in Parser::new(content).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => {
+                require(
+                    code.is_none(),
+                    "ARCHIVE_READBACK_MISMATCH",
+                    "Nested archive code node",
+                )?;
+                if expected {
+                    payloads.push(rendered_payload(content, range)?);
+                }
+                code = Some(String::new());
+                structure.push(Event::Start(Tag::CodeBlock(
+                    pulldown_cmark::CodeBlockKind::Fenced("".into()),
+                )));
+            }
+            Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
+                let value = code.take().ok_or_else(|| {
+                    Fault::new(
+                        "ARCHIVE_READBACK_MISMATCH",
+                        "Archive code node is unmatched",
+                    )
+                })?;
+                if !expected {
+                    payloads.push(value);
+                }
+                structure.push(Event::End(pulldown_cmark::TagEnd::CodeBlock));
+            }
+            Event::Text(text) if code.is_some() => code
+                .as_mut()
+                .ok_or_else(|| {
+                    Fault::new("ARCHIVE_READBACK_MISMATCH", "Archive code node disappeared")
+                })?
+                .push_str(&text),
+            event => {
+                require(
+                    code.is_none(),
+                    "ARCHIVE_READBACK_MISMATCH",
+                    "Unexpected event inside archive code node",
+                )?;
+                let event = event.into_static();
+                if let Event::Text(current) = &event
+                    && let Some(Event::Text(previous)) = structure.last_mut()
+                {
+                    *previous = format!("{previous}{current}").into();
+                } else {
+                    structure.push(event);
+                }
+            }
+        }
+    }
+    require(
+        code.is_none(),
+        "ARCHIVE_READBACK_MISMATCH",
+        "Archive code node is incomplete",
+    )?;
+    Ok((structure, payloads))
+}
+/// Prove one native archive readback preserves all source payload bytes and complete heading,
+/// record order/count and thread metadata structure. Outer fence style/language and the single
+/// synthetic framing newline may normalize; source strings, metadata and other text may not.
+/// Returns no success for missing/changed records, heading changes, reordered bodies or altered
+/// literal text. This verifies renderer output, not arbitrary rich Markdown or native limits.
+pub fn verify_readback(expected: &str, actual: &str) -> Result<()> {
+    let (expected_structure, originals) = readback_signature(expected, true)?;
+    let (actual_structure, actual_payloads) = readback_signature(actual, false)?;
+    require(
+        expected_structure == actual_structure && originals.len() == actual_payloads.len(),
+        "ARCHIVE_READBACK_MISMATCH",
+        "Archive headings, records or ordering changed in native readback",
+    )?;
+    for (original, native) in originals.iter().zip(&actual_payloads) {
+        require(
+            native == original || native == &format!("{original}\n"),
+            "ARCHIVE_READBACK_MISMATCH",
+            "An original archive payload changed in native readback",
+        )?;
+    }
+    Ok(())
+}
+
+/// Compact exact native Document witness; original content/comments remain in the readable archive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DocumentFingerprint {
+    /// Stable native Document UUID.
+    pub id: String,
+    /// Original Issue ownership, required for reparent authorization.
+    pub issue_id: String,
+    /// Original direct Project ownership, absent when native source returns none.
+    pub project_id: Option<String>,
+    /// Source timestamp used as a precondition before the first reparent effect.
+    pub updated_at: String,
+    /// Exact captured native content JSON digest, distinguishing null from an empty string.
+    pub content_sha256: String,
+    /// Digest of complete sorted native comments/replies/reactions, never their full body in a receipt.
+    pub comments_sha256: String,
+    /// Small immutable selected metadata: title, URL, visibility, creation and creator.
+    pub metadata: Value,
+}
+/// Capture a small exact Document witness from complete native content/comments without fuzzy Markdown comparison.
+pub fn document_fingerprint(document: &Value) -> Result<DocumentFingerprint> {
+    let content = serde_json::to_vec(&document["content"])
+        .map_err(|_| Fault::new("STATE_INVALID", "Document content encoding failed"))?;
+    let comments = serde_json::to_vec(&document["comments"])
+        .map_err(|_| Fault::new("STATE_INVALID", "Document comments encoding failed"))?;
+    Ok(DocumentFingerprint {
+        id: identity(document)?.into(),
+        issue_id: document["issue"]["id"]
+            .as_str()
+            .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "Document Issue owner missing"))?
+            .into(),
+        project_id: document["project"]["id"].as_str().map(str::to_owned),
+        updated_at: document["updatedAt"]
+            .as_str()
+            .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "Document timestamp missing"))?
+            .into(),
+        content_sha256: format!("{:x}", Sha256::digest(content)),
+        comments_sha256: format!("{:x}", Sha256::digest(comments)),
+        metadata: json!({"id":document["id"],"title":document["title"],"url":document["url"],"archivedAt":document["archivedAt"],"hiddenAt":document["hiddenAt"],"createdAt":document["createdAt"],"creator":document["creator"]}),
+    })
+}
+/// Fetch the same complete native Document witness, including paginated threaded comments.
+async fn read_document_fingerprint(store: &Store, id: &str) -> Result<DocumentFingerprint> {
+    let mut current = store.linear.object("QDocument", "document", id).await?;
+    current["comments"] = json!(
+        threaded(
+            store,
+            store
+                .pages(
+                    "QArchiveDocumentComments",
+                    "/document/comments",
+                    json!({"id":id})
+                )
+                .await?
+        )
+        .await?
+    );
+    document_fingerprint(&current)
+}
+
 /// One caller-journaled preservation action; no future compaction receipt type is required.
 /// Signed upload URLs/headers exist only inside a running prepare attempt and are never serialized.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -136,8 +332,8 @@ pub enum PreservationAction {
     ReparentDocument {
         /// Permanent managed Epic receiving the native Document.
         target_issue: String,
-        /// Original full Document snapshot including source ownership/content/visibility and updatedAt.
-        document: Value,
+        /// Compact exact content/comment/metadata witness and original ownership/timestamp.
+        document: DocumentFingerprint,
     },
 }
 /// Confirmed action outcome with an optional next action to journal before executing.
@@ -184,7 +380,7 @@ pub fn preservation_plan(set: &ArchiveSet) -> Result<Vec<PreservationAction>> {
             )?;
             actions.push(PreservationAction::ReparentDocument {
                 target_issue: epic.into(),
-                document: document.clone(),
+                document: document_fingerprint(document)?,
             });
         }
     }
@@ -204,15 +400,12 @@ async fn verify_bytes(store: &Store, url: &str, asset: &ArchiveAsset) -> Result<
     )?;
     Ok(bytes)
 }
-/// Compare original Document content/visibility/title without treating a confirmed reparent timestamp as drift.
-fn same_document(source: &Value, current: &Value) -> bool {
-    ["id", "title", "archivedAt", "hiddenAt"]
-        .iter()
-        .all(|k| source[*k] == current[*k])
-        && crate::records::markdown_equivalent(
-            source["content"].as_str().unwrap_or(""),
-            current["content"].as_str().unwrap_or(""),
-        )
+/// Compare exact canonical native content/comments and immutable metadata; reparent timestamps are separate preconditions.
+fn same_document(source: &DocumentFingerprint, current: &DocumentFingerprint) -> bool {
+    source.id == current.id
+        && source.metadata == current.metadata
+        && source.content_sha256 == current.content_sha256
+        && source.comments_sha256 == current.comments_sha256
 }
 /// Require a known managed Epic target in the same native Project as the originating Issue.
 /// No authority is inferred from an arbitrary action ID, and this helper never writes.
@@ -281,25 +474,22 @@ pub async fn reconcile_preservation(
             target_issue,
             document,
         } => {
-            let current = store
-                .linear
-                .object("QDocument", "document", identity(document)?)
-                .await?;
+            let current = read_document_fingerprint(store, &document.id).await?;
             require(
                 same_document(document, &current),
                 "SOURCE_CHANGED",
                 "Document content/visibility/title changed during preservation",
             )?;
-            if current["issue"]["id"] == *target_issue && current["project"]["id"].is_null() {
+            if current.issue_id == *target_issue && current.project_id.is_none() {
                 return Ok(Some(PreservationEffect {
                     confirmed: json!({"document":current}),
                     next: None,
                 }));
             }
             require(
-                current["issue"]["id"] == document["issue"]["id"]
-                    && current["project"]["id"] == document["project"]["id"]
-                    && current["updatedAt"] == document["updatedAt"],
+                current.issue_id == document.issue_id
+                    && current.project_id == document.project_id
+                    && current.updated_at == document.updated_at,
                 "SOURCE_CHANGED",
                 "Document owner/timestamp changed before reparent",
             )?;
@@ -388,11 +578,15 @@ pub async fn execute_preservation(
             target_issue,
             document,
         } => {
-            let origin = document["issue"]["id"]
-                .as_str()
-                .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "Original Document Issue missing"))?;
+            let origin = document.issue_id.as_str();
             preservation_target(store, target_issue, origin).await?;
-            let result=store.linear.call("MUpdateDocument",json!({"id":identity(document)?,"input":{"issueId":target_issue,"projectId":null}})).await;
+            let result = store
+                .linear
+                .call(
+                    "MUpdateDocument",
+                    json!({"id":document.id,"input":{"issueId":target_issue,"projectId":null}}),
+                )
+                .await;
             if let Err(f) = result {
                 if !f.uncertain {
                     return Err(f);
@@ -561,9 +755,10 @@ pub fn render(set: &ArchiveSet, facts: Option<&ArchiveFacts>) -> Result<String> 
     }
     Ok(out)
 }
-/// Return all explicit unknown/oversize document and complete-section bounds without writes.
-/// `document` must be the exact output of `render(set, facts)`; caller-provided measured limits
-/// never waive transport/render budgets, and equality at a limit is accepted.
+/// Return all unknown/oversize document and readable-section bounds without writes.
+/// `document` is the exact renderer or verified canonical native body. JSON escaping plus
+/// a conservative64KiB provider envelope reserve must fit8MiB; all Summary/Contents/H2 item
+/// and H3 bodies must fit measured section capacity plus64KiB reply metadata reserve.
 pub fn validate_limits(
     set: &ArchiveSet,
     document: &str,
@@ -571,6 +766,17 @@ pub fn validate_limits(
 ) -> Result<Vec<ArchiveBlocker>> {
     let mut blockers = vec![];
     let epic = identity(&set.epic.native)?;
+    let wire = serde_json::to_vec(document)
+        .map_err(|_| Fault::new("STATE_INVALID", "Archive wire encoding failed"))?
+        .len();
+    if wire.saturating_add(64 * 1024) > 8 * 1024 * 1024 {
+        block(
+            &mut blockers,
+            "ARCHIVE_WIRE_TOO_LARGE",
+            epic,
+            "Escaped archive plus provider envelope exceeds the response budget",
+        );
+    }
     match limits.archive_max_bytes {
         None => block(
             &mut blockers,
@@ -578,7 +784,7 @@ pub fn validate_limits(
             epic,
             "Single native Document capacity has not been measured",
         ),
-        Some(cap) if cap == 0 || cap >= 8 * 1024 * 1024 || document.len() > cap => block(
+        Some(cap) if cap == 0 || document.len() > cap => block(
             &mut blockers,
             "ARCHIVE_TOO_LARGE",
             epic,
@@ -603,22 +809,94 @@ pub fn validate_limits(
         "INVALID_INPUT",
         "Section cap must fit the existing response text budget",
     )?;
+    let mut headings = vec![
+        (epic.to_owned(), "Summary".to_owned()),
+        (epic.to_owned(), "Contents".to_owned()),
+    ];
     for source in std::iter::once(&set.epic).chain(&set.items) {
         let identifier = heading_identifier(source)?;
+        headings.push((
+            identity(&source.native)?.into(),
+            format!("{identifier} · {}", source.kind.label()),
+        ));
         for (name, _) in item_sections(source)? {
-            let heading = format!("{identifier} {name}");
-            let section = crate::sections::find_section(document, &heading)?;
-            if section.body.len() > cap {
-                block(
-                    &mut blockers,
-                    "SECTION_TOO_LARGE",
-                    identity(&source.native)?,
-                    format!(
-                        "{heading}: {} bytes > {cap}; no truncation",
-                        section.body.len()
-                    ),
-                );
-            }
+            headings.push((
+                identity(&source.native)?.into(),
+                format!("{identifier} {name}"),
+            ));
+        }
+    }
+    for (id, heading) in headings {
+        let section = crate::sections::find_section(document, &heading)?;
+        if section.body.len() > cap
+            || section.body.len().saturating_add(64 * 1024) > crate::render::TEXT_BUDGET_BYTES
+        {
+            block(
+                &mut blockers,
+                "SECTION_TOO_LARGE",
+                &id,
+                format!(
+                    "{heading}: {} bytes exceed measured/raw reply budget with metadata reserve",
+                    section.body.len()
+                ),
+            );
+        }
+    }
+    Ok(blockers)
+}
+/// Recheck the verified canonical native Document and actual rendered replies before deletion.
+/// Exact payload/structure proof is mandatory; native normalization never waives any measured
+/// or escaped-response cap. Returns explicit blockers and performs no mutation.
+pub fn validate_readback(
+    set: &ArchiveSet,
+    expected: &str,
+    native: &Value,
+    limits: ArchiveLimits,
+) -> Result<Vec<ArchiveBlocker>> {
+    let content = native["content"]
+        .as_str()
+        .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "Canonical archive content missing"))?;
+    verify_readback(expected, content)?;
+    let mut blockers = validate_limits(set, content, limits)?;
+    let wire = serde_json::to_vec(&json!({"data":{"document":native}}))
+        .map_err(|_| Fault::new("STATE_INVALID", "Canonical archive wire encoding failed"))?
+        .len();
+    if wire > 8 * 1024 * 1024 {
+        block(
+            &mut blockers,
+            "ARCHIVE_WIRE_TOO_LARGE",
+            identity(&set.epic.native)?,
+            "Canonical full provider response exceeds8MiB",
+        );
+    }
+    let mut headings = vec!["Summary".to_owned(), "Contents".to_owned()];
+    for source in std::iter::once(&set.epic).chain(&set.items) {
+        let identifier = heading_identifier(source)?;
+        headings.push(format!("{identifier} · {}", source.kind.label()));
+        headings.extend(
+            item_sections(source)?
+                .into_iter()
+                .map(|(name, _)| format!("{identifier} {name}")),
+        );
+    }
+    for heading in headings {
+        let section = crate::sections::find_section(content, &heading)?;
+        let mut selected = native.clone();
+        selected["content"] = json!(section.body);
+        selected["section"] =
+            json!({"heading":section.heading,"index":section.index,"count":section.count});
+        let output = crate::render::render_outcome(
+            "get_context",
+            &json!({"type":"document","id":native["id"],"section":heading}),
+            &crate::model::Outcome::ok(selected),
+        );
+        if !output.contains("Document\n") || !output.contains(section.body) {
+            block(
+                &mut blockers,
+                "SECTION_RENDER_TOO_LARGE",
+                identity(&set.epic.native)?,
+                format!("Complete native {heading} reply did not render"),
+            );
         }
     }
     Ok(blockers)
@@ -715,6 +993,12 @@ async fn item(store: &Store, work: &Work) -> Result<ArchiveItem> {
         !is_trashed(&native)?,
         "SOURCE_CHANGED",
         "Archive source is already trashed or trash visibility is unknown",
+    )?;
+    require(
+        native["labels"]["nodes"].is_array()
+            && native["labels"]["pageInfo"]["hasNextPage"] == false,
+        "INCOMPLETE_DATA",
+        "Archive labels are missing or exceed the selected complete page",
     )?;
     let comments = threaded(
         store,
@@ -976,25 +1260,64 @@ pub async fn collect(store: &Store, epic: &Work, graph: &[Work]) -> Result<Archi
     set.blockers.dedup();
     Ok(set)
 }
-/// Extract actual Markdown link/image destinations plus canonical upload URLs, including raw body links.
+/// Extract actual Markdown link/image destinations and bare upload URLs without prose punctuation.
+/// Parsed destinations are exact. Bare URL punctuation is removed only in rendered text;
+/// link-label events do not create a second truncated variant of a parsed destination.
 fn asset_urls(body: &str) -> BTreeSet<String> {
     let mut urls = BTreeSet::new();
+    let mut link_depth = 0usize;
     for event in Parser::new(body) {
-        if let Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) = event
-            && dest_url.contains("uploads.linear.app")
-        {
-            urls.insert(dest_url.to_string());
+        match event {
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                if reqwest::Url::parse(&dest_url)
+                    .is_ok_and(|u| u.host_str() == Some(crate::linear::ASSET_HOST))
+                {
+                    urls.insert(dest_url.to_string());
+                }
+                link_depth += 1;
+            }
+            Event::End(pulldown_cmark::TagEnd::Link | pulldown_cmark::TagEnd::Image) => {
+                link_depth = link_depth.saturating_sub(1)
+            }
+            Event::Text(text) if link_depth == 0 => {
+                for (offset, _) in text.match_indices("https://uploads.linear.app/") {
+                    let tail = &text[offset..];
+                    let end = tail
+                        .find(|c: char| {
+                            c.is_whitespace() || matches!(c, ')' | '>' | '"' | '\'' | '\x60')
+                        })
+                        .unwrap_or(tail.len());
+                    let url = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+                    if !url.is_empty() {
+                        urls.insert(url.into());
+                    }
+                }
+            }
+            _ => {}
         }
-    }
-    for (offset, _) in body.match_indices("https://uploads.linear.app/") {
-        let tail = &body[offset..];
-        let end = tail
-            .find(|c: char| c.is_whitespace() || matches!(c, ')' | '>' | '"' | '\'' | '\x60'))
-            .unwrap_or(tail.len());
-        urls.insert(tail[..end].into());
     }
     urls
 }
+
+/// Bare prose punctuation is excluded while parsed link destinations remain exact.
+#[test]
+fn bare_upload_url_punctuation_is_not_a_second_asset() {
+    let urls = asset_urls(
+        "See https://uploads.linear.app/file.png. [exact](https://uploads.linear.app/file.png.)",
+    );
+    assert_eq!(
+        urls,
+        BTreeSet::from([
+            "https://uploads.linear.app/file.png".into(),
+            "https://uploads.linear.app/file.png.".into()
+        ])
+    );
+    assert_eq!(
+        asset_urls("[https://uploads.linear.app/file.png.](https://uploads.linear.app/file.png.)"),
+        BTreeSet::from(["https://uploads.linear.app/file.png.".into()])
+    );
+}
+
 /// Recursively collect links from all source string values, retaining complete text elsewhere.
 fn links(value: &Value, urls: &mut BTreeSet<String>) {
     match value {
@@ -1034,10 +1357,23 @@ async fn collect_assets(store: &Store, set: &mut ArchiveSet) -> Result<()> {
         }
         for url in urls {
             match store.linear.get_asset(&url).await {
-                Ok((bytes, content_type)) => {
-                    let digest = format!("{:x}", Sha256::digest(&bytes));
+                Ok((bytes, digest)) => {
                     let size = bytes.len() as u64;
+                    if size == 0 {
+                        block(
+                            &mut set.blockers,
+                            "EMPTY_ASSET",
+                            id,
+                            "Referenced asset contains no bytes and cannot be preserved by the upload contract",
+                        );
+                        continue;
+                    }
                     let file = source.files.iter().find(|f| f["url"] == url);
+                    let content_type = file
+                        .and_then(|f| f["metadata"]["artifact"]["content_type"].as_str())
+                        .filter(|t| t.contains('/') && !t.chars().any(char::is_control))
+                        .unwrap_or("application/octet-stream")
+                        .to_owned();
                     let artifact=file.map(|f|f["metadata"]["artifact"].clone()).filter(Value::is_object)
                         .unwrap_or_else(||json!({"filename":"preserved-upload","content_type":content_type,"size_bytes":size,"sha256":digest,"title":null,"note":null}));
                     let filename = artifact["filename"]

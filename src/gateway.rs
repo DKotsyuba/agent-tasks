@@ -2140,7 +2140,8 @@ impl Gateway {
     /// and its own `includeArchived` covers only archived, not hidden, so both are applied here
     /// against one native page; `matched_in_page` may then be smaller than `native_page_size`,
     /// including zero, while `pageInfo.hasNextPage` still promises more native results to check,
-    /// so a filtered page is never mistaken for an exhausted, empty search. An over-budget\n    /// provider page retries at first=1 with the same cursor and returns that truthful smaller page.
+    /// so a filtered page is never mistaken for an exhausted, empty search. An over-budget
+    /// provider page retries at first=1 with the same cursor and returns that truthful smaller page.
     async fn search_documents(&self, a: &Value) -> Result<Value> {
         let query = text(a, "query")?;
         let project_id = match a["project_id"].as_str() {
@@ -2290,7 +2291,9 @@ impl Gateway {
     /// Legacy type/ID calls keep their original response; optional lead/reviewer views add a
     /// bounded assignment and evidence projection; detail=brief returns one compact current
     /// slice with recovery state and explicit routes to full content. Derived counts are
-    /// withheld when native membership differs from the recorded graph. Document query returns\n    /// at most20 matching sections with bounded snippets and honest has_more, excluding content;\n    /// it is mutually exclusive with a complete section read and invalid for other entities.
+    /// withheld when native membership differs from the recorded graph. Document query returns
+    /// at most 20 matching sections with bounded snippets and honest has_more, excluding content;
+    /// it is mutually exclusive with a complete section read and invalid for other entities.
     async fn context(&self, a: &Value) -> Result<Value> {
         require(
             !(a["id"].is_string() && a["url"].is_string()),

@@ -132,7 +132,9 @@ fn document_shape(data: &Value) -> bool {
                                 || rows.len() == 20)
                             && rows.iter().all(|r| {
                                 r["heading"].is_string()
-                                    && r["index"].as_u64().is_some_and(|i| i > 0)
+                                    && r["index"].as_u64().is_some_and(|i| {
+                                        i > 0 || r["heading"] == "Document preamble"
+                                    })
                                     && r["snippet"].is_string()
                             })
                     })))

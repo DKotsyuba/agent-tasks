@@ -55,7 +55,7 @@ struct Heading {
 pub struct Section<'a> {
     /// The matched heading's own rendered text, trimmed.
     pub heading: String,
-    /// 1-based position of the matched heading among every heading in the document.
+    /// 1-based native heading position; zero identifies the unheaded preamble in a section query.
     pub index: usize,
     /// Total number of headings in the document, for navigation alongside `index`.
     pub count: usize,
@@ -152,7 +152,8 @@ pub fn find_section<'a>(content: &'a str, heading_text: &str) -> Result<Section<
 /// case-insensitively. Returns document-order matches with exact bodies/index/count,
 /// plus `has_more` when a 21st match exists: callers must narrow the query.
 /// Empty queries refuse. Duplicate headings remain distinguishable by index;
-/// fenced/indented headings are ignored by the shared CommonMark parser. No I/O occurs.
+/// Fenced/indented headings are ignored by the shared CommonMark parser. Unheaded text before
+/// the first heading is searched as Document preamble at index 0. No I/O occurs.
 pub fn matching_sections<'a>(content: &'a str, query: &str) -> Result<(Vec<Section<'a>>, bool)> {
     require(
         !query.trim().is_empty(),
@@ -162,6 +163,15 @@ pub fn matching_sections<'a>(content: &'a str, query: &str) -> Result<(Vec<Secti
     let wanted = query.trim().to_lowercase();
     let items = headings(content);
     let mut matches = vec![];
+    let preamble = &content[..items.first().map(|h| h.start).unwrap_or(content.len())];
+    if preamble.to_lowercase().contains(&wanted) {
+        matches.push(Section {
+            heading: "Document preamble".into(),
+            index: 0,
+            count: items.len(),
+            body: preamble,
+        });
+    }
     for (index, heading) in items.iter().enumerate() {
         let end = items[index + 1..]
             .iter()

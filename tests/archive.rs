@@ -188,6 +188,8 @@ async fn archive_preservation_reconciles_files_and_documents() {
     .await
     .unwrap();
     assert_eq!(set.assets.len(), 1);
+    assert_eq!(set.assets[0].content_type, "application/octet-stream");
+    assert_ne!(set.assets[0].content_type, set.assets[0].digest);
     assert!(
         archive::preservation_plan(&set).is_err(),
         "unfinished fixture sources must block a production plan"
@@ -199,6 +201,10 @@ async fn archive_preservation_reconciles_files_and_documents() {
     let prepared = archive::execute_preservation(&store, &plan[0])
         .await
         .unwrap();
+    assert_eq!(
+        f.db.lock().await.upload_content_types.last().unwrap(),
+        "application/octet-stream"
+    );
     let next = prepared.next.unwrap();
     let serialized = serde_json::to_string(&next).unwrap();
     assert!(!serialized.contains("uploadUrl") && !serialized.contains("headers"));
@@ -428,5 +434,232 @@ async fn archive_collect_item_rechecks_details_without_timestamp_assumptions() {
     assert_eq!(
         archive::collect_item(&store, &work).await.unwrap_err().code,
         "SOURCE_CHANGED"
+    );
+}
+
+/// Native outer fence normalization is allowed only while literal source text and complete structure stay exact.
+#[test]
+fn archive_readback_proof_is_literal_and_structural() {
+    let expected = "# Archive\n\n## Summary\ntext\n\n## FIX · TASK\n\n### FIX Comments\n\n````text\n| a | b |\n|---|---|\n``` nested\n😀  \n````\n";
+    let normalized = expected
+        .replace("````text", "~~~~")
+        .replace("\n````\n", "\n~~~~\n");
+    archive::verify_readback(expected, expected).unwrap();
+    archive::verify_readback(expected, &normalized).unwrap();
+    assert!(archive::verify_readback(expected, &normalized.replace("😀  ", "😀 ")).is_err());
+    assert!(
+        archive::verify_readback(expected, &normalized.replace("FIX Comments", "FIX Files"))
+            .is_err()
+    );
+    assert!(
+        archive::verify_readback(expected, &format!("{normalized}\n### unexpected\n")).is_err()
+    );
+    let crlf = "# Archive\n\n```text\noriginal\r\nline\n```\n";
+    assert!(
+        archive::verify_readback(crlf, &crlf.replace("\r\n", "\n")).is_err(),
+        "source CRLF may not be silently normalized"
+    );
+}
+/// Metadata allowance applies to actual serialized JSON including the existing state and escaping.
+#[test]
+fn archive_metadata_budget_counts_the_complete_json_envelope() {
+    let value = json!({"workflow":{"existing":"x".repeat(100),"compaction":{"manifest":["😀","quoted\\text"]}}});
+    let bytes = archive::metadata_budget(&value).unwrap();
+    assert_eq!(bytes, serde_json::to_vec(&value).unwrap().len());
+    assert!(
+        archive::metadata_budget(
+            &json!({"workflow":{"existing":"x".repeat(archive::METADATA_BUDGET_BYTES)}})
+        )
+        .is_err()
+    );
+    let accepted = json!({"probe":"x".repeat(16384)});
+    assert!(serde_json::to_vec(&accepted).unwrap().len() > archive::METADATA_BUDGET_BYTES);
+}
+
+/// A large complete Document remains in the archive while its reparent journal carries only an exact compact witness.
+#[tokio::test]
+async fn archive_reparent_journal_is_compact_and_content_exact() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let epic = f.work("epic", &project, None).await;
+    let task = f.work("atomic", &project, Some(&epic)).await;
+    let doc=f.ok("save_document",json!({"issue_id":task,"title":"Large exact source","content":"large original\n".repeat(5000)})).await;
+    let store = f.store();
+    let mut set = archive::collect(
+        &store,
+        &store.work(&epic).await.unwrap(),
+        &store.graph(&project).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    set.blockers.clear();
+    let action = archive::preservation_plan(&set).unwrap().remove(0);
+    assert!(serde_json::to_vec(&action).unwrap().len() < 2048);
+    assert!(
+        archive::render(&set, None)
+            .unwrap()
+            .contains("large original\nlarge original")
+    );
+    f.db.lock()
+        .await
+        .documents
+        .get_mut(doc["id"].as_str().unwrap())
+        .unwrap()["content"] = json!("large original\n".repeat(4999));
+    assert_eq!(
+        archive::execute_preservation(&store, &action)
+            .await
+            .unwrap_err()
+            .code,
+        "SOURCE_CHANGED"
+    );
+}
+
+/// Plain Documents and preamble text are searched honestly, without claiming absent matches.
+#[tokio::test]
+async fn archive_section_queries_search_unheaded_content() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    for content in [
+        "needle in plain text",
+        "needle before headings\n\n## Other\nunrelated",
+    ] {
+        let doc = f
+            .ok(
+                "save_document",
+                json!({"project_id":project,"title":"Unheaded","content":content}),
+            )
+            .await;
+        let result = f
+            .ok(
+                "get_context",
+                json!({"type":"document","id":doc["id"],"query":"needle"}),
+            )
+            .await;
+        assert_eq!(
+            result["section_query"]["matches"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(result["section_query"]["matches"][0]["index"], 0);
+        let text = agent_tasks::render::render_outcome(
+            "get_context",
+            &json!({"type":"document","id":doc["id"],"query":"needle"}),
+            &agent_tasks::model::Outcome::ok(result),
+        );
+        assert!(
+            text.contains("Document preamble")
+                && text.contains("needle")
+                && !text.contains("presentation")
+        );
+    }
+}
+
+/// Selected native metadata remains in the export, and truncated labels refuse instead of disappearing.
+#[tokio::test]
+async fn archive_exports_metadata_and_refuses_incomplete_labels() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let task = f.work("atomic", &project, None).await;
+    {
+        let mut db = f.db.lock().await;
+        let native = db.issues.get_mut(&task).unwrap();
+        native["createdAt"] = json!("creation");
+        native["creator"] = json!({"id":"creator","name":"Creator"});
+        native["assignee"] = json!({"id":"assignee","name":"Assignee"});
+        native["dueDate"] = json!("2026-10-10");
+        native["estimate"] = json!(3.0);
+        native["cycle"] = json!({"id":"cycle","name":"Cycle","number":2});
+        let attachment = id();
+        db.attachments.insert(attachment.clone(),json!({"id":attachment,"issue":{"id":task},"title":"Link","subtitle":"Native subtitle","source":{"provider":"native"},"createdAt":"attachment-created","url":"https://example.test","metadata":{}}));
+    }
+    let store = f.store();
+    let work = store.work(&task).await.unwrap();
+    let item = archive::collect_item(&store, &work).await.unwrap();
+    assert_eq!(item.native["dueDate"], "2026-10-10");
+    assert_eq!(item.native["creator"]["name"], "Creator");
+    assert_eq!(item.native["cycle"]["number"], 2);
+    assert_eq!(item.files[0]["subtitle"], "Native subtitle");
+    assert_eq!(item.files[0]["source"]["provider"], "native");
+    f.db.lock().await.issues.get_mut(&task).unwrap()["labels"]["pageInfo"]["hasNextPage"] =
+        json!(true);
+    assert_eq!(
+        archive::collect_item(&store, &store.work(&task).await.unwrap())
+            .await
+            .unwrap_err()
+            .code,
+        "INCOMPLETE_DATA"
+    );
+}
+/// A readable but zero-byte referenced file is an explicit preservation blocker before any upload.
+#[tokio::test]
+async fn archive_zero_byte_assets_block_before_preservation() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let epic = f.work("epic", &project, None).await;
+    {
+        let mut db = f.db.lock().await;
+        db.assets.insert("empty.bin".into(), vec![]);
+        let id = id();
+        let url = format!("{}/asset/empty.bin", db.base);
+        db.attachments.insert(id.clone(),json!({"id":id,"issue":{"id":epic},"url":url,"metadata":{"artifact":{"filename":"empty.bin","content_type":"application/octet-stream"}}}));
+    }
+    let store = f.store();
+    let set = archive::collect(
+        &store,
+        &store.work(&epic).await.unwrap(),
+        &store.graph(&project).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(set.blockers.iter().any(|b| b.code == "EMPTY_ASSET"));
+    assert!(set.assets.is_empty());
+}
+/// Escaped transport size and Summary/item bodies use the same conservative section refusal as H3 data.
+#[tokio::test]
+async fn archive_limits_include_escaped_wire_and_summary_sections() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let epic = f.work("epic", &project, None).await;
+    let store = f.store();
+    let set = archive::collect(
+        &store,
+        &store.work(&epic).await.unwrap(),
+        &store.graph(&project).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    let body = archive::render(&set, None).unwrap();
+    let limits = archive::ArchiveLimits {
+        archive_max_bytes: Some(8 * 1024 * 1024),
+        section_max_bytes: Some(1),
+    };
+    assert!(
+        archive::validate_limits(&set, &body, limits)
+            .unwrap()
+            .iter()
+            .any(|b| b.detail.starts_with("Summary"))
+    );
+    let escaped = "\"".repeat(4_200_000);
+    assert!(
+        archive::validate_limits(
+            &set,
+            &escaped,
+            archive::ArchiveLimits {
+                archive_max_bytes: Some(8 * 1024 * 1024),
+                section_max_bytes: None
+            }
+        )
+        .unwrap()
+        .iter()
+        .any(|b| b.code == "ARCHIVE_WIRE_TOO_LARGE")
+    );
+    let native = json!({"id":"native-doc","title":"Archive","content":body,"url":"https://linear.app/example/document/native","updatedAt":"native"});
+    let limits = archive::ArchiveLimits {
+        archive_max_bytes: Some(body.len()),
+        section_max_bytes: Some(agent_tasks::render::TEXT_BUDGET_BYTES),
+    };
+    assert!(
+        archive::validate_readback(&set, &body, &native, limits)
+            .unwrap()
+            .is_empty()
     );
 }

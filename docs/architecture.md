@@ -16,6 +16,20 @@ Collection cannot qualify unmeasured native limits or perform any deletion.
 The native Issue trash flag is nullable: a present `true` confirms trash,
 while present `false` or `null` means untrashed after an exact-ID read. Missing
 or invalid flag data refuses as incomplete and never confirms deletion.
+
+Native archive readback is verified by complete Markdown structure and exact
+literal source payloads. Only generated outer code-fence style/language and a
+single known framing newline can normalize. Original strings, metadata,
+record order/counts and thread associations cannot change. The canonical native
+body is retained only after that proof and all escaped-wire/section reply bounds
+are rechecked. Issue timestamps alone never certify an unchanged source: a
+compaction caller must compare complete source snapshots again before deletion
+and account only for its precisely recorded effects.
+
+The conservative metadata operating budget is 16,384 UTF-8 JSON bytes for the
+complete outgoing metadata object, including existing workflow and compaction
+state. Larger scopes refuse before effects. This deliberately stays below the
+accepted probe envelope and does not claim an undocumented native maximum.
 `archive::collect_item` recollects one surviving managed source without walking
 recorded children. A compaction caller owns receipt-aware membership and all
 terminal/review/pending guards; the helper retains identity/drift/trash/page

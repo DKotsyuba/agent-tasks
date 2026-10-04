@@ -24,6 +24,9 @@ complete content, then changes only ownership to the Epic and clears Project
 ownership. A lost reply reads that Document by exact ID. Concurrent edits refuse;
 unchanged confirmed reparents replay without a second write. Original Document
 content and comments also remain in the complete archive.
+Its journal carries a compact exact content/comment/metadata fingerprint, rather
+than repeating those full bodies. Current canonical native text is compared
+exactly; fuzzy Markdown equivalence cannot authorize a reparent or deletion.
 
 Keep the `request_id` and the complete original arguments until the outcome is known. `outcome_unknown` is never success.
 
