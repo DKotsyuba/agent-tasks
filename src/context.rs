@@ -614,11 +614,12 @@ fn preview(value: Option<&str>) -> Option<String> {
 /// `project` contributes displayed identity; work includes completion, assignments, field digests
 /// and current-round source/review references. Activity includes questions, replies, resolution and formal review state. The
 /// returned map is deterministic and never serves as authoritative workflow state.
+/// Returns None over 256 KiB so full overview/draft generation remains usable; invalid work fails.
 pub fn compact_snapshot(
     project: &Value,
     graph: &[Work],
     activity: &BTreeMap<String, Vec<ActivityRecord>>,
-) -> Result<BTreeMap<String, Value>> {
+) -> Result<Option<BTreeMap<String, Value>>> {
     let mut snapshot = BTreeMap::new();
     snapshot.insert(
         "project".into(),
@@ -654,15 +655,10 @@ pub fn compact_snapshot(
             }));
         }
     }
-    require(
-        serde_json::to_vec(&snapshot)
-            .map(|bytes| bytes.len())
-            .unwrap_or(usize::MAX)
-            <= MAX_SNAPSHOT_BYTES,
-        "INCOMPLETE_DATA",
-        "Comparison snapshot exceeds 256 KiB",
-    )?;
-    Ok(snapshot)
+    let fits = serde_json::to_vec(&snapshot)
+        .map(|bytes| bytes.len() <= MAX_SNAPSHOT_BYTES)
+        .unwrap_or(false);
+    Ok(fits.then_some(snapshot))
 }
 
 /// One opaque previous observation bound to its Project and process lifetime.

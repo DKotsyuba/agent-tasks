@@ -134,7 +134,14 @@ fn valid_success_shape(tool: &str, request: &Value, data: &Value) -> bool {
                     || (data["id"].is_string() && data["content"].is_string())
             }
         },
-        "get_overview" => data["project_id"].is_string() && data["cursor"].is_string(),
+        "get_overview" => {
+            data["project_id"].is_string()
+                && (data["cursor"].is_string()
+                    || (data["cursor"].is_null()
+                        && data["baseline_unavailable"].is_string()
+                        && data["active_epics"].is_array()
+                        && !data["changes"].is_array()))
+        }
         "list_items" | "search" | "list_files" => {
             data["nodes"].is_array() && data["pageInfo"].is_object()
         }
@@ -488,7 +495,7 @@ fn overview_projection(data: &Value) -> Value {
             "removed":change["after"].is_null(),"added":change["before"].is_null()})
     }).collect();
     json!({"project_id":data["project_id"],"project_title":data["project_title"],"project_url":data["project_url"],
-        "cursor":data["cursor"],"baseline_expired":data["baseline_expired"],
+        "cursor":data["cursor"],"baseline_expired":data["baseline_expired"],"baseline_unavailable":data["baseline_unavailable"],
         "attention":data["attention"].as_array().cloned().unwrap_or_default(),
         "is_delta":data["changes"].is_array(),"changes":changes,
         "epics":data["active_epics"].as_array().cloned().unwrap_or_default(),

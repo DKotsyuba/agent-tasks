@@ -2126,8 +2126,17 @@ impl Gateway {
             .await)
     }
     /// Load one complete Project graph and bounded native activity, then compose a read-only view.
-    /// The limit prevents a large Project from turning a single overview into unbounded API reads.
-    async fn overview_data(&self, project_id: &str) -> Result<(Value, BTreeMap<String, Value>)> {
+    /// Returns the full view, native Project, complete graph and bounded activity for optional comparison.
+    /// The limit prevents unbounded API reads; generated updates use only the view, never a snapshot.
+    async fn overview_data(
+        &self,
+        project_id: &str,
+    ) -> Result<(
+        Value,
+        Value,
+        Vec<Work>,
+        BTreeMap<String, Vec<crate::activity::ActivityRecord>>,
+    )> {
         let project = self.project(project_id).await?;
         let graph = self.store.graph(project_id).await?;
         require(
@@ -2172,16 +2181,23 @@ impl Gateway {
             activity.insert(id.to_owned(), records);
         }
         let overview = crate::context::project_overview(&project, &graph, &activity)?;
-        let snapshot = crate::context::compact_snapshot(&project, &graph, &activity)?;
-        Ok((overview, snapshot))
+        Ok((overview, project, graph, activity))
     }
 
     /// Return a full overview or a same-Project delta and a fresh opaque comparison point.
     /// Missing process-local baselines fall back to a full response with baseline_expired=true;
-    /// neither branch writes to Linear or launches background activity.
+    /// Oversized snapshots return the full view with null cursor and baseline_unavailable.
+    /// Neither branch writes to Linear or launches background activity.
     async fn overview(&self, a: &Value) -> Result<Value> {
         let project_id = self.resolve("project", text(a, "project_id")?).await?;
-        let (mut full, snapshot) = self.overview_data(&project_id).await?;
+        let (mut full, project, graph, activity) = self.overview_data(&project_id).await?;
+        let Some(snapshot) = crate::context::compact_snapshot(&project, &graph, &activity)? else {
+            full["observed_at"] = json!(chrono::Utc::now().to_rfc3339());
+            full["cursor"] = Value::Null;
+            full["baseline_expired"] = json!(false);
+            full["baseline_unavailable"] = json!("Comparison snapshot exceeds 256 KiB");
+            return Ok(full);
+        };
         let comparison = self
             .baselines
             .lock()

@@ -3148,7 +3148,7 @@
   },
   {
     "name": "get_overview",
-    "description": "Read one complete Project overview — active Epics with frozen Modules, standalone Modules, Atomics, retired work, open questions and work awaiting review — plus an unpublished ProjectUpdate draft and a fresh opaque cursor. A later call with that cursor returns only the changes and a new cursor; a lost, expired or foreign cursor returns the full overview with baseline_expired=true instead of guessing. Incomplete membership or native drift fails explicitly. Read-only; never publishes an update or starts work. Example: {\"project_id\":\"https://linear.app/team/project/passport\"}",
+    "description": "Read one complete Project overview — active Epics with frozen Modules, standalone Modules, Atomics, retired work, open questions and work awaiting review — plus an unpublished ProjectUpdate draft. Comparison snapshots over 256 KiB return the full overview with cursor=null and baseline_unavailable; no empty delta is invented. Otherwise a fresh opaque cursor is retained. A later call with that cursor returns only the changes and a new cursor; a lost, expired or foreign cursor returns the full overview with baseline_expired=true instead of guessing. Incomplete membership or native drift fails explicitly. Read-only; never publishes an update or starts work. Example: {\"project_id\":\"https://linear.app/team/project/passport\"}",
     "inputSchema": {
       "type": "object",
       "properties": {

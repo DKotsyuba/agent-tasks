@@ -1,6 +1,7 @@
 {% from "common" import line, body, heading, change, module_card %}
 Project overview{{ "\n" }}{{ line("Project", project_title) }}{{ line("Project ID", project_id) }}{{ line("Project URL", project_url) }}{{ line("Cursor", cursor) }}
 {% if baseline_expired %}Previous cursor expired; this is a full overview.{{ "\n" }}{% endif %}
+{% if baseline_unavailable %}{{ line("Comparison unavailable", baseline_unavailable) }}Full overview; no comparison cursor was retained.{{ "\n" }}{% endif %}
 {% if is_delta %}
 {% if not changes %}No changes since the supplied cursor.{{ "\n" }}{% endif %}
 {% for item in changes %}{{ heading("Change") }}{{ line("Item", item.label) }}{% if item.removed %}Removed{{ "\n" }}{% elif item.added %}Added{{ "\n" }}{% endif %}{{ line("URL", item.url) }}

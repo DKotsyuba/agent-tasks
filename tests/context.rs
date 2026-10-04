@@ -1017,3 +1017,59 @@ async fn overview_delta_tracks_work_and_discussion_with_safe_fallbacks() {
     assert!(cold["changes"].is_null());
     assert!(cold["standalone_modules"].is_array());
 }
+
+/// Oversized comparison activity keeps full overview and generated update usable, never an empty delta.
+#[tokio::test]
+async fn oversized_snapshot_returns_full_overview_and_generated_update() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let first = f.ok("get_overview", json!({"project_id":project})).await;
+    let native = f
+        .ok(
+            "add_comment",
+            json!({"target_type":"project","target_id":project,"body":"Ordinary discussion"}),
+        )
+        .await["comment"]
+        .clone();
+    {
+        let mut db = f.db.lock().await;
+        for _ in 0..500 {
+            let id = id();
+            let mut row = native.clone();
+            row["id"] = json!(id);
+            row["url"] = json!(format!(
+                "https://linear.app/example/project/{project}#comment-{}",
+                &id[..8]
+            ));
+            row["body"] = json!("Discussion ".repeat(40));
+            db.comments.insert(id, row);
+        }
+    }
+    let args = json!({"project_id":project,"cursor":first["cursor"]});
+    let full = f.ok("get_overview", args.clone()).await;
+    assert!(full["cursor"].is_null());
+    assert!(
+        full["baseline_unavailable"]
+            .as_str()
+            .unwrap()
+            .contains("256 KiB")
+    );
+    assert!(full["changes"].is_null());
+    assert!(full["active_epics"].is_array());
+    let text = agent_tasks::render::render_outcome(
+        "get_overview",
+        &args,
+        &agent_tasks::model::Outcome::ok(full.clone()),
+    );
+    assert!(text.contains("Comparison unavailable"));
+    assert!(text.contains("Full overview"));
+    assert!(!text.contains("No changes since"));
+    assert!(!text.contains("Presentation: degraded"));
+    let update = f.ok("save_project_update",json!({"project_id":project,"health":"onTrack","reason":"Generated draft remains available"})).await;
+    assert!(
+        update["project_update"]["body"]
+            .as_str()
+            .unwrap()
+            .contains(full["project_update_draft"].as_str().unwrap().trim())
+    );
+}
