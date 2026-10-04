@@ -643,6 +643,27 @@ async fn commit_report_commonmark_headings_import_and_reopen_safely() {
             .contains(reports[1])
     );
     f.mv(&task, "Done").await;
+    f.ok(
+        "edit_module",
+        json!({"id":module,"fields":{"pr_url":"https://github.com/example/product/pull/1"}}),
+    )
+    .await;
+    f.mv(&module, "In Review").await;
+    let submitted = f
+        .ok("get_context", json!({"type":"issue","id":module}))
+        .await;
+    let parsed =
+        agent_tasks::records::read_fields(submitted["issue"]["description"].as_str().unwrap())
+            .unwrap();
+    assert_eq!(parsed["result"], submitted["fields"]["result"]);
+    assert_eq!(parsed["check_result"], submitted["fields"]["check_result"]);
+    assert!(
+        parsed["result"]
+            .as_str()
+            .unwrap()
+            .contains("```md\n## Результат\nliteral\n```")
+    );
+    f.mv(&module, "In Progress").await;
     f.mv(&task, "In Progress").await;
     let reopened = f.ok("get_context", json!({"type":"issue","id":task})).await;
     let parsed =

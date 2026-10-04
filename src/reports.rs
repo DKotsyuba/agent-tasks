@@ -65,6 +65,8 @@ pub struct ModuleReport {
 /// An empty or fully excluded Module may use its existing manual result/check fields.
 /// Unknown child metadata/status or summaries exceeding native 30,000-character field limits fail
 /// explicitly. Stable child-ID ordering makes repeated reads deterministic.
+/// Real ATX/setext H1/H2 headings nest inside generated field bodies; code and inline Markdown
+/// remain source-preserving, using the same CommonMark normalizer as individual imports.
 pub fn module_report(module: &Work, graph: &[Work]) -> Result<ModuleReport> {
     require(
         module.managed()?.kind == Kind::Module,
@@ -175,7 +177,7 @@ pub fn module_report(module: &Work, graph: &[Work]) -> Result<ModuleReport> {
         &mut report.reported_checks,
         &mut report.notes,
     ] {
-        *text = text.trim().replace("\n## ", "\n### ");
+        *text = crate::sections::nest_field_headings(text.trim());
     }
     require(
         report.summary.chars().count() <= 30_000
