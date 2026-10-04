@@ -1,5 +1,19 @@
 # Native Linear workflow
 
+## Complete archive collection
+
+`archive::collect` is read-only. It combines paginated native descendants with
+recorded children, retaining canceled and archived sources. Missing, unmanaged,
+moved, foreign, nonterminal, drifting or pending sources are explicit blockers.
+Managed items retain their concrete kind and complete selected native fields,
+workflow reports/reviews, recursively paginated comment threads and reactions,
+Document content/comments, attachment records, both relation directions and
+available native history actors/changes. No native document revision history is
+claimed. Active external native relations and active same-Project managed
+references block preservation/deletion. Asset reads use the existing host,
+byte-size and timeout guards and capture exact size and SHA-256 before planning.
+Collection cannot qualify unmeasured native limits or perform any deletion.
+
 ## MCP result presentation
 
 The resident HTTP Handler and the stdio Bridge expose the same static catalogue.
