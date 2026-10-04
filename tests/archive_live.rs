@@ -199,6 +199,36 @@ async fn small_pages(store: &Store, query: &str, pointer: &str, id: &str) -> Res
 fn observed(condition: bool, message: &str) -> Result<()> {
     agent_tasks::model::require(condition, "GATE_BLOCKED", message)
 }
+
+/// Fixed three-size probe budget, independent of environment overrides: less than2MiB source total.
+fn document_sizes() -> [usize; 3] {
+    [64 * 1024, 256 * 1024, 1024 * 1024]
+}
+/// Allocate a fresh cleanup attempt only after an exact native read confirms the deterministic
+/// fixture identity remains untrashed. Existing failed/unknown intents remain unchanged.
+fn cleanup_step(report: &Value, purpose: &str, native: &Value) -> Result<String> {
+    let run = report["run"]
+        .as_str()
+        .ok_or_else(|| Fault::new("STATE_INVALID", "Fixture run missing"))?;
+    observed(
+        native["id"] == child_id(run, purpose) && native["trashed"] == false,
+        "Fresh exact untrashed fixture read required",
+    )?;
+    let steps = report["steps"]
+        .as_object()
+        .ok_or_else(|| Fault::new("STATE_INVALID", "Fixture steps missing"))?;
+    for attempt in 1..=steps.len().saturating_add(1) {
+        let key = format!("cleanup-{purpose}-attempt-{attempt}");
+        if !steps.contains_key(&key) {
+            return Ok(key);
+        }
+    }
+    Err(Fault::new(
+        "STATE_INVALID",
+        "Cleanup attempt budget exhausted",
+    ))
+}
+
 /// Build nested-fence/table/Unicode fixture text without slicing a native document.
 fn document_body(bytes: usize) -> String {
     let seed = "Юникод 😀 | table\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n````text\n```nested\n## literal\n```\n````\n\n";
@@ -241,16 +271,7 @@ async fn gate_delete(p: &mut Probe, issue: &str) -> Result<Value> {
 /// Measure increasing document sizes with full exact readback, section presentation, and honest search pages.
 async fn gate_sizes(p: &mut Probe, issue: &str) -> Result<Value> {
     let id = p.id("size-document");
-    let sizes =
-        std::env::var("ATL_ARCHIVE_SIZES").unwrap_or_else(|_| "65536,262144,1048576".into());
-    let sizes: Vec<usize> = sizes
-        .split(',')
-        .map(|x| x.parse().expect("integer document size"))
-        .collect();
-    assert!(
-        !sizes.is_empty() && sizes.iter().all(|n| *n > 0 && *n <= 6 * 1024 * 1024),
-        "bounded sizes required"
-    );
+    let sizes = document_sizes();
     let mut evidence = vec![];
     for (index, size) in sizes.into_iter().enumerate() {
         let body = document_body(size);
@@ -627,13 +648,11 @@ async fn archive_native_cleanup() {
         if native["trashed"] == true {
             continue;
         }
-        p.call(
-            &format!("cleanup-{purpose}"),
-            "MArchiveProbeDelete",
-            json!({"id":id}),
-        )
-        .await
-        .expect("soft cleanup");
+        let step = cleanup_step(&p.report, purpose, &native)
+            .expect("fresh untrashed identity is required for a new cleanup attempt");
+        p.call(&step, "MArchiveProbeDelete", json!({"id":id}))
+            .await
+            .expect("soft cleanup");
         assert_eq!(
             p.store
                 .linear
@@ -669,5 +688,51 @@ fn archive_report_removes_signed_upload_credentials() {
     assert_eq!(
         raw["fileUpload"]["uploadFile"]["uploadUrl"],
         "SIGNED_CANARY"
+    );
+}
+
+/// Probe workload cannot be expanded through an arbitrary size-count or aggregate environment override.
+#[test]
+fn archive_document_probe_has_fixed_count_and_aggregate_budget() {
+    let sizes = document_sizes();
+    assert_eq!(sizes.len(), 3);
+    let bytes = sizes
+        .into_iter()
+        .map(|n| document_body(n).len())
+        .try_fold(0usize, usize::checked_add)
+        .expect("bounded aggregate");
+    assert!(bytes < 2 * 1024 * 1024);
+    assert!(sizes.into_iter().all(|n| n <= 1024 * 1024));
+}
+/// Failed cleanup intents can receive a new attempt only after a known fresh exact untrashed read.
+#[test]
+fn archive_cleanup_retries_only_after_exact_native_confirmation() {
+    let run = "00000000-0000-4000-8000-000000000001";
+    let report = json!({"run":run,"steps":{"cleanup-subject":{"state":"pending","fault":{"uncertain":true}},"cleanup-subject-attempt-1":{"state":"pending","fault":{"uncertain":false}}}});
+    let native = json!({"id":child_id(run,"subject"),"trashed":false});
+    assert_eq!(
+        cleanup_step(&report, "subject", &native).unwrap(),
+        "cleanup-subject-attempt-2"
+    );
+    assert!(
+        cleanup_step(
+            &report,
+            "subject",
+            &json!({"id":child_id(run,"subject"),"trashed":true})
+        )
+        .is_err()
+    );
+    assert!(
+        cleanup_step(
+            &report,
+            "subject",
+            &json!({"id":child_id(run,"sentinel"),"trashed":false})
+        )
+        .is_err()
+    );
+    assert!(cleanup_step(&report, "subject", &json!({"id":child_id(run,"subject")})).is_err());
+    assert_eq!(
+        report["steps"]["cleanup-subject"]["fault"]["uncertain"],
+        true
     );
 }

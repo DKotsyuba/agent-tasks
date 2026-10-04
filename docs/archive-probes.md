@@ -10,13 +10,20 @@ authorization:
 cargo test --test archive_live archive_native_gates -- --ignored --exact --nocapture
 ```
 
-The test creates a new Project, four owned Issues, and a separate Project with
+The test creates a new Project, six owned Issues, and a separate Project with
 a sentinel Issue. It writes each native mutation intent before sending it and
 stops on an uncertain response. The report retains exact object identities and
 observations. It is evidence, never a workflow database. A new run requires a
 new report; reconcile an uncertain effect before further writes.
 
-Native history may group edits. Quota relief requires an operator observation;
+Document-size probes use exactly three fixed sizes (64 KiB, 256 KiB, 1 MiB),
+less than 2 MiB of aggregate generated source text. There is no environment
+override for their count or size.
+
+Native relations use a two-record page with three additional owned peers to
+prove pagination without creating hundreds of Issues. Mock regressions force
+multi-page history; native history may group edits, which the report records
+honestly. Quota relief requires an operator observation;
 connection counts, document limits, retention, and latency are empirical.
 Unknown observations are recorded explicitly and do not qualify compaction.
 The current probe does not certify a destructive Compact implementation.
@@ -26,3 +33,6 @@ After reviewing the inventory, the same environment/report can run
 deterministic ID, native team/project and fixture marker, then soft-deletes only
 fixture Issues. Missing records are not accepted as trash confirmation. The
 sentinel and both Projects remain; byte uploads may remain for retention evidence.
+After a failed cleanup attempt, another run first reads the same owned Issue
+by exact ID. A new separately journaled attempt is allowed only when that read
+confirms it remains untrashed; existing failed/unknown intents are preserved.
