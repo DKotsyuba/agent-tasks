@@ -62,10 +62,12 @@ fn needs_fields(conditions: &[String]) -> bool {
     conditions.iter().any(|c| c.starts_with("Required field:"))
 }
 
-/// Whether one discrepancy message is forgiven by the explicit reopen path, mirroring the two
-/// native-state mismatches the transition guards retain when moving back to In Progress.
+/// Identify native status, completion or description drift that may be recovered by reopening.
+/// The caller also validates the exact transition before advising a reopen.
 fn cleared_by_reopen(message: &str) -> bool {
-    message.starts_with("Native status differs") || message.starts_with("Completion changed")
+    message.starts_with("Native status differs")
+        || message.starts_with("Completion changed")
+        || message.starts_with("Description changed")
 }
 
 /// Guidance tuple: advisory stage, optional next action, and the guard conditions that still
@@ -122,9 +124,11 @@ pub fn guidance(w: &Work, graph: &[Work]) -> Value {
             drift,
         )
     } else if !drift.is_empty() {
-        // Only the two reopen-forgiven mismatches recover through an explicit reopen; any
-        // structural drift keeps recovery without naming a single resolving call.
-        if drift.iter().all(|d| cleared_by_reopen(d)) {
+        // Validate adoption before advising reopening; structural or invalid-content drift has no resolving call.
+        if drift.iter().all(|d| cleared_by_reopen(d))
+            && (!drift.iter().any(|d| d.starts_with("Description changed"))
+                || rules::transition(w, graph, Status::InProgress, mover(m.kind)).is_empty())
+        {
             (
                 "recovery",
                 Some(action(
@@ -276,7 +280,15 @@ fn reviewing(w: &Work, m: &Meta, graph: &[Work]) -> Advised {
                 None,
             )),
         ),
-        Some(false) => ("fixes", Some(action("apply_fixes", "worker", None, None))),
+        Some(false) => (
+            "fixes",
+            Some(action(
+                "reopen_work",
+                "orchestrator",
+                Some("move_status"),
+                Some(Status::InProgress),
+            )),
+        ),
         Some(true) if !current => (
             "review",
             Some(action(

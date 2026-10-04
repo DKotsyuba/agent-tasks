@@ -3670,7 +3670,7 @@
   },
   {
     "name": "move_status",
-    "description": "Check or perform one guarded status transition. check_only=true is a read-only preview returning allowed/conditions and writes nothing. Start parents before children and close children before parents; no transition ever cascades to children, and blocking conditions are reported explicitly from fresh native state. Retry an uncertain transition with identical request_id and arguments. Example: {\"request_id\":\"00000000-0000-4000-8000-000000000009\",\"actor\":\"codex:session\",\"actor_role\":\"worker\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"status\":\"In Progress\",\"check_only\":true}",
+    "description": "Check or perform one guarded status transition. check_only=true is a read-only preview returning allowed/conditions and writes nothing. Returning In Review/Done work to In Progress validates and adopts manual description-only changes while preserving unknown prose; structural drift blocks. Retirement requires an active clean parent. Start parents before children and close children before parents; no transition ever cascades to children, and blocking conditions are reported explicitly from fresh native state. Retry an uncertain transition with identical request_id and arguments. Example: {\"request_id\":\"00000000-0000-4000-8000-000000000009\",\"actor\":\"codex:session\",\"actor_role\":\"worker\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"status\":\"In Progress\",\"check_only\":true}",
     "inputSchema": {
       "type": "object",
       "properties": {

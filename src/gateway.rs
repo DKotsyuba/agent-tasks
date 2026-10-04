@@ -932,8 +932,15 @@ impl Gateway {
         }
         self.store.save(&w.native, &m).await
     }
-    /// Validate cross-field references before any write, without requiring readiness in Backlog/Todo.
-    fn check_fields(kind: Kind, f: &Value, parent: Option<&str>, graph: &[Work]) -> Result<()> {
+    /// Validate cross-field references and true nested headings before any write.
+    /// Code headings remain literal; field readiness is checked separately when starting.
+    /// Shared by edits/creates and description adoption; invalid ownership/type references fail.
+    pub(crate) fn check_fields(
+        kind: Kind,
+        f: &Value,
+        parent: Option<&str>,
+        graph: &[Work],
+    ) -> Result<()> {
         require(
             f["work_type"].is_string(),
             "INVALID_INPUT",
@@ -942,7 +949,7 @@ impl Gateway {
         for value in f.as_object().into_iter().flat_map(|o| o.values()) {
             if let Some(s) = value.as_str() {
                 require(
-                    !s.lines().any(|line| line.starts_with("## ")),
+                    crate::sections::level_two_sections(s).is_empty(),
                     "INVALID_INPUT",
                     "Use level-three or deeper headings inside field values",
                 )?;
@@ -1240,7 +1247,10 @@ impl Gateway {
             .map_err(Fault::uncertain)
     }
     /// Apply one managed issue edit for `kind`; missing title normalizes the existing title, missing priority preserves it, and priority zero clears it.
-    /// Empty or title/priority-only edits preserve native descriptions, stored fields and review identity in any status, without validating or adopting legacy content; requirement/parent edits validate content, invalidate review and require reopening reviewed work, except the existing Module merge-report allowance. Returns the confirmed issue outcome or a safe conflict/write fault.
+    /// Empty calls and title/priority-only edits preserve descriptions and review identity without adopting legacy content.
+    /// Explicit fields (including an empty object) adopt changed native descriptions as content edits;
+    /// requirement/parent changes invalidate review and require reopening reviewed work, except Module merge reports.
+    /// Returns the confirmed outcome or a safe validation/conflict/write fault.
     /// Explicit repository_path edits validate the local Git checkout before preparing a write.
     async fn edit_work(&self, kind: Kind, a: &Value) -> Result<Value> {
         let (w, graph) = self
@@ -1271,7 +1281,12 @@ impl Gateway {
         };
         let parent_changed =
             parent_supplied && resolved_parent.as_deref() != m.parent_id.as_deref();
-        let presentation_only = patch.as_object().is_some_and(|o| o.is_empty()) && !parent_changed;
+        let presentation_only = patch.as_object().is_some_and(|o| o.is_empty())
+            && !parent_changed
+            && (a.get("fields").is_none()
+                || a.get("title").is_some()
+                || a.get("priority").is_some()
+                || parent_supplied);
         let mut fields = if w.native["description"] == m.description || presentation_only {
             m.fields.clone()
         } else {
@@ -1285,7 +1300,9 @@ impl Gateway {
             && a.get("priority").is_none()
             && !parent_supplied
             && w.native["description"] == m.description;
-        let content_edit = !patch.as_object().unwrap().is_empty() || parent_changed;
+        let content_edit = !patch.as_object().unwrap().is_empty()
+            || parent_changed
+            || (!presentation_only && w.native["description"] != m.description);
         require(
             !matches!(m.status, Status::InReview | Status::Done) || merge_only || !content_edit,
             "REOPEN_REQUIRED",
@@ -1519,6 +1536,8 @@ impl Gateway {
     }
 
     /// Guard and explicitly move work; check_only never persists intent, labels or changes.
+    /// Reopening reviewed/Done work validates and adopts the current native description,
+    /// preserves unknown prose and invalidates the round once; structural drift still refuses.
     /// Module submission stores the same derived current-child result used by context/readiness,
     /// preserving a real PR requirement and binding review to the resulting content revision.
     async fn move_status(&self, a: &Value) -> Result<Value> {
@@ -1534,7 +1553,28 @@ impl Gateway {
                 .with_guidance(v, w.id(), &graph, text(a, "actor_role")?)
                 .await);
         }
-        let errors = rules::transition(&w, &graph, target, text(a, "actor_role")?);
+        let adopted;
+        let w = if target == Status::InProgress
+            && matches!(w.managed()?.status, Status::InReview | Status::Done)
+            && w.native["description"] != w.managed()?.description
+        {
+            adopted = match rules::adopt_description(&w, &graph) {
+                Ok(candidate) => candidate,
+                Err(_) if a["check_only"] == true => {
+                    return Ok(crate::guidance::preview_effects(
+                        &w,
+                        &graph,
+                        target,
+                        text(a, "actor_role")?,
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
+            &adopted
+        } else {
+            &w
+        };
+        let errors = rules::transition(w, &graph, target, text(a, "actor_role")?);
         if a["check_only"] == true {
             // The preview shares the exact guards and, when allowed, the exact effect plan
             // the executing transition follows; it performs no write.
@@ -1585,6 +1625,7 @@ impl Gateway {
             next.round += 1;
             next.review = None;
             next.completed_at = None;
+            next.integration.clear();
             if next.kind == Kind::Epic && next.frozen_modules.is_none() {
                 next.frozen_modules = Some(
                     rules::children(&graph, w.id())

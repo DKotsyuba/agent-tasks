@@ -130,6 +130,8 @@ Before creating a review comment, `Meta.pending_review` stores its normalized re
 
 The orchestrator returns work to In Progress after changes are requested. A new work round clears its current results/checks/artifacts and current review. Earlier native reports and history remain. New outputs and a new review are required. Editing reviewed content requires reopening; a Module's `merge_report` can be added after positive review without invalidating it.
 
+Reopening In Review/Done work validates and adopts the current native description before start guards. Unknown sections and literal code stay exact; new-round outputs are cleared from that adopted source, and the round/revision changes once. Structural drift and invalid fields still block. Explicit active description adoption through `fields: {}` invalidates content identity; title/priority or unchanged-parent presentation edits keep their existing identity. Changing a child's status to Canceled/Duplicate requires an In Progress parent without drift, just as closure does.
+
 PR links and merge facts remain trusted agent reports. MCP reads local commits but does not contact a remote host to verify a PR or merge. A local repository does not replace the Module's real PR, review or merge requirements. Shared bearer clients are trusted; reported roles are workflow attribution, not separate authorization principals.
 
 ## Integration Atomic

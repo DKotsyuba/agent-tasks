@@ -281,13 +281,13 @@ fn guidance_cases_across_preparation_working_review_and_closure() {
     assert_eq!(g["next_action"]["kind"], "record_review");
     assert_eq!(g["next_action"]["actor_role"], "reviewer");
     assert_eq!(g["next_action"]["tool"], "record_review");
-    // Requested changes are applied by the lead; no single call performs fixing.
+    // The orchestrator reopens before the lead may change reviewed content.
     f.meta_mut(module).review = Some(review(1, 0, false));
     let g = guidance(&f.works[module], f.graph());
     assert_eq!(g["stage"], "fixes");
     assert_eq!(
         g["next_action"],
-        json!({"kind":"apply_fixes","actor_role":"worker","tool":null,"target_status":null})
+        json!({"kind":"reopen_work","actor_role":"orchestrator","tool":"move_status","target_status":"In Progress"})
     );
     // An accepted current review without a merge report keeps an explicit reporting action.
     f.meta_mut(module).review = Some(review(1, 0, true));
