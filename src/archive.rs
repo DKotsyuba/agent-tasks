@@ -90,6 +90,334 @@ pub struct ArchiveFacts {
     /// Applied timestamp captured in durable intent, absent for a pure preview.
     pub applied_at: Option<String>,
 }
+
+/// One caller-journaled preservation action; no future compaction receipt type is required.
+/// Signed upload URLs/headers exist only inside a running prepare attempt and are never serialized.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PreservationAction {
+    /// Read/recheck source bytes, reserve and PUT one temporary copy; no canonical attachment is published.
+    /// A cold retry first reconciles the deterministic attachment; a new explicit prepare attempt
+    /// may leave an orphan temporary upload after an uncertain reservation/PUT response.
+    PrepareCopy {
+        /// Permanent managed Epic receiving the canonical artifact.
+        target_issue: String,
+        /// Deterministic canonical attachment identity, independent of temporary reservations.
+        attachment_id: String,
+        /// Captured source provenance, byte digest and unchanged artifact intent.
+        asset: ArchiveAsset,
+    },
+    /// Publish an already prepared canonical asset URL using one deterministic attachment mutation.
+    AttachCopy {
+        /// Permanent managed Epic receiving the canonical artifact.
+        target_issue: String,
+        /// Same deterministic attachment identity as the prepare action.
+        attachment_id: String,
+        /// Captured source provenance, byte digest and unchanged artifact intent.
+        asset: ArchiveAsset,
+        /// Canonical asset URL only; signed upload transport information must never enter this field.
+        asset_url: String,
+    },
+    /// Reparent one unchanged native Document to the permanent Epic in one mutation.
+    ReparentDocument {
+        /// Permanent managed Epic receiving the native Document.
+        target_issue: String,
+        /// Original full Document snapshot including source ownership/content/visibility and updatedAt.
+        document: Value,
+    },
+}
+/// Confirmed action outcome with an optional next action to journal before executing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreservationEffect {
+    /// Canonical identity/provenance/readback facts, excluding signed upload transport information.
+    pub confirmed: Value,
+    /// Follow-up action, absent when the canonical native object is confirmed.
+    pub next: Option<PreservationAction>,
+}
+/// Derive the canonical artifact identity from its complete originating Issue/source identity.
+fn copy_id(epic: &str, asset: &ArchiveAsset) -> String {
+    child_id(
+        epic,
+        &format!("compact-file:{}:{}", asset.issue_id, asset.origin),
+    )
+}
+/// Generate deterministic actions only for a complete eligible export; Epic-owned objects survive already.
+/// Each prepare effect produces its attach follow-up. The caller must persist the current action
+/// before executing it and persist its result before advancing; this function performs no writes.
+pub fn preservation_plan(set: &ArchiveSet) -> Result<Vec<PreservationAction>> {
+    require(
+        set.blockers.is_empty(),
+        "PRESERVATION_BLOCKED",
+        "Archive has explicit source blockers",
+    )?;
+    let epic = identity(&set.epic.native)?;
+    let mut actions = vec![];
+    for asset in &set.assets {
+        if asset.issue_id != epic {
+            actions.push(PreservationAction::PrepareCopy {
+                target_issue: epic.into(),
+                attachment_id: copy_id(epic, asset),
+                asset: asset.clone(),
+            });
+        }
+    }
+    for source in &set.items {
+        for document in &source.documents {
+            require(
+                document["issue"]["id"] == source.native["id"],
+                "SOURCE_CHANGED",
+                "Document ownership differs from collected Issue",
+            )?;
+            actions.push(PreservationAction::ReparentDocument {
+                target_issue: epic.into(),
+                document: document.clone(),
+            });
+        }
+    }
+    Ok(actions)
+}
+/// Preserve the existing artifact intent and add self-contained source provenance without secrets.
+fn copy_metadata(asset: &ArchiveAsset) -> Value {
+    json!({"artifact":asset.artifact,"compacted_from":{"issue_id":asset.issue_id,"identifier":asset.identifier,"source_id":asset.origin,"original_url":asset.url}})
+}
+/// Check one byte download against the captured source identity; changed bytes cannot be published.
+async fn verify_bytes(store: &Store, url: &str, asset: &ArchiveAsset) -> Result<Vec<u8>> {
+    let (bytes, _) = store.linear.get_asset(url).await?;
+    require(
+        bytes.len() as u64 == asset.size && format!("{:x}", Sha256::digest(&bytes)) == asset.digest,
+        "ASSET_CHANGED",
+        "Asset size/digest differs from collected source",
+    )?;
+    Ok(bytes)
+}
+/// Compare original Document content/visibility/title without treating a confirmed reparent timestamp as drift.
+fn same_document(source: &Value, current: &Value) -> bool {
+    ["id", "title", "archivedAt", "hiddenAt"]
+        .iter()
+        .all(|k| source[*k] == current[*k])
+        && crate::records::markdown_equivalent(
+            source["content"].as_str().unwrap_or(""),
+            current["content"].as_str().unwrap_or(""),
+        )
+}
+/// Require a known managed Epic target in the same native Project as the originating Issue.
+/// No authority is inferred from an arbitrary action ID, and this helper never writes.
+async fn preservation_target(store: &Store, target: &str, origin: &str) -> Result<()> {
+    let epic = store.work(target).await?;
+    require(
+        epic.managed()?.kind == Kind::Epic,
+        "INVALID_INPUT",
+        "Preservation target must be a managed Epic",
+    )?;
+    let source = store.work(origin).await?;
+    require(
+        source.native["project"]["id"] == epic.native["project"]["id"],
+        "FOREIGN_ITEM",
+        "Preservation origin belongs to another Project",
+    )?;
+    Ok(())
+}
+/// Reconcile a deterministic canonical artifact or unchanged reparent by exact-ID reads.
+/// `None` means no canonical effect is confirmed yet; partial/auth/unknown responses propagate.
+/// A confirmed copy always has native ownership, exact provenance/intent and verified bytes.
+/// Temporary upload reservations have no invented lookup or durable signed-slot representation.
+pub async fn reconcile_preservation(
+    store: &Store,
+    action: &PreservationAction,
+) -> Result<Option<PreservationEffect>> {
+    match action {
+        PreservationAction::PrepareCopy {
+            target_issue,
+            attachment_id,
+            asset,
+        }
+        | PreservationAction::AttachCopy {
+            target_issue,
+            attachment_id,
+            asset,
+            ..
+        } => {
+            require(
+                attachment_id == &copy_id(target_issue, asset),
+                "STATE_INVALID",
+                "Canonical copy identity differs from source intent",
+            )?;
+            let Some(native) = store
+                .optional("QArtifact", "attachment", attachment_id)
+                .await?
+            else {
+                return Ok(None);
+            };
+            require(
+                native["issue"]["id"] == *target_issue
+                    && native["metadata"] == copy_metadata(asset),
+                "PRESERVATION_CONFLICT",
+                "Canonical attachment is owned by different intent",
+            )?;
+            let url = native["url"]
+                .as_str()
+                .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "Canonical artifact URL missing"))?;
+            verify_bytes(store, url, asset).await?;
+            Ok(Some(PreservationEffect {
+                confirmed: json!({"attachment":native,"size_bytes":asset.size,"sha256":asset.digest}),
+                next: None,
+            }))
+        }
+        PreservationAction::ReparentDocument {
+            target_issue,
+            document,
+        } => {
+            let current = store
+                .linear
+                .object("QDocument", "document", identity(document)?)
+                .await?;
+            require(
+                same_document(document, &current),
+                "SOURCE_CHANGED",
+                "Document content/visibility/title changed during preservation",
+            )?;
+            if current["issue"]["id"] == *target_issue && current["project"]["id"].is_null() {
+                return Ok(Some(PreservationEffect {
+                    confirmed: json!({"document":current}),
+                    next: None,
+                }));
+            }
+            require(
+                current["issue"]["id"] == document["issue"]["id"]
+                    && current["project"]["id"] == document["project"]["id"]
+                    && current["updatedAt"] == document["updatedAt"],
+                "SOURCE_CHANGED",
+                "Document owner/timestamp changed before reparent",
+            )?;
+            Ok(None)
+        }
+    }
+}
+/// Execute exactly one previously journaled preservation action and reconcile its canonical result.
+/// Prepare performs an explicit temporary reservation+PUT attempt using signed information only
+/// in memory, returning a canonical attach action for the caller to journal separately. Attach
+/// and reparent each make at most one canonical mutation. Lost canonical replies are reconciled
+/// by exact ID; ambiguous readbacks remain uncertain. This helper never deletes or loops actions.
+pub async fn execute_preservation(
+    store: &Store,
+    action: &PreservationAction,
+) -> Result<PreservationEffect> {
+    if let Some(effect) = reconcile_preservation(store, action).await? {
+        return Ok(effect);
+    }
+    match action {
+        PreservationAction::PrepareCopy {
+            target_issue,
+            attachment_id,
+            asset,
+        } => {
+            preservation_target(store, target_issue, &asset.issue_id).await?;
+            let bytes = verify_bytes(store, &asset.url, asset).await?;
+            let slot = store
+                .linear
+                .reserve_upload(&asset.content_type, &asset.filename, asset.size)
+                .await?;
+            store.linear.put_upload(&slot, bytes).await?;
+            let asset_url = slot["assetUrl"]
+                .as_str()
+                .ok_or_else(|| {
+                    Fault::new(
+                        "INCOMPLETE_DATA",
+                        "Upload reservation lacks canonical asset URL",
+                    )
+                    .uncertain()
+                })?
+                .to_owned();
+            Ok(PreservationEffect {
+                confirmed: json!({"temporary_copy":{"asset_url":asset_url,"size_bytes":asset.size,"sha256":asset.digest},"temporary_upload_may_remain":true}),
+                next: Some(PreservationAction::AttachCopy {
+                    target_issue: target_issue.clone(),
+                    attachment_id: attachment_id.clone(),
+                    asset: asset.clone(),
+                    asset_url,
+                }),
+            })
+        }
+        PreservationAction::AttachCopy {
+            target_issue,
+            attachment_id,
+            asset,
+            asset_url,
+        } => {
+            preservation_target(store, target_issue, &asset.issue_id).await?;
+            verify_bytes(store, asset_url, asset).await?;
+            let result=store.linear.call("MCreateArtifact",json!({"input":{"id":attachment_id,"issueId":target_issue,"title":asset.artifact["title"].as_str().unwrap_or(&asset.filename),"url":asset_url,"metadata":copy_metadata(asset)}})).await;
+            if let Err(f) = result {
+                if !f.uncertain {
+                    return Err(f);
+                }
+                if let Some(effect) = reconcile_preservation(store, action)
+                    .await
+                    .map_err(Fault::uncertain)?
+                {
+                    return Ok(effect);
+                }
+                return Err(f);
+            }
+            reconcile_preservation(store, action)
+                .await
+                .map_err(Fault::uncertain)?
+                .ok_or_else(|| {
+                    Fault::new(
+                        "NATIVE_STATE_MISMATCH",
+                        "Published copy is not confirmed by exact-ID readback",
+                    )
+                    .uncertain()
+                })
+        }
+        PreservationAction::ReparentDocument {
+            target_issue,
+            document,
+        } => {
+            let origin = document["issue"]["id"]
+                .as_str()
+                .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "Original Document Issue missing"))?;
+            preservation_target(store, target_issue, origin).await?;
+            let result=store.linear.call("MUpdateDocument",json!({"id":identity(document)?,"input":{"issueId":target_issue,"projectId":null}})).await;
+            if let Err(f) = result {
+                if !f.uncertain {
+                    return Err(f);
+                }
+                if let Some(effect) = reconcile_preservation(store, action)
+                    .await
+                    .map_err(Fault::uncertain)?
+                {
+                    return Ok(effect);
+                }
+                return Err(f);
+            }
+            reconcile_preservation(store, action)
+                .await
+                .map_err(Fault::uncertain)?
+                .ok_or_else(|| {
+                    Fault::new(
+                        "NATIVE_STATE_MISMATCH",
+                        "Reparented Document is not confirmed",
+                    )
+                    .uncertain()
+                })
+        }
+    }
+}
+/// Confirm a completed action from native ownership/content/provenance/bytes; pending state refuses.
+/// The caller may use this before any deletion even after a cold process restart.
+pub async fn preservation_readback(
+    store: &Store,
+    action: &PreservationAction,
+) -> Result<PreservationEffect> {
+    reconcile_preservation(store, action).await?.ok_or_else(|| {
+        Fault::new(
+            "PRESERVATION_INCOMPLETE",
+            "Canonical preservation effect is not confirmed",
+        )
+    })
+}
+
 /// Preserve a body inside a backtick fence strictly longer than every native backtick run.
 fn fenced(body: &str) -> String {
     let longest = body.split(|c| c != '\x60').map(str::len).max().unwrap_or(0);

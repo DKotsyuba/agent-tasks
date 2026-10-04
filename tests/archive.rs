@@ -158,3 +158,113 @@ async fn archive_render_is_complete_deterministic_and_bounded() {
     assert!(blocked.iter().any(|b| b.code == "ARCHIVE_TOO_LARGE"));
     assert!(blocked.iter().any(|b| b.code == "SECTION_TOO_LARGE"));
 }
+
+/// Explicit prepare/publish/reparent actions survive lost canonical replies and cold readback without duplicates.
+#[tokio::test]
+async fn archive_preservation_reconciles_files_and_documents() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let epic = f.work("epic", &project, None).await;
+    let task = f.work("atomic", &project, Some(&epic)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("preservation.bin");
+    std::fs::write(&path, b"retained\0binary").unwrap();
+    f.ok(
+        "upload_file",
+        json!({"work_id":task,"path":path.to_str().unwrap(),"note":"Original note"}),
+    )
+    .await;
+    let doc=f.ok("save_document",json!({"issue_id":task,"title":"Native document","content":"Full native document 😀\n```\n## literal\n```"})).await;
+    let store = f.store();
+    let mut set = archive::collect(
+        &store,
+        &store.work(&epic).await.unwrap(),
+        &store.graph(&project).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(set.assets.len(), 1);
+    assert!(
+        archive::preservation_plan(&set).is_err(),
+        "unfinished fixture sources must block a production plan"
+    );
+    // The test exercises preservation primitives only; no deletion or empirical gate qualification occurs.
+    set.blockers.clear();
+    let plan = archive::preservation_plan(&set).unwrap();
+    assert_eq!(plan.len(), 2);
+    let prepared = archive::execute_preservation(&store, &plan[0])
+        .await
+        .unwrap();
+    let next = prepared.next.unwrap();
+    let serialized = serde_json::to_string(&next).unwrap();
+    assert!(!serialized.contains("uploadUrl") && !serialized.contains("headers"));
+    f.db.lock().await.lose = Some("MCreateArtifact".into());
+    let attached = archive::execute_preservation(&store, &next).await.unwrap();
+    assert!(attached.next.is_none());
+    let count = f.db.lock().await.operation_counts["MCreateArtifact"];
+    archive::execute_preservation(&store, &plan[0])
+        .await
+        .unwrap();
+    assert_eq!(
+        f.db.lock().await.operation_counts["MCreateArtifact"],
+        count,
+        "reconcile must not publish twice"
+    );
+    let attachment = attached.confirmed["attachment"].clone();
+    assert_eq!(attachment["issue"]["id"], epic);
+    assert_eq!(attachment["metadata"]["artifact"], set.assets[0].artifact);
+    assert_eq!(attachment["metadata"]["compacted_from"]["issue_id"], task);
+    f.db.lock().await.lose = Some("MUpdateDocument".into());
+    archive::execute_preservation(&store, &plan[1])
+        .await
+        .unwrap();
+    archive::preservation_readback(&f.store(), &plan[1])
+        .await
+        .unwrap();
+    let native = &f.db.lock().await.documents[doc["id"].as_str().unwrap()];
+    assert_eq!(native["issue"]["id"], epic);
+    assert!(native["project"].is_null());
+    assert!(
+        native["content"]
+            .as_str()
+            .unwrap()
+            .contains("Full native document 😀")
+    );
+}
+/// Concurrent native Document content and copied byte drift both refuse rather than overwriting another writer.
+#[tokio::test]
+async fn archive_preservation_rejects_source_and_provenance_conflicts() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let epic = f.work("epic", &project, None).await;
+    let task = f.work("atomic", &project, Some(&epic)).await;
+    let doc = f
+        .ok(
+            "save_document",
+            json!({"issue_id":task,"title":"Owned document","content":"Original"}),
+        )
+        .await;
+    let store = f.store();
+    let mut set = archive::collect(
+        &store,
+        &store.work(&epic).await.unwrap(),
+        &store.graph(&project).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    set.blockers.clear();
+    let action = archive::preservation_plan(&set).unwrap().remove(0);
+    f.db.lock()
+        .await
+        .documents
+        .get_mut(doc["id"].as_str().unwrap())
+        .unwrap()["content"] = json!("Concurrent native edit");
+    let fault = archive::execute_preservation(&store, &action)
+        .await
+        .unwrap_err();
+    assert_eq!(fault.code, "SOURCE_CHANGED");
+    assert_eq!(
+        f.db.lock().await.documents[doc["id"].as_str().unwrap()]["issue"]["id"],
+        task
+    );
+}
