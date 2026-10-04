@@ -20,3 +20,9 @@ Manual state violations are not automatically rolled back. Restore changed paren
 If the object or its state attachment was deleted, do not silently recreate a different work item. Inspect the preserved native history and the original request. API authentication, rate limits, malformed/partial responses and missing objects remain distinct failures.
 
 Only the transport configuration contains a secret bearer credential. Workflow state is in Linear; no signing key or local workflow database needs recovery.
+
+## Queued calls and gateway interruption
+
+One writer lock serializes entire calls, including provider collection. Each provider HTTP request has a 30-second timeout; there is no total tool-call timeout, so a caller's deadline can expire while queued. A timed-out write remains uncertain: read its native context and retry its exact saved request. Keep destructive batches bounded by measured request time and the caller's deadline; collection time also consumes that budget.
+
+The default stdio Bridge can resume discovery after a gateway is terminated with SIGTERM and restarted on the same endpoint. An in-flight request can return `Gateway request failed; inspect any pending mutation before retrying`; this does not prove whether its provider effect occurred. Restart/reconnect if discovery cannot resume, then reconcile the persisted intent. `cargo test --test runtime_risks -- --nocapture` measures queue/client deadlines and actual product stdio with a separate production-writer test process and loopback provider. Its timing is synthetic evidence, not a live Linear performance or host timeout guarantee.

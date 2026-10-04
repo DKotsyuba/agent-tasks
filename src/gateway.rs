@@ -1579,13 +1579,13 @@ impl Gateway {
             // The preview shares the exact guards and, when allowed, the exact effect plan
             // the executing transition follows; it performs no write.
             let mut preview =
-                crate::guidance::preview_effects(&w, &graph, target, text(a, "actor_role")?);
+                crate::guidance::preview_effects(w, &graph, target, text(a, "actor_role")?);
             preview["status"] = json!(target);
             return Ok(preview);
         }
         rules::enforce(errors)?;
         let m = w.managed()?;
-        if w.status()? == target && m.status == target && !rules::restart_integration(&w, &graph) {
+        if w.status()? == target && m.status == target && !rules::restart_integration(w, &graph) {
             return Ok(self
                 .with_guidance(
                     json!({"issue":w.native,"unchanged":true}),
@@ -1596,7 +1596,7 @@ impl Gateway {
                 .await);
         }
         if target == Status::Duplicate {
-            self.duplicate_target(&w, &m.fields).await?;
+            self.duplicate_target(w, &m.fields).await?;
         }
         let states = self
             .states(w.native["team"]["id"].as_str().unwrap())
@@ -1606,7 +1606,7 @@ impl Gateway {
         next.status = target;
         let mut input = json!({"stateId":state});
         if target == Status::InReview && m.kind == Kind::Module {
-            let report = crate::reports::module_report(&w, &graph)?;
+            let report = crate::reports::module_report(w, &graph)?;
             let patch = json!({"result":report.summary,"check_result":report.reported_checks});
             self.catalog.validate_fields(Kind::Module, &patch)?;
             if next.fields["result"] != patch["result"]
@@ -1656,7 +1656,7 @@ impl Gateway {
                     .collect();
             }
         }
-        let confirmed = self.update(&w, next, input, request).await?;
+        let confirmed = self.update(w, next, input, request).await?;
         Ok(self
             .with_guidance(confirmed, w.id(), &graph, text(a, "actor_role")?)
             .await)
