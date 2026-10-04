@@ -140,15 +140,21 @@ impl Probe {
             .linear
             .object("QArchiveIssue", "issue", id)
             .await?;
-        agent_tasks::model::require(
-            v["project"]["id"] == self.report["sentinel_project"]
-                && v["trashed"] == false
-                && v["title"] == "Archive gate fixture sentinel",
-            "SENTINEL_CHANGED",
-            "Unrelated sentinel changed",
-        )?;
+        validate_sentinel(&v, &self.report["sentinel_project"])?;
         Ok(v)
     }
+}
+
+/// Verify the expected sentinel's native project/title and nullable untrashed flag.
+/// Missing/invalid flags remain incomplete; only a present true flag means trashed.
+fn validate_sentinel(native: &Value, project: &Value) -> Result<()> {
+    agent_tasks::model::require(
+        native["project"]["id"] == *project
+            && !agent_tasks::archive::is_trashed(native)?
+            && native["title"] == "Archive gate fixture sentinel",
+        "SENTINEL_CHANGED",
+        "Unrelated sentinel changed",
+    )
 }
 
 /// Copy a native response for durable evidence, removing ephemeral signed upload credentials.
@@ -211,7 +217,7 @@ fn cleanup_step(report: &Value, purpose: &str, native: &Value) -> Result<String>
         .as_str()
         .ok_or_else(|| Fault::new("STATE_INVALID", "Fixture run missing"))?;
     observed(
-        native["id"] == child_id(run, purpose) && native["trashed"] == false,
+        native["id"] == child_id(run, purpose) && !agent_tasks::archive::is_trashed(native)?,
         "Fresh exact untrashed fixture read required",
     )?;
     let steps = report["steps"]
@@ -248,7 +254,7 @@ async fn gate_delete(p: &mut Probe, issue: &str) -> Result<Value> {
         .object("QArchiveIssue", "issue", issue)
         .await?;
     observed(
-        exact["trashed"] == true,
+        agent_tasks::archive::is_trashed(&exact)?,
         "exact-id trash read is unavailable",
     )?;
     let listed=p.store.pages("QIssues","issues",json!({"filter":{"project":{"id":{"eq":p.report["fixture_project"]}}},"includeArchived":true})).await?;
@@ -261,7 +267,7 @@ async fn gate_delete(p: &mut Probe, issue: &str) -> Result<Value> {
         .object("QArchiveIssue", "issue", issue)
         .await?;
     observed(
-        readback["trashed"] == false,
+        !agent_tasks::archive::is_trashed(&readback)?,
         "issueUnarchive did not restore trash",
     )?;
     Ok(
@@ -645,7 +651,7 @@ async fn archive_native_cleanup() {
                 .as_str()
                 .is_some_and(|s| s.contains(p.report["run"].as_str().expect("run")))
         );
-        if native["trashed"] == true {
+        if agent_tasks::archive::is_trashed(&native).expect("present native trash flag") {
             continue;
         }
         let step = cleanup_step(&p.report, purpose, &native)
@@ -734,5 +740,43 @@ fn archive_cleanup_retries_only_after_exact_native_confirmation() {
     assert_eq!(
         report["steps"]["cleanup-subject"]["fault"]["uncertain"],
         true
+    );
+}
+
+/// Fresh native null flags are valid for sentinel/cleanup; missing flags and positive trash remain distinct.
+#[test]
+fn archive_nullable_sentinel_and_cleanup_flags_are_explicit() {
+    let run = "00000000-0000-4000-8000-000000000001";
+    let report = json!({"run":run,"steps":{}});
+    let project = json!("fixture-project");
+    let sentinel = json!({"id":child_id(run,"sentinel"),"project":{"id":project},"title":"Archive gate fixture sentinel","trashed":null});
+    validate_sentinel(&sentinel, &project).unwrap();
+    let native = json!({"id":child_id(run,"subject"),"trashed":null});
+    assert_eq!(
+        cleanup_step(&report, "subject", &native).unwrap(),
+        "cleanup-subject-attempt-1"
+    );
+    assert!(
+        !agent_tasks::archive::is_trashed(&native).unwrap(),
+        "null never confirms deletion"
+    );
+    let mut missing = sentinel.clone();
+    missing.as_object_mut().unwrap().remove("trashed");
+    assert_eq!(
+        validate_sentinel(&missing, &project).unwrap_err().code,
+        "INCOMPLETE_DATA"
+    );
+    let mut trashed = sentinel;
+    trashed["trashed"] = json!(true);
+    assert_eq!(
+        validate_sentinel(&trashed, &project).unwrap_err().code,
+        "SENTINEL_CHANGED"
+    );
+    assert!(agent_tasks::archive::is_trashed(&trashed).unwrap());
+    let mut missing = native;
+    missing.as_object_mut().unwrap().remove("trashed");
+    assert_eq!(
+        cleanup_step(&report, "subject", &missing).unwrap_err().code,
+        "INCOMPLETE_DATA"
     );
 }

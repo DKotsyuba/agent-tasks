@@ -36,3 +36,6 @@ sentinel and both Projects remain; byte uploads may remain for retention evidenc
 After a failed cleanup attempt, another run first reads the same owned Issue
 by exact ID. A new separately journaled attempt is allowed only when that read
 confirms it remains untrashed; existing failed/unknown intents are preserved.
+The native trash field is nullable. Sentinel and cleanup checks accept present
+`false` or `null` as untrashed; missing/invalid fields are incomplete. A deletion
+is confirmed only by an exact-ID read with a present `true`, never by absence.
