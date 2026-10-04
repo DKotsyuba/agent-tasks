@@ -399,3 +399,34 @@ async fn archive_collects_native_null_trash_flags() {
     assert!(set.epic.native["trashed"].is_null());
     assert_eq!(set.items.len(), 1);
 }
+
+/// Per-item snapshots include new comments/Documents even when the parent Issue timestamp stays unchanged.
+#[tokio::test]
+async fn archive_collect_item_rechecks_details_without_timestamp_assumptions() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let task = f.work("atomic", &project, None).await;
+    let store = f.store();
+    let work = store.work(&task).await.unwrap();
+    let before = archive::collect_item(&store, &work).await.unwrap();
+    {
+        let mut db = f.db.lock().await;
+        let comment = id();
+        db.comments.insert(comment.clone(),json!({"id":comment,"issue":{"id":task},"parent":null,"body":"new comment without Issue timestamp change"}));
+        let doc = id();
+        db.documents.insert(doc.clone(),json!({"id":doc,"issue":{"id":task},"title":"new Document","content":"new Document body","updatedAt":"doc-only-time"}));
+    }
+    let after = archive::collect_item(&store, &work).await.unwrap();
+    assert_eq!(before.native["updatedAt"], after.native["updatedAt"]);
+    assert_eq!(after.comments.len(), before.comments.len() + 1);
+    assert_eq!(after.documents.len(), before.documents.len() + 1);
+    assert_ne!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&after).unwrap()
+    );
+    f.db.lock().await.issues.get_mut(&task).unwrap()["trashed"] = json!(true);
+    assert_eq!(
+        archive::collect_item(&store, &work).await.unwrap_err().code,
+        "SOURCE_CHANGED"
+    );
+}

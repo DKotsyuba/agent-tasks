@@ -16,6 +16,11 @@ Collection cannot qualify unmeasured native limits or perform any deletion.
 The native Issue trash flag is nullable: a present `true` confirms trash,
 while present `false` or `null` means untrashed after an exact-ID read. Missing
 or invalid flag data refuses as incomplete and never confirms deletion.
+`archive::collect_item` recollects one surviving managed source without walking
+recorded children. A compaction caller owns receipt-aware membership and all
+terminal/review/pending guards; the helper retains identity/drift/trash/page
+checks and returns complete details. Compare those details, including comments
+and Documents, instead of treating Issue timestamps as a change counter.
 
 `archive::render` emits one deterministic full Markdown Document: Summary,
 Contents, a level-two section per native identifier/kind and seven uniquely

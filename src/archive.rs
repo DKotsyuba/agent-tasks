@@ -684,6 +684,17 @@ async fn threaded(store: &Store, roots: Vec<Value>) -> Result<Vec<Value>> {
     }
     Ok(nodes.into_values().collect())
 }
+
+/// Recollect one surviving managed Issue's complete selected native details without walking children.
+/// `work` must be a fresh Store-loaded snapshot; native identity/field drift, positive trash,
+/// missing trash visibility and incomplete connection pages refuse as in the full collector.
+/// The caller owns receipt-aware membership, terminal/review/pending validation and comparison
+/// with its frozen source sections before authorizing effects. This read-only helper does not
+/// preserve bytes, create a receipt, modify any object or delete anything.
+pub async fn collect_item(store: &Store, work: &Work) -> Result<ArchiveItem> {
+    item(store, work).await
+}
+
 /// Collect one source's fully paginated details; no remote mutation or credential extraction occurs.
 async fn item(store: &Store, work: &Work) -> Result<ArchiveItem> {
     let native = store
