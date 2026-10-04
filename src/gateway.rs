@@ -463,7 +463,7 @@ impl Gateway {
         let content = patch_description(
             "",
             &json!({"description":description,"repository_path":a["repository_path"],"repository_url":a["repository_url"]}),
-        );
+        )?;
         let project = if let Some(p) = self.store.optional("QProject", "project", id).await? {
             require(
                 p["name"] == title
@@ -570,7 +570,7 @@ impl Gateway {
             input["content"] = json!(patch_description(
                 p["content"].as_str().unwrap_or(""),
                 &fields
-            ));
+            )?);
         }
         require(
             !input.as_object().unwrap().is_empty(),
@@ -835,7 +835,7 @@ impl Gateway {
             crate::git::validate_repository(path)?;
         }
         Self::check_fields(kind, &fields, parent, &graph)?;
-        let description = patch_description("", &fields);
+        let description = patch_description("", &fields)?;
         let native = if let Some(existing) = self.store.optional("QIssue", "issue", id).await? {
             require(
                 existing["project"]["id"] == project
@@ -1324,7 +1324,7 @@ impl Gateway {
         next.fields = fields;
         if !presentation_only {
             next.description =
-                patch_description(w.native["description"].as_str().unwrap_or(""), &patch);
+                patch_description(w.native["description"].as_str().unwrap_or(""), &patch)?;
         }
         if content_edit && !merge_only {
             next.revision += 1;
@@ -1490,7 +1490,7 @@ impl Gateway {
             next.fields[key] = value.clone();
         }
         next.description =
-            patch_description(w.native["description"].as_str().unwrap_or(""), &patch);
+            patch_description(w.native["description"].as_str().unwrap_or(""), &patch)?;
         if changed {
             next.revision += 1;
             next.review = None;
@@ -1560,7 +1560,7 @@ impl Gateway {
                 next.fields["result"] = patch["result"].clone();
                 next.fields["check_result"] = patch["check_result"].clone();
                 next.description =
-                    patch_description(w.native["description"].as_str().unwrap_or(""), &patch);
+                    patch_description(w.native["description"].as_str().unwrap_or(""), &patch)?;
                 next.revision += 1;
                 next.review = None;
                 input["description"] = json!(next.description);
@@ -1587,7 +1587,7 @@ impl Gateway {
                 for k in remove.as_object().unwrap().keys() {
                     next.fields.as_object_mut().unwrap().remove(k);
                 }
-                next.description = patch_description(&m.description, &remove);
+                next.description = patch_description(&m.description, &remove)?;
                 input["description"] = json!(next.description);
                 next.revision += 1;
             }

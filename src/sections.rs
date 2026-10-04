@@ -101,6 +101,40 @@ fn headings(content: &str) -> Vec<Heading> {
     out
 }
 
+/// Exact level-two section boundaries in the original Markdown; code headings are excluded.
+/// The body ends at the next heading of level one or two, or at the document end.
+pub struct FieldSection {
+    /// Plain heading text used to identify a managed field.
+    pub heading: String,
+    /// First byte of the heading, inclusive.
+    pub start: usize,
+    /// First byte following the heading itself.
+    pub body_start: usize,
+    /// First byte of the next same-or-higher heading, exclusive.
+    pub end: usize,
+}
+
+/// Return level-two sections in source order without changing any Markdown bytes.
+/// Fenced and indented code is excluded by CommonMark; unknown headings remain visible.
+pub fn level_two_sections(content: &str) -> Vec<FieldSection> {
+    let items = headings(content);
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.level == 2)
+        .map(|(i, h)| FieldSection {
+            heading: h.text.clone(),
+            start: h.start,
+            body_start: h.body_start,
+            end: items[i + 1..]
+                .iter()
+                .find(|next| next.level <= 2)
+                .map(|next| next.start)
+                .unwrap_or(content.len()),
+        })
+        .collect()
+}
+
 /// Find the single heading matching `heading_text` (trimmed, exact) and the byte offset where
 /// its section ends: the start of the next heading at the same or a higher (numerically lower)
 /// level, or the end of the document. Fails before any write on a missing or ambiguous heading.

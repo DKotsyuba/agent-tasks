@@ -444,6 +444,7 @@ fn context_projection(request: &Value, data: &Value) -> Value {
                 && native["check_result"] == report["reported_checks"]
         }) {
         patch_description(description, &json!({"result":null,"check_result":null}))
+            .unwrap_or_else(|_| description.to_owned())
     } else {
         description.to_owned()
     };
