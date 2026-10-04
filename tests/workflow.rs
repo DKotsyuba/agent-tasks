@@ -2502,7 +2502,9 @@ async fn uncertain_creates_reviews_and_frozen_reparenting() {
     assert!(history.iter().all(|r| !r.formal_review));
     f.result("atomic", &atom).await;
     f.mv(&atom, "In Review").await;
-    assert_eq!(f.call("record_review", review).await.status, "blocked");
+    let historical = f.ok("record_review", review).await;
+    assert_eq!(historical["historical"], true);
+    assert!(historical["review"].is_null());
 }
 
 /// A successful native envelope with unapplied fields never publishes a false workflow result.

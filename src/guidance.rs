@@ -95,8 +95,12 @@ pub fn guidance(w: &Work, graph: &[Work]) -> Value {
     };
     let status = w.status().unwrap_or(m.status);
     let drift = rules::discrepancies(w, graph);
-    let (stage, next, conditions) = if let Some(pending) = &m.pending {
-        let request = &pending.request;
+    let (stage, next, conditions) = if let Some(request) = m
+        .pending
+        .as_ref()
+        .map(|p| &p.request)
+        .or_else(|| m.pending_review.as_ref().map(|p| &p.request))
+    {
         let role = request["arguments"]["actor_role"]
             .as_str()
             .map(str::to_owned)

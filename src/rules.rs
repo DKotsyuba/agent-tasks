@@ -142,7 +142,7 @@ pub fn discrepancies(w: &Work, graph: &[Work]) -> Vec<String> {
         return vec!["Issue has no MCP workflow data".into()];
     };
     let mut e = vec![];
-    if m.pending.is_some() {
+    if m.pending.is_some() || m.pending_review.is_some() {
         e.push("A write is pending; retry the same request_id and arguments".into());
     }
     if w.status().ok() != Some(m.status) {

@@ -112,7 +112,7 @@ fn parse_state_attachment(attachment: &Value, id: &str) -> Result<Meta> {
     let m: Meta = serde_json::from_value(attachment["metadata"]["workflow"].clone())
         .map_err(|_| Fault::new("STATE_INVALID", "Invalid workflow metadata"))?;
     require(
-        m.schema == 2,
+        matches!(m.schema, 2 | 3) && (m.schema == 3 || m.pending_review.is_none()),
         "STATE_INVALID",
         "Unsupported workflow data version",
     )?;
@@ -178,6 +178,11 @@ impl Store {
         let metadata = json!({"workflow":meta});
         if let Some(attachment) = self.optional("QAttachmentById", "attachment", &aid).await? {
             validate_state_owner(&attachment, id)?;
+            require(
+                attachment["metadata"]["workflow"]["schema"] != 3 || meta.schema == 3,
+                "STATE_INVALID",
+                "Workflow schema three must never be downgraded",
+            )?;
             self.linear
                 .call(
                     "MUpdateAttachment",

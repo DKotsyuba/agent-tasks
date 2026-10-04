@@ -136,7 +136,7 @@ impl Status {
     }
 }
 /// Latest review decision; full reports are preserved in native comments.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Review {
     /// Native comment UUID, also the caller's stable review request ID.
     pub id: String,
@@ -201,6 +201,9 @@ pub struct Meta {
     pub last_request: Option<Value>,
     /// A prepared write survives crashes and can only be resumed by its original request.
     pub pending: Option<Box<Pending>>,
+    /// Schema-three review intent persisted before creating its native comment; absent in schema two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_review: Option<PendingReview>,
 }
 impl Meta {
     /// Read imported reports for the current round in attachment order, without touching Git.
@@ -209,6 +212,20 @@ impl Meta {
         self.git_reports.iter().filter(|r| r.round == self.round)
     }
 }
+
+/// Recoverable review publication intent; only its identical request may finalize it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingReview {
+    /// Original normalized tool request, including actor and immutable review arguments.
+    pub request: Value,
+    /// Decision observed before publication; finalization refuses a changed predecessor.
+    pub predecessor: Option<Review>,
+    /// Intended review identity and content stamp.
+    pub review: Review,
+    /// Exact rendered native activity body retained across restarts.
+    pub body: String,
+}
+
 /// Two-phase issue update stored before changing native fields; no background recovery runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pending {

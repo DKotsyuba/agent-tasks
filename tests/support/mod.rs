@@ -62,6 +62,8 @@ pub struct Database {
     pub tick: u64,
     /// Mutation operation whose response should be lost after applying its write.
     pub lose: Option<String>,
+    /// Lose the Nth matching response after its side effect, for multi-save crash boundaries.
+    pub lose_nth: Option<(String, u32)>,
     /// Override only the next created Comment payload body, leaving native storage intact.
     pub comment_response_body: Option<String>,
     /// Override only the next returned ProjectUpdate payload body, leaving storage intact.
@@ -169,6 +171,10 @@ async fn graphql(
             ),
         )),
         "QTeams" => Some(("teams", page(db.teams.values().cloned().collect()))),
+        "QProjectTeams" => Some((
+            "project",
+            json!({"teams":issue_page(db.projects[id]["teams"]["nodes"].as_array().unwrap().clone(),v)}),
+        )),
         "QIssue" => db
             .issues
             .values()
@@ -677,6 +683,15 @@ async fn graphql(
         }
         _ => panic!("Unimplemented fixture operation: {op}"),
     };
+    if let Some((name, left)) = &mut db.lose_nth
+        && name == op
+    {
+        *left -= 1;
+        if *left == 0 {
+            db.lose = Some(op.into());
+            db.lose_nth = None;
+        }
+    }
     if db.lose.as_deref() == Some(op) {
         db.lose = None;
         return Json(json!({"errors":[{"message":"simulated response loss"}]}));

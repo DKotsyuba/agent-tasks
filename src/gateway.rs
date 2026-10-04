@@ -465,6 +465,15 @@ impl Gateway {
             &json!({"description":description,"repository_path":a["repository_path"],"repository_url":a["repository_url"]}),
         )?;
         let project = if let Some(p) = self.store.optional("QProject", "project", id).await? {
+            let teams = self
+                .store
+                .pages("QProjectTeams", "/project/teams", json!({"id":id}))
+                .await?;
+            require(
+                teams.len() == 1 && teams[0]["id"] == a["team_id"],
+                "REQUEST_CONFLICT",
+                "Existing Project team membership differs from this request",
+            )?;
             require(
                 p["name"] == title
                     && markdown_equivalent(&content, p["content"].as_str().unwrap_or("")),
@@ -884,6 +893,7 @@ impl Gateway {
             creation: a.clone(),
             last_request: None,
             pending: None,
+            pending_review: None,
         };
         self.store
             .save(&native, &meta)
@@ -1026,6 +1036,11 @@ impl Gateway {
     /// Continue only the identical prepared write; another request must resolve the uncertainty first.
     async fn resume(&self, w: &Work, request: &Value) -> Result<Option<Value>> {
         let m = w.managed()?;
+        require(
+            m.pending_review.is_none(),
+            "PENDING_OPERATION",
+            "Retry the pending review request with unchanged arguments first",
+        )?;
         if let Some(p) = &m.pending {
             require(
                 p.request == *request,
@@ -1903,41 +1918,20 @@ impl Gateway {
         Ok(json!({"comment":changed,"replayed":false}))
     }
 
-    /// Persist a native review activity comment and current-round decision, returning its
-    /// permalink without implicitly transitioning work or adding Task review.
+    /// Publish a review through a schema-three intent before its native comment side effect.
+    /// Identical retries resume the captured predecessor; older reports return historical NOOP.
+    /// Legacy comments recover only at the current clean stamp and with strictly newer native time.
+    /// No review moves work status; competing mutations must finish this pending request first.
     async fn review(&self, a: &Value) -> Result<Value> {
         let (w, graph) = self
             .loaded(&self.resolve("issue", text(a, "id")?).await?)
             .await?;
         let m = w.managed()?;
         let request = Self::request("record_review", a);
-        if self.resume(&w, &request).await?.is_some() {
-            let restored = self.store.work(w.id()).await.map_err(Fault::uncertain)?;
-            let comment = self
-                .store
-                .linear
-                .object("QComment", "comment", text(a, "request_id")?)
-                .await
-                .map_err(Fault::uncertain)?;
-            return Ok(self
-                .with_guidance(
-                    json!({"review":restored.managed()?.review,"issue_id":w.id(),"comment":comment,"url":comment["url"],"replayed":true}),
-                    w.id(),
-                    &graph,
-                    "reviewer",
-                )
-                .await);
-        }
-        rules::enforce(rules::discrepancies(&w, &graph))?;
         require(
-            m.kind != Kind::Task,
-            "NO_TASK_REVIEW",
-            "Review the entire Module instead",
-        )?;
-        require(
-            w.status()? == Status::InReview,
-            "NOT_IN_REVIEW",
-            "Move this work to In Review first",
+            m.pending.is_none(),
+            "PENDING_OPERATION",
+            "Retry the pending native write first",
         )?;
         let id = text(a, "request_id")?;
         let content = format!(
@@ -1948,51 +1942,183 @@ impl Gateway {
                 .filter(|v| !v.trim().is_empty())
                 .unwrap_or("None")
         );
-        let body = crate::activity::render(
-            "review",
-            "reviewer",
-            text(a, "actor")?,
-            &content,
-            &json!({"reviewer":a["reviewer"],"session":a["session"],"verdict":a["verdict"],
-                "round":m.round,"revision":m.revision,"source_links":a["artifacts"]}),
-        )?;
-        if let Some(comment) = self.store.optional("QComment", "comment", id).await? {
+        let body_at = |round, revision| {
+            crate::activity::render(
+                "review",
+                "reviewer",
+                text(a, "actor")?,
+                &content,
+                &json!({"reviewer":a["reviewer"],"session":a["session"],"verdict":a["verdict"],
+                "round":round,"revision":revision,"source_links":a["artifacts"]}),
+            )
+        };
+        let mut existing = self.store.optional("QComment", "comment", id).await?;
+        let intent = if let Some(pending) = &m.pending_review {
             require(
-                comment["issue"]["id"] == w.id()
-                    && markdown_equivalent(&body, comment["body"].as_str().unwrap_or("")),
-                "REQUEST_CONFLICT",
-                "Review request_id already names another report",
+                pending.request == request,
+                "PENDING_OPERATION",
+                "Retry the pending review with unchanged arguments",
             )?;
+            require(
+                m.review == pending.predecessor
+                    && m.round == pending.review.round
+                    && m.revision == pending.review.revision,
+                "PENDING_CONFLICT",
+                "Review predecessor or content stamp changed",
+            )?;
+            pending.clone()
         } else {
+            if let Some(comment) = &existing {
+                let activity = crate::activity::record(comment, None)?;
+                let round = activity.round.ok_or_else(|| {
+                    Fault::new("REQUEST_CONFLICT", "Review comment has no original round")
+                })?;
+                let revision = activity.revision.ok_or_else(|| {
+                    Fault::new(
+                        "REQUEST_CONFLICT",
+                        "Review comment has no original revision",
+                    )
+                })?;
+                require(
+                    comment["issue"]["id"] == w.id()
+                        && markdown_equivalent(
+                            &body_at(round, revision)?,
+                            comment["body"].as_str().unwrap_or(""),
+                        ),
+                    "REQUEST_CONFLICT",
+                    "Review request_id already names another report",
+                )?;
+                let mut historical = round != m.round || revision != m.revision;
+                if let Some(previous) = &m.review {
+                    if previous.id == id {
+                        historical = true;
+                    } else if !historical {
+                        let predecessor = self
+                            .store
+                            .linear
+                            .object("QComment", "comment", &previous.id)
+                            .await?;
+                        let created = comment["createdAt"]
+                            .as_str()
+                            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+                        let before = predecessor["createdAt"]
+                            .as_str()
+                            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+                        require(
+                            created.is_some() && before.is_some(),
+                            "REQUEST_CONFLICT",
+                            "Review order is unknown",
+                        )?;
+                        if created < before {
+                            historical = true;
+                        } else {
+                            require(
+                                created > before,
+                                "REQUEST_CONFLICT",
+                                "Review timestamps do not establish order",
+                            )?;
+                        }
+                    }
+                }
+                if historical {
+                    return Ok(self
+                        .with_guidance(
+                            json!({"review":m.review,"issue_id":w.id(),"comment":comment,
+                        "url":comment["url"],"replayed":true,"historical":true}),
+                            w.id(),
+                            &graph,
+                            "reviewer",
+                        )
+                        .await);
+                }
+            }
+            crate::model::PendingReview {
+                request: request.clone(),
+                predecessor: m.review.clone(),
+                review: Review {
+                    id: id.into(),
+                    round: m.round,
+                    revision: m.revision,
+                    accepted: a["verdict"] == "accepted",
+                },
+                body: body_at(m.round, m.revision)?,
+            }
+        };
+        let mut guarded = w.clone();
+        if let Some(meta) = &mut guarded.meta {
+            meta.pending_review = None;
+        }
+        rules::enforce(rules::discrepancies(&guarded, &graph))?;
+        require(
+            m.kind != Kind::Task,
+            "NO_TASK_REVIEW",
+            "Review the entire Module instead",
+        )?;
+        require(
+            w.status()? == Status::InReview,
+            "NOT_IN_REVIEW",
+            "Move this work to In Review first",
+        )?;
+        if m.pending_review.is_none() && existing.is_none() {
+            let mut prepared = m.clone();
+            prepared.schema = 3;
+            prepared.pending_review = Some(intent.clone());
+            self.store
+                .save(&w.native, &prepared)
+                .await
+                .map_err(Fault::uncertain)?;
+        }
+        if existing.is_none() {
             self.store
                 .linear
                 .call(
                     "MCreateComment",
-                    json!({"input":{"id":id,"issueId":w.id(),"body":body}}),
+                    json!({"input":{"id":id,"issueId":w.id(),"body":intent.body}}),
                 )
                 .await?;
+            existing = Some(
+                self.store
+                    .linear
+                    .object("QComment", "comment", id)
+                    .await
+                    .map_err(Fault::uncertain)?,
+            );
         }
-        let comment = self
-            .store
-            .linear
-            .object("QComment", "comment", id)
-            .await
-            .map_err(Fault::uncertain)?;
-        let mut next = m.clone();
-        next.review = Some(Review {
-            id: id.into(),
-            round: m.round,
-            revision: m.revision,
-            accepted: a["verdict"] == "accepted",
-        });
+        let comment =
+            existing.ok_or_else(|| Fault::new("RECORD_MISSING", "Review comment disappeared"))?;
+        require(
+            comment["issue"]["id"] == w.id()
+                && markdown_equivalent(&intent.body, comment["body"].as_str().unwrap_or("")),
+            "NATIVE_STATE_MISMATCH",
+            "Linear did not confirm the review body",
+        )
+        .map_err(Fault::uncertain)?;
+        let fresh = self.store.work(w.id()).await.map_err(Fault::uncertain)?;
+        let fresh_meta = fresh.managed()?;
+        require(
+            fresh_meta.review == intent.predecessor
+                && fresh_meta.round == intent.review.round
+                && fresh_meta.revision == intent.review.revision,
+            "PENDING_CONFLICT",
+            "Review predecessor changed before finalization",
+        )?;
+        let mut clean = fresh.clone();
+        if let Some(meta) = &mut clean.meta {
+            meta.pending_review = None;
+        }
+        rules::enforce(rules::discrepancies(&clean, &graph))?;
+        let mut next = fresh_meta.clone();
+        next.review = Some(intent.review);
+        next.pending_review = None;
         next.last_request = Some(request);
         self.store
-            .save(&w.native, &next)
+            .save(&fresh.native, &next)
             .await
             .map_err(Fault::uncertain)?;
         Ok(self
             .with_guidance(
-                json!({"review":next.review,"issue_id":w.id(),"comment":comment,"url":comment["url"],"replayed":false}),
+                json!({"review":next.review,"issue_id":w.id(),"comment":comment,
+            "url":comment["url"],"replayed":false}),
                 w.id(),
                 &graph,
                 "reviewer",

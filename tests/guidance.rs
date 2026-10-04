@@ -62,6 +62,7 @@ impl Fixture {
             creation: json!({"tool": "fixture"}),
             last_request: None,
             pending: None,
+            pending_review: None,
         };
         self.works.push(Work {
             native,

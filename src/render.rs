@@ -422,6 +422,7 @@ fn context_projection(request: &Value, data: &Value) -> Value {
         .collect();
     let pending_call = data["workflow"]["pending"]["request"]
         .as_object()
+        .or_else(|| data["workflow"]["pending_review"]["request"].as_object())
         .map(|pending| {
             serde_json::to_string_pretty(
                 &json!({"tool":pending.get("tool"),"arguments":pending.get("arguments")}),

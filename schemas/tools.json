@@ -3744,7 +3744,7 @@
   },
   {
     "name": "record_review",
-    "description": "Record an independent reviewer report for the current round of one In Review Module, Atomic or Epic as a native review comment: reviewer, verdict accepted/changes_requested, summary, findings and artifact links. Returns the comment permalink and never changes status — the orchestrator decides closure. Tasks have no separate review; a Task is reviewed within its Module. Example: {\"request_id\":\"00000000-0000-4000-8000-00000000000a\",\"actor\":\"codex:reviewer\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"reviewer\":\"codex:reviewer\",\"verdict\":\"accepted\",\"summary\":\"Matches the contract.\",\"findings\":\"No blockers.\",\"artifacts\":[\"https://example.com/report.txt\"]}",
+    "description": "Record an independent reviewer report for the current round of one In Review Module, Atomic or Epic as a native review comment: reviewer, verdict accepted/changes_requested, summary, findings and artifact links. Persists review intent before publication; identical retries resume it, historical reports never replace newer decisions, and legacy ordering ambiguity conflicts. Returns the comment permalink and never changes status — the orchestrator decides closure. Tasks have no separate review; a Task is reviewed within its Module. Example: {\"request_id\":\"00000000-0000-4000-8000-00000000000a\",\"actor\":\"codex:reviewer\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"reviewer\":\"codex:reviewer\",\"verdict\":\"accepted\",\"summary\":\"Matches the contract.\",\"findings\":\"No blockers.\",\"artifacts\":[\"https://example.com/report.txt\"]}",
     "inputSchema": {
       "type": "object",
       "properties": {
