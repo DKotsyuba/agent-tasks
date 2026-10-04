@@ -98,7 +98,10 @@ pub fn is_trashed(issue: &Value) -> Result<bool> {
     match issue.get("trashed") {
         Some(Value::Bool(true)) => Ok(true),
         Some(Value::Bool(false) | Value::Null) => Ok(false),
-        _ => Err(Fault::new("INCOMPLETE_DATA", "Native Issue trash flag is missing or invalid")),
+        _ => Err(Fault::new(
+            "INCOMPLETE_DATA",
+            "Native Issue trash flag is missing or invalid",
+        )),
     }
 }
 
