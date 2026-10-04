@@ -75,6 +75,213 @@ pub struct ArchiveSet {
     /// Explicit causes preventing writes/deletion; no caller may treat a nonempty list as eligible.
     pub blockers: Vec<ArchiveBlocker>,
 }
+
+/// Empirically measured native/rendered bounds; absent values always block application.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ArchiveLimits {
+    /// Largest verified single-document source byte count; no splitting/truncation is allowed.
+    pub archive_max_bytes: Option<usize>,
+    /// Largest verified complete H3 section body byte count within the rendered response budget.
+    pub section_max_bytes: Option<usize>,
+}
+/// Optional facts captured once by the caller; rendering itself never reads a clock.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ArchiveFacts {
+    /// Applied timestamp captured in durable intent, absent for a pure preview.
+    pub applied_at: Option<String>,
+}
+/// Preserve a body inside a backtick fence strictly longer than every native backtick run.
+fn fenced(body: &str) -> String {
+    let longest = body.split(|c| c != '\x60').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.saturating_add(1).max(3));
+    format!("{fence}text\n{body}\n{fence}\n")
+}
+/// Serialize machine/native records with stable key order; encoding failure is explicit.
+fn record(value: &Value) -> Result<String> {
+    serde_json::to_string_pretty(value)
+        .map_err(|_| Fault::new("STATE_INVALID", "Archive record encoding failed"))
+}
+/// Render exact text bodies independently of their metadata, preserving threading/actors/reactions.
+fn bodies(records: &[Value]) -> Result<String> {
+    let mut out = String::new();
+    for native in records {
+        let mut metadata = native.clone();
+        let body = metadata
+            .as_object_mut()
+            .and_then(|m| m.remove("body"))
+            .unwrap_or(Value::Null);
+        out.push_str(&fenced(&record(&metadata)?));
+        out.push_str(&fenced(body.as_str().unwrap_or("")));
+    }
+    Ok(out)
+}
+/// Produce every required H3 section body for one source without dropping native body text.
+fn item_sections(item: &ArchiveItem) -> Result<Vec<(&'static str, String)>> {
+    let mut fields = item.native.clone();
+    let description = fields
+        .as_object_mut()
+        .and_then(|m| m.remove("description"))
+        .unwrap_or(Value::Null);
+    let fields = format!(
+        "{}{}",
+        fenced(&record(&fields)?),
+        fenced(description.as_str().unwrap_or(""))
+    );
+    let workflow = serde_json::to_value(&item.workflow)
+        .map_err(|_| Fault::new("STATE_INVALID", "Archive workflow encoding failed"))?;
+    let mut documents = String::new();
+    for document in &item.documents {
+        let mut metadata = document.clone();
+        let map = metadata
+            .as_object_mut()
+            .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "Document record is invalid"))?;
+        let body = map.remove("content").unwrap_or(Value::Null);
+        let comments = map.remove("comments").unwrap_or(json!([]));
+        documents.push_str(&fenced(&record(&metadata)?));
+        documents.push_str(&fenced(body.as_str().unwrap_or("")));
+        documents.push_str(&bodies(comments.as_array().ok_or_else(|| {
+            Fault::new("INCOMPLETE_DATA", "Document comments are invalid")
+        })?)?);
+    }
+    Ok(vec![
+        ("Fields", fields),
+        ("Workflow", fenced(&record(&workflow)?)),
+        ("Comments", bodies(&item.comments)?),
+        ("Documents", documents),
+        ("Files", fenced(&record(&json!(item.files))?)),
+        ("Relations", fenced(&record(&json!(item.relations))?)),
+        ("History", fenced(&record(&json!(item.history))?)),
+    ])
+}
+/// Validate a native identifier before using it as a unique archive heading component.
+fn heading_identifier(item: &ArchiveItem) -> Result<&str> {
+    let identifier = item.native["identifier"]
+        .as_str()
+        .ok_or_else(|| Fault::new("INCOMPLETE_DATA", "Archive identifier missing"))?;
+    require(
+        !identifier.is_empty()
+            && identifier
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_')),
+        "INCOMPLETE_DATA",
+        "Archive identifier cannot form a safe heading",
+    )?;
+    Ok(identifier)
+}
+/// Render one deterministic readable full archive, with Summary/Contents/H2 items and unique H3 sections.
+/// Original descriptions, comments and Document text remain exact inside safe fences. Facts
+/// are optional caller-captured values. All original URLs are historical; no clock or I/O occurs.
+pub fn render(set: &ArchiveSet, facts: Option<&ArchiveFacts>) -> Result<String> {
+    let mut out = String::from(
+        "# Complete Epic archive\n\n## Summary\n\nOriginal URLs below are historical and may stop resolving after soft deletion.\n\n",
+    );
+    out.push_str(&fenced(&record(&set.epic.workflow.fields)?));
+    if let Some(timestamp) = facts.and_then(|f| f.applied_at.as_deref()) {
+        out.push_str(&format!(
+            "Applied at: {}\n\n",
+            serde_json::to_string(timestamp)
+                .map_err(|_| Fault::new("STATE_INVALID", "Timestamp encoding failed"))?
+        ));
+    }
+    let sources: Vec<_> = std::iter::once(&set.epic).chain(&set.items).collect();
+    let mut unique = BTreeSet::new();
+    for source in &sources {
+        let identifier = heading_identifier(source)?;
+        require(
+            unique.insert(identifier),
+            "INCOMPLETE_DATA",
+            "Duplicate native identifier would make archive headings ambiguous",
+        )?;
+        out.push_str(&format!(
+            "- {identifier} · {} · {} · {} · completedAt={}\n",
+            source.kind.label(),
+            serde_json::to_string(&source.native["title"])
+                .map_err(|_| Fault::new("STATE_INVALID", "Title encoding failed"))?,
+            source.workflow.status.name(),
+            serde_json::to_string(&source.native["completedAt"])
+                .map_err(|_| Fault::new("STATE_INVALID", "Completion encoding failed"))?
+        ));
+    }
+    out.push_str("\n## Contents\n\n");
+    for source in &sources {
+        let identifier = heading_identifier(source)?;
+        out.push_str(&format!("- {identifier} · {}\n", source.kind.label()));
+        for (name, _) in item_sections(source)? {
+            out.push_str(&format!("  - {identifier} {name}\n"));
+        }
+    }
+    for source in sources {
+        let identifier = heading_identifier(source)?;
+        out.push_str(&format!("\n## {identifier} · {}\n", source.kind.label()));
+        for (name, body) in item_sections(source)? {
+            out.push_str(&format!("\n### {identifier} {name}\n\n{body}"));
+        }
+    }
+    Ok(out)
+}
+/// Return all explicit unknown/oversize document and complete-section bounds without writes.
+/// `document` must be the exact output of `render(set, facts)`; caller-provided measured limits
+/// never waive transport/render budgets, and equality at a limit is accepted.
+pub fn validate_limits(
+    set: &ArchiveSet,
+    document: &str,
+    limits: ArchiveLimits,
+) -> Result<Vec<ArchiveBlocker>> {
+    let mut blockers = vec![];
+    let epic = identity(&set.epic.native)?;
+    match limits.archive_max_bytes {
+        None => block(
+            &mut blockers,
+            "ARCHIVE_LIMIT_UNKNOWN",
+            epic,
+            "Single native Document capacity has not been measured",
+        ),
+        Some(cap) if cap == 0 || cap >= 8 * 1024 * 1024 || document.len() > cap => block(
+            &mut blockers,
+            "ARCHIVE_TOO_LARGE",
+            epic,
+            format!(
+                "Archive is {} bytes, measured cap {cap}; no splitting/truncation",
+                document.len()
+            ),
+        ),
+        _ => {}
+    }
+    let Some(cap) = limits.section_max_bytes else {
+        block(
+            &mut blockers,
+            "SECTION_LIMIT_UNKNOWN",
+            epic,
+            "Complete rendered section capacity has not been measured",
+        );
+        return Ok(blockers);
+    };
+    require(
+        cap > 0 && cap <= crate::render::TEXT_BUDGET_BYTES,
+        "INVALID_INPUT",
+        "Section cap must fit the existing response text budget",
+    )?;
+    for source in std::iter::once(&set.epic).chain(&set.items) {
+        let identifier = heading_identifier(source)?;
+        for (name, _) in item_sections(source)? {
+            let heading = format!("{identifier} {name}");
+            let section = crate::sections::find_section(document, &heading)?;
+            if section.body.len() > cap {
+                block(
+                    &mut blockers,
+                    "SECTION_TOO_LARGE",
+                    identity(&source.native)?,
+                    format!(
+                        "{heading}: {} bytes > {cap}; no truncation",
+                        section.body.len()
+                    ),
+                );
+            }
+        }
+    }
+    Ok(blockers)
+}
+
 /// Append a stable refusal to an archive preview without performing writes.
 fn block(blockers: &mut Vec<ArchiveBlocker>, code: &str, item: &str, detail: impl Into<String>) {
     blockers.push(ArchiveBlocker {

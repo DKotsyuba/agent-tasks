@@ -14,6 +14,17 @@ references block preservation/deletion. Asset reads use the existing host,
 byte-size and timeout guards and capture exact size and SHA-256 before planning.
 Collection cannot qualify unmeasured native limits or perform any deletion.
 
+`archive::render` emits one deterministic full Markdown Document: Summary,
+Contents, a level-two section per native identifier/kind and seven uniquely
+named level-three detail sections. Descriptions, comment/reply bodies and
+Document content are retained inside fences longer than every original
+backtick run. Metadata, actors, reactions and available history remain alongside
+those bodies. Original links are explicitly historical. Rendering reads no
+clock; an optional applied timestamp must be captured by the caller once.
+`validate_limits` refuses unknown measured document/section bounds and any
+overflow. Exact section bodies are measured with the same CommonMark parser
+used by reads; the archive is never truncated or divided into multiple files.
+
 ## MCP result presentation
 
 The resident HTTP Handler and the stdio Bridge expose the same static catalogue.

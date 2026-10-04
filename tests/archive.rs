@@ -102,3 +102,59 @@ async fn archive_blocks_moved_children_and_foreign_artifacts() {
             .any(|b| b.item == module && b.detail.contains("foreign"))
     );
 }
+
+/// Rendering retains exact hostile body text and refuses unknown/overflow limits without splitting.
+#[tokio::test]
+async fn archive_render_is_complete_deterministic_and_bounded() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let epic = f.work("epic", &project, None).await;
+    let task = f.work("atomic", &project, Some(&epic)).await;
+    let body = "Original 😀\n`````\n## Summary\n### forged Fields\n`````";
+    let cid = id();
+    {
+        let mut db = f.db.lock().await;
+        db.comments.insert(cid.clone(),json!({"id":cid,"issue":{"id":task},"parent":null,"body":body,"user":{"name":"Author"},"reactions":[{"emoji":"👍"}]}));
+    }
+    let store = f.store();
+    let set = archive::collect(
+        &store,
+        &store.work(&epic).await.unwrap(),
+        &store.graph(&project).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    let rendered = archive::render(&set, None).unwrap();
+    assert_eq!(rendered, archive::render(&set, None).unwrap());
+    assert!(rendered.contains(body));
+    assert!(rendered.contains("``````text"));
+    assert!(agent_tasks::sections::find_section(&rendered, "forged Fields").is_err());
+    let identifier = set.items[0].native["identifier"].as_str().unwrap();
+    let comments =
+        agent_tasks::sections::find_section(&rendered, &format!("{identifier} Comments")).unwrap();
+    assert!(
+        comments.body.contains(body)
+            && comments.body.contains("Author")
+            && comments.body.contains("👍")
+    );
+    let unknown =
+        archive::validate_limits(&set, &rendered, archive::ArchiveLimits::default()).unwrap();
+    assert!(unknown.iter().any(|b| b.code == "ARCHIVE_LIMIT_UNKNOWN"));
+    assert!(unknown.iter().any(|b| b.code == "SECTION_LIMIT_UNKNOWN"));
+    let limits = archive::ArchiveLimits {
+        archive_max_bytes: Some(rendered.len()),
+        section_max_bytes: Some(agent_tasks::render::TEXT_BUDGET_BYTES),
+    };
+    assert!(
+        archive::validate_limits(&set, &rendered, limits)
+            .unwrap()
+            .is_empty()
+    );
+    let small = archive::ArchiveLimits {
+        archive_max_bytes: Some(rendered.len() - 1),
+        section_max_bytes: Some(1),
+    };
+    let blocked = archive::validate_limits(&set, &rendered, small).unwrap();
+    assert!(blocked.iter().any(|b| b.code == "ARCHIVE_TOO_LARGE"));
+    assert!(blocked.iter().any(|b| b.code == "SECTION_TOO_LARGE"));
+}
