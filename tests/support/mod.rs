@@ -170,7 +170,7 @@ async fn graphql(
         )),
         "QTeams" => Some(("teams", page(db.teams.values().cloned().collect()))),
         "QArchiveIssue" => db.issues.get(id).cloned().map(|mut n| {
-            if n["trashed"].is_null() {
+            if n.get("trashed").is_none() {
                 n["trashed"] = json!(false);
             }
             if n["reactions"].is_null() {

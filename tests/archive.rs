@@ -2,7 +2,7 @@
 #[allow(dead_code)]
 mod support;
 use agent_tasks::{archive, records::child_id};
-use serde_json::json;
+use serde_json::{Value, json};
 use support::{Fixture, id};
 
 /// Collection follows every native/recorded descendant, all connection pages and threaded replies without writes.
@@ -361,4 +361,41 @@ async fn archive_document_search_reduces_large_native_pages() {
     assert_ne!(next["nodes"][0]["id"], first["nodes"][0]["id"]);
     assert_eq!(next["pageInfo"]["hasNextPage"], true);
     assert_eq!(f.db.lock().await.operation_counts["QSearchDocuments"], 4);
+}
+
+/// Native nullable trash flags stay distinct from an unreadable/missing flag and positive deletion.
+#[test]
+fn archive_native_trash_flag_is_nullable_but_present() {
+    assert!(!archive::is_trashed(&json!({"trashed":null})).unwrap());
+    assert!(!archive::is_trashed(&json!({"trashed":false})).unwrap());
+    assert!(archive::is_trashed(&json!({"trashed":true})).unwrap());
+    assert_eq!(
+        archive::is_trashed(&json!({})).unwrap_err().code,
+        "INCOMPLETE_DATA"
+    );
+    assert!(archive::is_trashed(&json!({"trashed":"false"})).is_err());
+}
+/// Fresh native Issues with present null flags collect successfully without fabricating trash confirmation.
+#[tokio::test]
+async fn archive_collects_native_null_trash_flags() {
+    let f = Fixture::new().await;
+    let project = f.project().await;
+    let epic = f.work("epic", &project, None).await;
+    let task = f.work("atomic", &project, Some(&epic)).await;
+    {
+        let mut db = f.db.lock().await;
+        db.issues.get_mut(&epic).unwrap()["trashed"] = Value::Null;
+        db.issues.get_mut(&task).unwrap()["trashed"] = Value::Null;
+    }
+    let store = f.store();
+    let set = archive::collect(
+        &store,
+        &store.work(&epic).await.unwrap(),
+        &store.graph(&project).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(set.epic.native.get("trashed").is_some());
+    assert!(set.epic.native["trashed"].is_null());
+    assert_eq!(set.items.len(), 1);
 }

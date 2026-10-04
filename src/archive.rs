@@ -91,6 +91,17 @@ pub struct ArchiveFacts {
     pub applied_at: Option<String>,
 }
 
+/// Read the native nullable Issue trash flag after an exact-ID object read.
+/// Only a present `true` confirms trash. Present `false` or `null` means untrashed;
+/// an omitted field or another type is `INCOMPLETE_DATA`, never a deletion confirmation.
+pub fn is_trashed(issue: &Value) -> Result<bool> {
+    match issue.get("trashed") {
+        Some(Value::Bool(true)) => Ok(true),
+        Some(Value::Bool(false) | Value::Null) => Ok(false),
+        _ => Err(Fault::new("INCOMPLETE_DATA", "Native Issue trash flag is missing or invalid")),
+    }
+}
+
 /// One caller-journaled preservation action; no future compaction receipt type is required.
 /// Signed upload URLs/headers exist only inside a running prepare attempt and are never serialized.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -687,7 +698,7 @@ async fn item(store: &Store, work: &Work) -> Result<ArchiveItem> {
         "Issue changed while archive collection started",
     )?;
     require(
-        native["trashed"] == false,
+        !is_trashed(&native)?,
         "SOURCE_CHANGED",
         "Archive source is already trashed or trash visibility is unknown",
     )?;

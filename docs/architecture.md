@@ -13,6 +13,9 @@ claimed. Active external native relations and active same-Project managed
 references block preservation/deletion. Asset reads use the existing host,
 byte-size and timeout guards and capture exact size and SHA-256 before planning.
 Collection cannot qualify unmeasured native limits or perform any deletion.
+The native Issue trash flag is nullable: a present `true` confirms trash,
+while present `false` or `null` means untrashed after an exact-ID read. Missing
+or invalid flag data refuses as incomplete and never confirms deletion.
 
 `archive::render` emits one deterministic full Markdown Document: Summary,
 Contents, a level-two section per native identifier/kind and seven uniquely
