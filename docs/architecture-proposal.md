@@ -62,10 +62,16 @@ alpha = "/work/project-alpha/docs"
 private = "/private/project-beta/notes"
 ```
 
-Every work/document call accepts `store="alpha"` instead of a repeated directory
-path. For example, `project_status(store="private")` and
-`get_context(store="alpha", ref="M-001")`. An explicit absolute root remains useful
-for initial setup and an unregistered store.
+Every work/document call carries a common `project` argument: the configured
+project name is its alias. For example, `project_status(project="private")` and
+`get_context(project="alpha", ref="M-001")`. The configuration maps that name to
+the actual documentation directory. An explicit `root` alternative remains useful
+for initial setup and an unregistered store; `project` and `root` are mutually
+exclusive selectors.
+
+The configured name is a routing alias. A readable title in `project.yaml` is
+ordinary project content; changing that title does not silently retarget calls.
+Product-wide diagnostic `get_status` requires no selected project.
 
 Resolve the selector once at request entry and bind that request to the actual
 root. There is no mutable server-wide current space. Unknown aliases return a
@@ -136,7 +142,7 @@ TODO list, copied owner report or independent development event stream.
 1. Plan or reuse a Module when tracking helps. Group Modules into an Epic only
    when the grouping communicates a shared goal.
 2. Assign one persistent lead. Assignment is not evidence the process is running.
-3. Give the lead only the store root and Module reference.
+3. Give the lead only the configured project name and Module reference.
 4. The lead gets its assignment, criteria, useful referenced excerpts, existing
    results and handoff in one call.
 5. Record a Task or Module result once. Task start is not a mandatory extra call.
@@ -176,9 +182,10 @@ Names and exact schemas remain proposals; tool count is not a design quota.
 | `save_document` | Guarded edit of one known Markdown path or unique section |
 | `checkpoint` | Commit explicitly selected store paths |
 
-Every work/document call names its store alias or explicit root. Short aliases
-save repetition without an implicit current space; correctness does not depend
-on one server process corresponding to one agent.
+Every work/document call selects its alias through the common `project` argument,
+or uses the explicit `root` alternative. Short project names save repetition
+without an implicit current space; correctness does not depend on one server
+process corresponding to one agent.
 
 Context and write replies return ONE opaque observation reference (`obs`).
 The caller copies it where needed; it never assembles hashes or revision maps.
@@ -204,23 +211,24 @@ It does not automatically prescribe initialization.
 
 ### Substantial project entry and delegation
 
-`project_status(root)` returns purpose, active work, assignments, reported results,
+`project_status(project="alpha")` returns purpose, active work, assignments, reported results,
 blockers and coverage. Planning reuses existing work when possible.
 
-`plan_work(..., obs=...)` returns confirmed work references. Delegate only
-`{root, Module reference}`; do not repeat the specification in the launch prompt.
+`plan_work(project="alpha", ..., obs=...)` returns confirmed work references.
+Delegate only `{project: "alpha", Module reference}`; do not repeat the
+specification in the launch prompt.
 
 ### Persistent lead, completion and review
 
-`get_context(M-001)` returns acceptance, relevant sections, Tasks/results, note,
+`get_context(project="alpha", ref="M-001")` returns acceptance, relevant sections, Tasks/results, note,
 blocker and observation.
 
-`record_work(M-001/T-02, result=..., checks=..., obs=...)` records the outcome once.
+`record_work(project="alpha", ref="M-001/T-02", result=..., checks=..., obs=...)` records the outcome once.
 Its text supplies the Module report, reviewer pack and status. A small improvement
 can be included in existing work rather than becoming another administrative item.
 
-`get_context(M-001, view=reviewer)`, then
-`review_module(M-001, accepted, summary=..., obs=...)` records reviewed completion.
+`get_context(project="alpha", ref="M-001", view="reviewer")`, then
+`review_module(project="alpha", ref="M-001", verdict="accepted", summary=..., obs=...)` records reviewed completion.
 Delivery facts remain separate. On interruption, write a useful handoff once;
 the next session restores context through one read.
 
@@ -328,7 +336,7 @@ Before implementation is called useful, exercise:
 
 - zero tracking writes/documents for a tiny fix or an untracked-directory read;
 - a meaningful Module without a boilerplate documentation bundle;
-- one-call owner status and lead entry by root/reference;
+- one-call owner status and lead entry by configured project name/reference;
 - report-once completion and direct accepted-review closure;
 - rejection of review against changed relevant inputs and visibility of missing checks;
 - concurrent writes to separate Module files without lost updates;
