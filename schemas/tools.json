@@ -1,13 +1,1207 @@
 [
   {
-    "name": "get_status",
-    "description": "Report the product identity and scaffold qualification status. Read-only; does not access files or external services.",
-    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
     "annotations": {
-      "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true,
-      "openWorldHint": false
-    }
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Report product identity and declared release qualification. Read-only and configuration-independent; it does not inspect project work. Use project_status for the actual tracked progress.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_status"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Read compact context for a configured project alias, Module (M-001), or embedded Task (M-001/T-001). Start here before planning or resuming work. Returns human-readable intent, current facts, conditions, exact file version and bounded details; project context also returns allocation_version. Select summary/tasks/results/checks/review/log; no task-specific review exists. Reads create/repair nothing. For continuation keep the same scope/view/review_index and use the returned start and snapshot version. Use manifest Version for edit_project, allocation_version for init_project/create_module, and Module Version for all child writes. Missing configuration is a safe refusal; YAML is internal storage.",
+    "inputSchema": {
+      "$defs": {
+        "View": {
+          "description": "Allowlisted context projection; YAML is never an agent-facing response.",
+          "oneOf": [
+            {
+              "const": "summary",
+              "description": "Compact orientation and current conditions.",
+              "type": "string"
+            },
+            {
+              "const": "tasks",
+              "description": "Embedded tasks and their local state.",
+              "type": "string"
+            },
+            {
+              "const": "results",
+              "description": "Current outcome details and reported artifacts.",
+              "type": "string"
+            },
+            {
+              "const": "checks",
+              "description": "Required and reported check evidence.",
+              "type": "string"
+            },
+            {
+              "const": "review",
+              "description": "One retained review with pageable findings and check changes.",
+              "type": "string"
+            },
+            {
+              "const": "log",
+              "description": "Recent generated activity and explicit omitted history.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Read one project/module/task with optional snapshot-bound pagination.",
+      "properties": {
+        "limit": {
+          "default": 20,
+          "description": "Maximum displayed items, 1–20; default 20.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Configured project alias; not a path or a global current project.",
+          "type": "string"
+        },
+        "ref": {
+          "description": "Omit for project; otherwise M-001 or M-001/T-001.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review_index": {
+          "description": "Zero-based retained review index; omission selects the latest.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start": {
+          "default": 0,
+          "description": "Zero-based offset into the selected view; default zero.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "description": "Exact snapshot returned by the previous page; mandatory for nonzero offsets.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "view": {
+          "$ref": "#/$defs/View",
+          "description": "Default summary; select one allowlisted detail view."
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "ContextArgs",
+      "type": "object"
+    },
+    "name": "get_context"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Produce one English status suitable for the owner: project purpose, readable Module/Task progress, declared leads, current summaries, blockers, review attention and last reported activity. One call replaces manual status collection. Read-only; never polls live agents or Git. Unknown/unreadable work is explicit PARTIAL with lower-bound counts, not zero. Long detail is omitted explicitly; module=M-001 narrows the response. Only tracked work is counted; small fixes may have no tracker records.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Return an owner-ready English status of the tracked work, not runtime liveness.",
+      "properties": {
+        "module": {
+          "description": "Optional M-001 narrowing when aggregate detail is partial.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "Configured project alias.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "StatusArgs",
+      "type": "object"
+    },
+    "name": "project_status"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Find tracked work by 1–8 words (maximum 256 UTF-8 bytes). All terms must match semantic fields using Unicode lowercase substring matching; rank by matching-field count then numeric reference. Returns references, field labels and relevant excerpts rather than YAML. Read matches through get_context and select detail views. Optional module narrows the scan; later pages require the exact prior snapshot with unchanged project/query/module. Coverage limits/unreadable records remain explicit. This is lexical work search; Markdown/code/semantic search is outside the core.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Bounded lexical work search over semantic fields, with exact continuation.",
+      "properties": {
+        "limit": {
+          "default": 20,
+          "description": "Maximum displayed matches, 1–20; default 20.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "module": {
+          "description": "Optional M-001 narrowing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "Configured project alias.",
+          "type": "string"
+        },
+        "query": {
+          "description": "One to eight whitespace-separated terms, at most 256 UTF-8 bytes; all must match.",
+          "type": "string"
+        },
+        "start": {
+          "default": 0,
+          "description": "Zero-based match offset; default zero.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "description": "Previous result's exact snapshot, required for a nonzero start.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "project",
+        "query"
+      ],
+      "title": "SearchArgs",
+      "type": "object"
+    },
+    "name": "search"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Create or partially edit strategic work. init_project explicitly initializes the final configured root; edit_project changes orientation; create_module allocates one standalone Module and optional initial Tasks; edit_module/add_task/edit_task change one whole Module file. Obtain get_context first. init_project/create_module require allocation_version, edit_project manifest Version, all Module/Task operations Module Version. IDs, UTC dates, counters and concise activity are generated. Edit omission preserves; null clears only optional remote/lead/criterion; [] clears a check list. Required fields cannot be cleared. No status cascades, agents, Git or external writes. Stale/busy/validation refuses; unknown or partial publication requires inspecting context before retry, never blind replay.",
+    "inputSchema": {
+      "$defs": {
+        "Lead": {
+          "additionalProperties": false,
+          "description": "Reported lead identity, never proof of session liveness or authentication.",
+          "properties": {
+            "handle": {
+              "description": "Optional reported session or transcript location, at most 256 UTF-8 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Nonempty display identity, at most 128 UTF-8 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "TaskInput": {
+          "additionalProperties": false,
+          "description": "Planned task substance; numbering and dates belong to the MCP.",
+          "properties": {
+            "criterion": {
+              "description": "Optional acceptance criterion, at most 1024 UTF-8 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "required_checks": {
+              "default": [],
+              "description": "At most eight distinct required check labels; defaults empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Human task title, at most 256 UTF-8 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Flat operation-specific plan arguments. Common project/version/actor are decoded separately.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Explicitly initialize only missing owned records in an empty configured root.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "init_project",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "purpose": {
+              "description": "Required strategic purpose.",
+              "type": "string"
+            },
+            "remote": {
+              "description": "Optional reported repository location.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "description": "Required human project title.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "title",
+            "purpose",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Partially edit root orientation using the manifest version.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "edit_project",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "purpose": {
+              "description": "Omission preserves; null is forbidden.",
+              "type": "string"
+            },
+            "remote": {
+              "description": "Omission preserves; null clears.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "description": "Omission preserves; null is forbidden.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Allocate a standalone module and optionally its initial tasks in one request.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lead": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lead"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional declared persistent lead."
+            },
+            "op": {
+              "const": "create_module",
+              "type": "string"
+            },
+            "outcome": {
+              "description": "Required expected outcome.",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "required_checks": {
+              "default": [],
+              "description": "Explicit required module checks; defaults empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "tasks": {
+              "description": "Initial semantic tasks, at most 32; defaults empty.",
+              "items": {
+                "$ref": "#/$defs/TaskInput"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Required human title.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "title",
+            "outcome",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Partially edit a module plan; semantic changes make old approval historical.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lead": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lead"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Omission preserves; null clears."
+            },
+            "module": {
+              "description": "Target M-001.",
+              "type": "string"
+            },
+            "op": {
+              "const": "edit_module",
+              "type": "string"
+            },
+            "outcome": {
+              "description": "Omission preserves; null is forbidden.",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "required_checks": {
+              "description": "Omission preserves; [] clears; null is forbidden.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Omission preserves; null is forbidden.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "module",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Allocate one task inside its module using the module file version.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "criterion": {
+              "description": "Optional acceptance criterion.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "module": {
+              "description": "Target M-001.",
+              "type": "string"
+            },
+            "op": {
+              "const": "add_task",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "required_checks": {
+              "default": [],
+              "description": "Explicit required task checks; defaults empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Human task title.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "module",
+            "title",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Partially edit one embedded task without touching its result or siblings.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "criterion": {
+              "description": "Omission preserves; null clears.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "edit_task",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Target M-001/T-001.",
+              "type": "string"
+            },
+            "required_checks": {
+              "description": "Omission preserves; [] clears; null is forbidden.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Omission preserves; null is forbidden.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "Plan"
+    },
+    "name": "plan_work"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Save current result, blocker, handoff or explicit cancel/reopen on one Module or owned Task using its current whole-Module Version. result replaces summary/checks/gaps/followups/artifacts; it is not a partial patch. Task state optionally open/done; completion needs a meaningful result, no separate task review. Module-only blocker/handoff records actionable context. Clear/reopen/cancel require reasons; absent clears are no-ops. Canceled work permits reopen only; a canceled parent blocks child writes. Module cancellation requires terminal children, never cascades. Semantic changes invalidate old module approval; handoff does not. Evidence/artifact strings are reported, not Git-verified. Reads after lost replies determine effects; mutation is not replay-idempotent.",
+    "inputSchema": {
+      "$defs": {
+        "CheckInput": {
+          "additionalProperties": false,
+          "description": "Agent-supplied check content. Dates and attribution are added by the MCP.",
+          "properties": {
+            "detail": {
+              "description": "Optional explanation, at most 256 UTF-8 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "description": "Unique check label, at most 64 UTF-8 bytes.",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/CheckStatus",
+              "description": "Explicit check outcome."
+            }
+          },
+          "required": [
+            "label",
+            "status"
+          ],
+          "type": "object"
+        },
+        "CheckStatus": {
+          "description": "Explicit check report; absence is not a success.",
+          "oneOf": [
+            {
+              "const": "passed",
+              "description": "Reported check succeeded.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "Reported check failed.",
+              "type": "string"
+            },
+            {
+              "const": "not_run",
+              "description": "Check has not been executed.",
+              "type": "string"
+            },
+            {
+              "const": "not_applicable",
+              "description": "Check is reported inapplicable; this does not waive a required check.",
+              "type": "string"
+            }
+          ]
+        },
+        "Completion": {
+          "description": "Optional result completion state; canceled requires the dedicated reasoned operation.",
+          "oneOf": [
+            {
+              "const": "open",
+              "description": "Keep this task open.",
+              "type": "string"
+            },
+            {
+              "const": "done",
+              "description": "Complete this task with its meaningful result.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Record current substance or lifecycle, never supplied timestamps or raw patches.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Replace the target's current complete report and check set.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "artifacts": {
+              "default": [],
+              "description": "Reported commit/PR/other artifact references; defaults empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "checks": {
+              "default": [],
+              "description": "Current check reports; omission means an empty set, not a partial edit.",
+              "items": {
+                "$ref": "#/$defs/CheckInput"
+              },
+              "type": "array"
+            },
+            "followups": {
+              "default": [],
+              "description": "Future followups outside current acceptance; defaults empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "gaps": {
+              "default": [],
+              "description": "In-scope gaps; defaults empty and blocks acceptance when nonempty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "result",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "state": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Completion"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Tasks only; omission preserves current open/done state."
+            },
+            "summary": {
+              "description": "Meaningful outcome, at most 1024 UTF-8 bytes.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "summary",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Set an actionable module-only blocker.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "needed_action": {
+              "description": "Concrete action needed to unblock.",
+              "type": "string"
+            },
+            "op": {
+              "const": "blocker",
+              "type": "string"
+            },
+            "problem": {
+              "description": "What prevents progress.",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "resolver": {
+              "description": "Optional responsible person/agent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "problem",
+            "needed_action",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Set module-only resume guidance; does not invalidate approval.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "next_action": {
+              "description": "Concrete next action.",
+              "type": "string"
+            },
+            "op": {
+              "const": "handoff",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "stopping_point": {
+              "description": "Where the lead stopped.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "stopping_point",
+            "next_action",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Clear a module blocker; absent blocker is a no-op.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "clear_blocker",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Required explanation for clearing.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "reason",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Clear module handoff; absent handoff is a no-op.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "clear_handoff",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Required explanation for clearing.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "reason",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Cancel a target; module children must already be terminal.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "cancel",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Required cancellation reason, retained across reopen.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "reason",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Explicitly reopen the same target and invalidate earlier module approval.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "reopen",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Required explanation, recorded with the reopen.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "reason",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "Work"
+    },
+    "name": "record_work"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Record an independent whole-Module review against its current Version. accepted requires no open Tasks/blocker/in-scope gaps, every explicit required check passed, and meaningful delivery evidence; canceled children are excluded. changes_requested is a successfully saved negative verdict, not a tool error. Optional check updates replace canonical target checks while preserving before/after attribution; lead summary author/date stays unchanged. Known lead cannot self-review; unknown identity stays unknown. Reviews are retained and bound to current semantic basis/epoch; later semantic edits or reopen make approval historical. Accepted directly yields accepted phase: no hidden PR/merge gate or external verification. Read view=review for report/history, and project_status for closure attention.",
+    "inputSchema": {
+      "$defs": {
+        "CheckStatus": {
+          "description": "Explicit check report; absence is not a success.",
+          "oneOf": [
+            {
+              "const": "passed",
+              "description": "Reported check succeeded.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "Reported check failed.",
+              "type": "string"
+            },
+            {
+              "const": "not_run",
+              "description": "Check has not been executed.",
+              "type": "string"
+            },
+            {
+              "const": "not_applicable",
+              "description": "Check is reported inapplicable; this does not waive a required check.",
+              "type": "string"
+            }
+          ]
+        },
+        "Finding": {
+          "additionalProperties": false,
+          "description": "Reviewer finding; required corrections cannot accompany acceptance.",
+          "properties": {
+            "must_fix": {
+              "description": "True for an in-scope correction required before acceptance.",
+              "type": "boolean"
+            },
+            "text": {
+              "description": "Actionable finding, at most 256 UTF-8 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "must_fix"
+          ],
+          "type": "object"
+        },
+        "ReviewCheck": {
+          "additionalProperties": false,
+          "description": "Review check update; it preserves before/after report provenance in review history.",
+          "properties": {
+            "detail": {
+              "description": "Optional explanation.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "description": "Target-local check label.",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/CheckStatus",
+              "description": "Reviewer's explicit outcome."
+            },
+            "target": {
+              "description": "The reviewed module or one of its owned tasks.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "label",
+            "status"
+          ],
+          "type": "object"
+        },
+        "Verdict": {
+          "description": "Independent module review verdict.",
+          "oneOf": [
+            {
+              "const": "accepted",
+              "description": "Current evidence satisfies the module's explicit acceptance conditions.",
+              "type": "string"
+            },
+            {
+              "const": "changes_requested",
+              "description": "The same module needs more work.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Independent whole-module verdict. It does not review tasks separately or merge code.",
+      "properties": {
+        "actor": {
+          "description": "Declared reviewer identity; unknown remains unknown, never authenticated.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checks": {
+          "description": "At most eight updates to current canonical check reports.",
+          "items": {
+            "$ref": "#/$defs/ReviewCheck"
+          },
+          "type": "array"
+        },
+        "findings": {
+          "default": [],
+          "description": "At most eight findings; accepted forbids must_fix findings.",
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "type": "array"
+        },
+        "module": {
+          "description": "Target M-001.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Configured project alias.",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Meaningful review conclusion, at most 1024 UTF-8 bytes.",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict",
+          "description": "accepted or changes_requested; a saved negative verdict is not a tool error."
+        },
+        "version": {
+          "description": "Current whole-module version from get_context.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "module",
+        "version",
+        "verdict",
+        "summary"
+      ],
+      "title": "ReviewArgs",
+      "type": "object"
+    },
+    "name": "review_module"
   }
 ]

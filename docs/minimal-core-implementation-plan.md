@@ -1,8 +1,8 @@
 # Minimal core — technical implementation plan
 
-Status: design only; no core implementation or qualification yet. This narrows the first deliverable while preserving the [full structured roadmap](architecture-proposal.md). The source baseline remains the standard Rust MCP starter. All project content is English; the orchestrator may translate the complete status when presenting it to the owner.
+Status: minimal core implemented locally; release/host qualification remains not_verified. The [full structured roadmap](architecture-proposal.md) is preserved; [architecture.md](architecture.md) describes actual contracts. Project content is English; the orchestrator may translate complete status for the owner.
 
-The proposed MVP is a file-backed work tracker inside the existing Rust binary: a Project manifest, standalone Modules containing Tasks, six work tools, and unchanged diagnostic `get_status`. It remains an implementation plan; no future-core behavior or qualification has been demonstrated.
+The implemented MVP is a file-backed work tracker inside the Rust binary: Project manifest, standalone Modules with Tasks, six business tools and diagnostic `get_status`. Broader roadmap behavior remains deferred.
 
 ## 1. Scope and module boundaries
 
@@ -353,4 +353,4 @@ The source integration map was checked read-only against the existing CLI, regis
 - [Rust exclusive creation](https://doc.rust-lang.org/std/fs/struct.OpenOptions.html#method.create_new): fails if the target already exists.
 - [Rust hard links](https://doc.rust-lang.org/std/fs/fn.hard_link.html): candidate for publishing fully written new records without clobbering; native qualification is required.
 
-No source, fixtures, installed configuration, service or release state has been changed by this technical planning work. `docs/architecture.md` remains the current implementation description until the core is actually written.
+The core, schemas and disposable fixtures are implemented locally. Installed configuration, services, main branch and release state are outside this deliverable. Manifest Version and pagination Snapshot version are separate; clear/reopen reasons stay outside the generated log tail. See architecture.md for behavior and evidence boundaries.

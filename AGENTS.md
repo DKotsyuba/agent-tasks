@@ -20,7 +20,11 @@ stdout of mcp is protocol-only. Secrets never enter responses or diagnostics.
 
 ## Delivery and updates
 
-The initial profile is in-process + no state + single-binary-v1. Other profiles need explicit design.
+The implemented profile is in-process + local portable files + single-binary-v1.
+Project content is English. Every business call resolves its project alias; no global current project.
+Use get_context before writes, project_status for one overview, review_module for independent acceptance.
+Microfixes may use no tracker. Source/docstrings own code truth; tracked work owns intent and agent reports.
+Keep the full roadmap deferred until measured agent needs justify more capabilities.
 Package locally only after committing source. Release prepare defaults to preview and never pushes.
 The publisher checks qualification, tag/source/run identity, cargo-deny, no stubs and the actual payload.
 Never flip qualification to make a pipeline green. No pruning, service restart or host registration is implicit.

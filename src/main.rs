@@ -1,5 +1,7 @@
 //! Rust MCP application; protocol, presentation and deployment have separate boundaries.
+mod model;
 mod response;
+mod store;
 mod tools;
 use clap::{Parser, Subcommand};
 use mcp_presentation::Renderer;
@@ -13,7 +15,11 @@ const TOOLS_LIST_TTL_MS: u64 = 60_000;
 
 #[derive(Parser)]
 #[command(version, about = concat!(env!("CARGO_PKG_NAME"), " MCP server"))]
+/// CLI dispatch; config selection is lazy and never blocks discovery.
 struct Cli {
+    /// Absolute config location; precedence over AGENT_TASKS_CONFIG and HOME default.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -62,18 +68,26 @@ enum ReleaseCommand {
     },
 }
 #[derive(Clone)]
+/// Configuration-independent MCP catalog with a lazily resolved file store.
 struct Handler {
+    /// Captured location; aliases are reloaded on each business call.
+    config: store::Config,
+    /// Immutable family identity presenter.
     identity: Arc<Renderer>,
+    /// Closed embedded layouts shared by business calls.
     templates: Arc<response::Templates>,
+    /// Static serde-derived discovery, independent of filesystem configuration.
     catalog: Vec<Tool>,
 }
 impl Handler {
-    fn new() -> Result<Self, &'static str> {
+    /// Parse trusted layouts/catalog, capturing config location without reading it.
+    fn new(config: store::Config) -> Result<Self, &'static str> {
         let identity = Renderer::new().map_err(|_| "presentation_setup_failed")?;
         let templates = response::Templates::new(&tools::templates())?;
         let catalog = serde_json::from_value(serde_json::Value::Array(tools::definitions()))
             .map_err(|_| "catalog_invalid")?;
         Ok(Self {
+            config,
             identity: Arc::new(identity),
             templates: Arc::new(templates),
             catalog,
@@ -81,10 +95,11 @@ impl Handler {
     }
 }
 impl ServerHandler for Handler {
+    /// Advertise tools and the alias/version workflow without accessing project files.
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
-            .with_instructions("Use get_status for identity. Tool descriptions define effects. A not_implemented result never means work was performed.")
+            .with_instructions("Use get_status for identity, get_context(project=<alias>) to resume or obtain write versions, and project_status for one complete tracked overview. Project aliases are operator-configured. All work content is English. Microfixes may require no tracked records. Tool descriptions define evidence, effects and recovery. Unknown outcomes must be inspected before another mutation.")
     }
     /// Return the static catalog; modern requests cache it privately for 60 seconds.
     /// Pagination is unused; legacy sessions retain their original wire fields.
@@ -104,15 +119,23 @@ impl ServerHandler for Handler {
         }
         Ok(result)
     }
+    /// Route known calls to bounded text/domain errors; unknown tools retain METHOD_NOT_FOUND.
+    /// Business calls may read/write the configured root; identity remains configuration-independent.
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
-        let reply = tools::call(&request.name, args, &self.identity, &self.templates)
-            .await
-            .ok_or_else(|| McpError::new(ErrorCode::METHOD_NOT_FOUND, "Unknown tool", None))?;
+        let reply = tools::call(
+            &request.name,
+            args,
+            &self.identity,
+            &self.templates,
+            &self.config,
+        )
+        .await
+        .ok_or_else(|| McpError::new(ErrorCode::METHOD_NOT_FOUND, "Unknown tool", None))?;
         Ok(reply.into())
     }
 }
@@ -147,9 +170,13 @@ fn qualification() -> &'static str {
     })
 }
 
+/// Select a CLI operation and lazy config location. MCP stdout is protocol-only;
+/// discovery/doctor do not initialize roots or require installed credentials/config.
 #[tokio::main]
 async fn main() -> ExitCode {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let config = store::Config::new(cli.config);
+    match cli.command {
         Commands::SelfInstall {
             bundle,
             home,
@@ -176,7 +203,7 @@ async fn main() -> ExitCode {
             }
         },
         Commands::Doctor { json: _ } => {
-            let ready = Handler::new().is_ok();
+            let ready = Handler::new(config.clone()).is_ok();
             let output = print_json(
                 serde_json::json!({"product":env!("CARGO_PKG_NAME"),"version":env!("CARGO_PKG_VERSION"),
                 "local_ready":ready,"release_qualification":qualification(),"incomplete_tools":tools::incomplete()}),
@@ -185,7 +212,7 @@ async fn main() -> ExitCode {
         }
         Commands::Contract {
             command: ContractCommand::Export,
-        } => match Handler::new() {
+        } => match Handler::new(config.clone()) {
             Ok(h) => print_json(h.catalog),
             Err(e) => {
                 eprintln!("contract: {e}");
@@ -196,7 +223,7 @@ async fn main() -> ExitCode {
             command: ContractCommand::Readiness,
         } => print_json(tools::incomplete()),
         Commands::Mcp => {
-            let h = match Handler::new() {
+            let h = match Handler::new(config.clone()) {
                 Ok(h) => h,
                 Err(e) => {
                     eprintln!("startup: {e}");

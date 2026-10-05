@@ -1,93 +1,97 @@
 # agent-tasks
 
-<!-- Replace this paragraph with your product's purpose: what it does for its
-caller and what it deliberately never does. -->
-A stdio MCP server. Repository: DKotsyuba/agent-tasks.
-Read AGENTS.md and docs/MCP_RESPONSE_STANDARD.md before adding tools.
+Rust stdio MCP for portable strategic work. Agents plan Modules/Tasks, report outcomes and independently review a whole Module. The owner gets one compact English status. YAML is structured internal storage; strict MiniJinja renders semantic text. Code/docstrings and Git retain their authority.
+
+This is the minimal local core. The full future roadmap stays in docs/architecture-proposal.md. Tiny fixes may need no records. Epics/Atomics, Markdown/knowledge writers, automatic Git, agents, compaction and indexes remain deferred.
+
+## Configure and start
+
+The operator creates an absolute config. Root parents must already exist:
+
+```toml
+schema_version = 1
+[aliases]
+product = "/absolute/project/documentation"
+other = "/absolute/other/documentation"
+```
+
+```bash
+cargo fetch --locked
+cargo run --locked -- --config /absolute/config.toml mcp
+```
+
+Precedence: --config, AGENT_TASKS_CONFIG, then $HOME/.agent-tasks/config.toml. The old Linear config is not read. Identity/discovery/doctor/export need no valid config. Every business call takes project=<alias>; no global current project exists.
 
 ## Tools
 
-| Tool | Effect | Purpose |
-|---|---|---|
-| `get_status` | read | product identity and release qualification status |
+| Tool | Purpose |
+|---|---|
+| get_status | Product identity and declared qualification |
+| get_context | Intent/evidence/conditions, versions and bounded detail views |
+| project_status | One owner-ready progress/leads/blockers/review overview |
+| search | Bounded lexical work search with references/excerpts |
+| plan_work | Explicit init, Project/Module edits, Module creation and Task planning |
+| record_work | Current results/checks/artifacts, blocker/handoff, reasoned cancel/reopen |
+| review_module | Independent Module verdict and retained check provenance |
 
-Replace this table with the product's real tools as their contracts are implemented.
+Live descriptions are mini documentation. Shapes are closed. Edit omission preserves, null clears optional fields, [] clears lists. A result replaces the complete current report. Tasks have no separate review. Accepted Module review closes its derived phase without a hidden external merge gate.
+
+## Workflow
+
+```text
+get_context(project="product")
+plan_work(project="product", op="init_project", version="<allocation_version>",
+          title="Product", purpose="Strategic purpose")
+get_context(project="product")
+plan_work(project="product", op="create_module", version="<allocation_version>",
+          title="Portable storage", outcome="Guarded file updates",
+          lead={name:"lead"}, tasks=[{title:"Protect stale writes",
+                                     required_checks:["stale write"]}])
+get_context(project="product", ref="M-001")
+record_work(project="product", op="result", ref="M-001/T-001",
+            version="<module Version>", state="done",
+            summary="Stale replacement refuses",
+            checks=[{label:"stale write",status:"passed"}])
+get_context(project="product", ref="M-001")
+review_module(project="product", module="M-001", version="<module Version>",
+              verdict="accepted", summary="Outcome independently checked",
+              actor="reviewer")
+project_status(project="product")
+```
+
+Use actual returned versions: init/create_module use Allocation version; edit_project manifest Version; Module/Task writes whole Module Version. IDs/UTC dates/activity are generated. Reads never create roots. The orchestrator may translate status without changing coverage/unknown facts. Reported references/checks do not prove live agents or queried Git contents.
+
+## Storage and recovery
+
+project.yaml is root orientation; modules/M-001.yaml owns a Module, Tasks, current evidence and reviews; .agent-tasks/state.yaml owns durable Module numbering. Roots are portable and selected independently by aliases.
+
+Writes lock and compare root-bound versions. Synced temps publish new files without clobbering; normalization preserves exact originals first. Lost/partial/uncertain replies require context inspection before another mutation. Restore missing counters from retained state, never guess. No status cascade, implicit rollback or replay-idempotency exists.
+
+Context/search pages use actual returned start and Snapshot version with unchanged scope/view/query/review selection. Data/detail coverage is explicit. Long status can be narrowed by module; unreadable work is unknown, not zero. Records keep closing headroom and a disclosed generated-log tail. Human reports/reviews/reasons are not silently pruned. See docs/architecture.md for limits and filesystem boundaries.
 
 ## Development
 
 ```bash
-cargo fetch --locked
 cargo xtask check
-cargo xtask add-tool NAME --effect read --response page
-cargo xtask test protocol
-cargo xtask test presentation
-cargo xtask test delivery
+cargo test --frozen -p agent-tasks core_
+cargo xtask contract update
+cargo xtask contract check
+cargo deny fetch
+cargo deny check
 cargo run --locked -- doctor --json
-cargo run --locked -- mcp
 ```
 
-Product source is in src/, the authoritative tool registry in src/tools/mod.rs,
-tool text templates in assets/mcp/tools/, and the exported discovery snapshot
-in schemas/tools.json. `cargo xtask contract update` is an explicit reviewed
-snapshot change. Generated tool stubs do not perform effects or return fake
-success; finish their contract and tests.
+Rust registry definitions are authoritative; schemas/tools.json is a reviewed export. Product layouts are embedded in src/tools/work.rs. Source documentation changes with behavior; Cargo.lock is committed. No Python/Node tooling is needed. Finish coherent work with cargo xtask check.
 
-Cargo.lock must be reviewed and committed.
+## Delivery and template
 
-For a short edit loop, fetch the locked dependencies once, run formatting
-directly, then check the changed crate or run its relevant test target:
+The template baseline is pinned in .family/origin.json. Upgrades are read-only plans applied through reviewed Git changes. Runtime/build needs no private template access.
 
-```bash
-cargo fmt --all --check
-cargo check --frozen -p agent-tasks --all-targets --all-features
-cargo test --frozen -p agent-tasks --all-features --test protocol
-```
-
-Select the changed workspace crate and test filter as appropriate. These focused
-commands give early feedback; finish a coherent change with `cargo xtask check`
-and its applicable protocol/presentation/delivery checks before a PR. Changes to
-embedded templates or other compile-time assets require the same checks as code.
-Optimized packaging belongs to delivery, not every edit iteration.
-
-## Local delivery
-
-Commit your source first. No remote repository is required to build a local package.
+Release stays disabled and qualification not_verified. Local SDK/filesystem checks are not certification of all hosts/platforms. Installation never restarts services, changes host configuration or migrates portable roots. Binary rollback does not undo stored work. Package only committed source:
 
 ```bash
 cargo xtask package
 cargo xtask package verify dist/agent-tasks-0.1.0-aarch64-apple-darwin
+cargo xtask template diff --from /trusted/template/checkout
+cargo xtask template upgrade --from /trusted/template/checkout --dry-run
 ```
-
-The bundle executable accepts `self-install --bundle PATH --home ABS_PATH --bin-dir ABS_PATH`.
-Create the bin directory explicitly. Installation preserves immutable versions, never restarts
-services and does not edit MCP host configuration. `releases use VERSION` verifies and selects
-a retained compatible version. This profile has no local data migration; external effects are
-not undone by a binary rollback. No automatic pruning or removal of user data.
-
-CI restores Cargo dependency builds and a versioned cargo-deny tool cache. Successful
-main check jobs warm the check cache; an independent main-only package job warms
-optimized package dependencies without uploading or publishing a release. This
-adds an optimized build to main CI, which runs alongside checks and costs extra
-compute on cold inputs. PRs use the check cache without the package producer.
-Release jobs restore both workloads without writing competing cache snapshots.
-Cache misses run the normal commands. The gate still
-runs on cache hits: workspaces without features need one all-features Clippy/test
-pass; workspaces with features retain default and all-features passes. Platform,
-compiler, dependency and build-setting changes invalidate the relevant cache.
-Release packages and their integrity/acceptance evidence remain separate artifacts.
-
-The release source check and exact payload build run in parallel. Publication
-waits for both to succeed, then preserves environment approval and tests the
-downloaded payload's exact bytes. Packaging does not enable release publication
-or establish native host qualification.
-
-The release workflow is guarded by release.enabled=false and qualification settings in family.toml.
-Version preparation is `cargo xtask release prepare VERSION --apply`; inspect/commit the changes,
-then create and push an annotated tag yourself. Publishing tests the exact shipped executable.
-
-## Template updates
-
-`cargo xtask template diff --from /trusted/template/checkout` compares original managed bytes,
-local changes and the next template. `template upgrade --dry-run` writes nothing.
-Apply the reviewed plan through Git; conflicting local changes and Cargo dependencies need review.
-The build has no live dependency on the private template repository.

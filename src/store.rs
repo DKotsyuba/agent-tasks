@@ -1,0 +1,885 @@
+//! Portable bounded file access, optimistic versions and cooperating-writer publication.
+use crate::model::{self, Module, Project};
+use serde::{Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::SystemTime,
+};
+
+/// Maximum serialized record, including preserved review history.
+pub const RECORD_CAP: usize = 512 * 1024;
+/// Headroom retained by nonterminal writes for final review/cancellation.
+pub const CLOSING_RESERVE: usize = 32 * 1024;
+/// Aggregate reads stop before exceeding this byte budget.
+pub const SCAN_CAP: usize = 16 * 1024 * 1024;
+/// Allocation/aggregate filename inventory limit.
+pub const MODULE_CAP: usize = 512;
+/// Process-local exclusive temp suffix; never used as a work identity.
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// Safe domain failure. Effects are separately retained by the call's execution ledger.
+#[derive(Debug)]
+pub struct Error {
+    /// Stable machine code.
+    pub code: &'static str,
+    /// Bounded meaningful explanation; no raw serialized source.
+    pub message: String,
+}
+impl Error {
+    /// Construct a business/configuration/storage refusal without inventing an effect.
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+/// Application result with a compact classified error.
+pub type Result<T> = std::result::Result<T, Error>;
+/// Convert semantic validation failures without exposing parser internals.
+pub fn invalid(message: impl Into<String>) -> Error {
+    Error::new("invalid_data", message)
+}
+
+/// Capture only the config location; discovery never reads configuration.
+#[derive(Clone)]
+pub struct Config {
+    /// Absolute operator-selected path, absent if no home/default can be selected.
+    path: Option<PathBuf>,
+}
+/// Closed configuration; only the operator creates it.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Aliases {
+    /// Understood config revision.
+    schema_version: u32,
+    /// Independent named portable roots; no global current project.
+    aliases: BTreeMap<String, PathBuf>,
+}
+impl Config {
+    /// Choose flag, then AGENT_TASKS_CONFIG, then HOME/.agent-tasks/config.toml without I/O.
+    pub fn new(flag: Option<PathBuf>) -> Self {
+        Self {
+            path: flag
+                .or_else(|| std::env::var_os("AGENT_TASKS_CONFIG").map(PathBuf::from))
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|h| PathBuf::from(h).join(".agent-tasks/config.toml"))
+                }),
+        }
+    }
+    /// Reload the bounded config and resolve one alias once for the entire request.
+    pub fn resolve(&self, alias: &str) -> Result<Store> {
+        model::text(alias, 128).map_err(invalid)?;
+        let path = self
+            .path
+            .as_ref()
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| {
+                Error::new(
+                    "config",
+                    "Select an absolute --config path or AGENT_TASKS_CONFIG.",
+                )
+            })?;
+        let bytes = read_path(path, 64 * 1024)?.ok_or_else(|| Error::new("config", "Configuration is missing; explicitly create schema_version=1 and [aliases]. Discovery remains available."))?;
+        let config: Aliases = toml::from_str(
+            std::str::from_utf8(&bytes)
+                .map_err(|_| Error::new("config", "Config must be UTF-8."))?,
+        )
+        .map_err(|_| {
+            Error::new(
+                "config",
+                "Invalid closed TOML configuration; expected schema_version and aliases only.",
+            )
+        })?;
+        if config.schema_version != 1 {
+            return Err(Error::new("config", "Unsupported config schema_version."));
+        }
+        let root = config
+            .aliases
+            .get(alias)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| {
+                Error::new(
+                    "alias",
+                    "Unknown alias or nonabsolute root; inspect the operator configuration.",
+                )
+            })?;
+        Ok(Store {
+            root: prospective(root)?,
+        })
+    }
+}
+
+/// Root identity held through a request; tools never accept arbitrary relative paths.
+#[derive(Clone)]
+pub struct Store {
+    /// Canonical existing root or canonical parent plus one absent final directory name.
+    pub root: PathBuf,
+}
+
+/// Exact observed record and its whole-file version; no stale field-level patches.
+pub struct Snapshot<T> {
+    /// Parsed validated content.
+    pub value: T,
+    /// Exact original bytes, retained for compare/backup.
+    pub bytes: Vec<u8>,
+    /// Opaque root-bound version.
+    pub version: String,
+}
+
+/// Bounded filename coverage; unknown entries do not become nonexistent work.
+pub struct Inventory {
+    /// Canonical IDs in numeric order.
+    pub ids: Vec<String>,
+    /// Named coverage warnings, including ignored orphan publication temps.
+    pub warnings: Vec<String>,
+    /// Whether every eligible filename was inventoried.
+    pub complete: bool,
+}
+
+/// Aggregate read retaining healthy files and named unreadable rows.
+pub struct Scan {
+    /// Healthy parsed modules in numeric order.
+    pub modules: Vec<Snapshot<Module>>,
+    /// Named unreadable/unscanned modules.
+    pub unreadable: Vec<String>,
+    /// Inventory warnings.
+    pub warnings: Vec<String>,
+    /// Whether all work records were successfully read.
+    pub complete: bool,
+    /// Scope-bound snapshot for deterministic continuations.
+    pub version: String,
+}
+
+/// Generate readable UTC RFC 3339 using the OS wall clock; event IDs define ordering.
+pub fn now() -> String {
+    chrono::DateTime::<chrono::Utc>::from(SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Resolve an existing directory or one absent final child, never create ancestors.
+fn prospective(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return Err(Error::new(
+            "root",
+            "Root must be absolute without dot path components.",
+        ));
+    }
+    match fs::metadata(path) {
+        Ok(m) if m.is_dir() => {
+            fs::canonicalize(path).map_err(|_| Error::new("root", "Cannot canonicalize root."))
+        }
+        Ok(_) => Err(Error::new("root", "Configured root is not a directory.")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if fs::symlink_metadata(path).is_ok() {
+                return Err(Error::new(
+                    "root",
+                    "Dangling root symlink is not an absent root.",
+                ));
+            }
+            let parent = path
+                .parent()
+                .ok_or_else(|| Error::new("root", "Root has no parent."))?;
+            let parent = fs::canonicalize(parent)
+                .map_err(|_| Error::new("root", "Root parent must already exist."))?;
+            if !parent.is_dir() {
+                return Err(Error::new("root", "Root parent is not a directory."));
+            }
+            Ok(parent.join(
+                path.file_name()
+                    .ok_or_else(|| Error::new("root", "Invalid final root name."))?,
+            ))
+        }
+        Err(_) => Err(Error::new("root", "Cannot inspect configured root.")),
+    }
+}
+
+/// Read cap+one before parsing and reject symlink/nonregular leaves, including dangling links.
+fn read_path(path: &Path, cap: usize) -> Result<Option<Vec<u8>>> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(Error::new("io", "Cannot inspect record.")),
+        Ok(m) if !m.is_file() || m.file_type().is_symlink() => {
+            return Err(Error::new(
+                "file_type",
+                "Owned record must be a regular file, not a link.",
+            ));
+        }
+        Ok(m) if m.len() > cap as u64 => {
+            return Err(Error::new("capacity", "Record exceeds its read cap."));
+        }
+        _ => (),
+    }
+    let file = File::open(path).map_err(|_| Error::new("io", "Cannot open record."))?;
+    let mut bytes = Vec::new();
+    file.take((cap + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::new("io", "Cannot read record."))?;
+    if bytes.len() > cap {
+        return Err(Error::new("capacity", "Record grew beyond its read cap."));
+    }
+    Ok(Some(bytes))
+}
+
+/// Reject unsupported YAML syntax before parsing aliases can expand. This is a
+/// deliberately conservative subset gate, not a YAML lexer: quoted and block
+/// prose are accepted, special anchor/tag/alias tokens in plain text are refused.
+fn yaml_subset(bytes: &[u8]) -> Result<()> {
+    let source = std::str::from_utf8(bytes).map_err(|_| invalid("YAML must be UTF-8."))?;
+    let mut quote = None;
+    let mut block_indent = None;
+    let mut documents = 0;
+    for line in source.lines() {
+        let indent = line.bytes().take_while(|b| *b == b' ').count();
+        if let Some(base) = block_indent {
+            if line.trim().is_empty() || indent > base {
+                continue;
+            }
+            block_indent = None;
+        }
+        if line.trim() == "---" {
+            documents += 1;
+            if documents > 1 {
+                return Err(invalid("One YAML document is allowed."));
+            }
+        }
+        let mut chars = line.char_indices().peekable();
+        let mut previous = ' ';
+        let mut escape = false;
+        while let Some((_, c)) = chars.next() {
+            if let Some(q) = quote {
+                if q == '"' && c == '\\' && !escape {
+                    escape = true;
+                    continue;
+                }
+                if c == q && !escape {
+                    if q == '\'' && chars.peek().is_some_and(|(_, n)| *n == '\'') {
+                        chars.next();
+                    } else {
+                        quote = None;
+                    }
+                }
+                escape = false;
+                previous = c;
+                continue;
+            }
+            if c == '#' && previous.is_whitespace() {
+                break;
+            }
+            if (c == '\'' || c == '"') && (previous.is_whitespace() || "[{:,-".contains(previous)) {
+                quote = Some(c);
+            }
+            if matches!(c, '&' | '*' | '!')
+                && (previous.is_whitespace() || "[{,:".contains(previous))
+            {
+                return Err(invalid(
+                    "YAML tags, anchors and aliases are unsupported; quote literal prose.",
+                ));
+            }
+            if matches!(c, '|' | '>') && previous.is_whitespace() {
+                block_indent = Some(indent);
+            }
+            previous = c;
+        }
+    }
+    Ok(())
+}
+
+/// Bound parsed nesting and require ordinary string-key maps; tags/merges are refused.
+fn yaml_tree(value: &serde_yaml_ng::Value, depth: usize) -> Result<()> {
+    use serde_yaml_ng::Value;
+    if depth > 16 {
+        return Err(invalid("YAML nesting exceeds 16 levels."));
+    }
+    match value {
+        Value::Tagged(_) => return Err(invalid("YAML tags are unsupported.")),
+        Value::Sequence(s) => {
+            for v in s {
+                yaml_tree(v, depth + 1)?;
+            }
+        }
+        Value::Mapping(m) => {
+            for (k, v) in m {
+                if !matches!(k, Value::String(s) if s != "<<") {
+                    return Err(invalid(
+                        "YAML keys must be ordinary strings; merges are unsupported.",
+                    ));
+                }
+                yaml_tree(v, depth + 1)?;
+            }
+        }
+        _ => (),
+    }
+    Ok(())
+}
+
+/// Decode the closed YAML subset, rejecting duplicates before typed deserialization.
+pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    yaml_subset(bytes)?;
+    let value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_slice(bytes).map_err(|_| invalid("Invalid YAML or duplicate keys."))?;
+    yaml_tree(&value, 0)?;
+    serde_yaml_ng::from_value(value)
+        .map_err(|_| invalid("Invalid fields, types or missing required schema data."))
+}
+
+/// Encode canonical YAML; callers enforce semantic validation before publication.
+pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    serde_yaml_ng::to_string(value)
+        .map(String::into_bytes)
+        .map_err(|_| Error::new("encoding", "Cannot encode owned record."))
+}
+
+impl Store {
+    /// Validate each owned path component, refusing links and non-directory ancestors.
+    pub fn path(&self, relative: &str) -> Result<PathBuf> {
+        if prospective(&self.root)? != self.root {
+            return Err(Error::new(
+                "root_changed",
+                "Root identity changed; resolve the alias again.",
+            ));
+        }
+        let mut path = self.root.clone();
+        let parts: Vec<_> = Path::new(relative).components().collect();
+        for (i, part) in parts.iter().enumerate() {
+            let Component::Normal(part) = part else {
+                return Err(Error::new("path", "Invalid owned relative path."));
+            };
+            path.push(part);
+            match fs::symlink_metadata(&path) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    return Err(Error::new("file_type", "Symlink in owned path is refused."));
+                }
+                Ok(m) if i + 1 < parts.len() && !m.is_dir() => {
+                    return Err(Error::new("file_type", "Owned parent is not a directory."));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(_) => return Err(Error::new("io", "Cannot inspect owned path.")),
+                _ => (),
+            }
+        }
+        Ok(path)
+    }
+
+    /// Read exact owned bytes with no filesystem effects.
+    pub fn bytes(&self, relative: &str) -> Result<Option<Vec<u8>>> {
+        read_path(&self.path(relative)?, RECORD_CAP)
+    }
+
+    /// Root/target-bound digest over exact observed bytes or an explicit absence marker.
+    pub fn version(&self, relative: &str, bytes: Option<&[u8]>) -> String {
+        let mut digest = Sha256::new();
+        for value in [
+            b"agent-tasks/file/v1".as_slice(),
+            self.root.as_os_str().as_encoded_bytes(),
+            relative.as_bytes(),
+            if bytes.is_some() {
+                b"present"
+            } else {
+                b"absent"
+            },
+            bytes.unwrap_or_default(),
+        ] {
+            digest.update((value.len() as u64).to_le_bytes());
+            digest.update(value);
+        }
+        format!("{:x}", digest.finalize())
+    }
+
+    /// Refuse stale writes before publication; callers get a fresh context rather than replay.
+    pub fn expect(&self, relative: &str, expected: &str) -> Result<()> {
+        let current = self.bytes(relative)?;
+        let version = self.version(relative, current.as_deref());
+        if version != expected {
+            return Err(Error::new(
+                "stale",
+                format!(
+                    "No work saved. Current version: {version}. Read get_context before retrying."
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Read a manifest and validate its closed semantic contract.
+    pub fn project(&self) -> Result<Option<Snapshot<Project>>> {
+        self.snapshot("project.yaml", Project::validate)
+    }
+
+    /// Read one module, not an aggregate; corrupt siblings cannot hide healthy context.
+    pub fn module(&self, id: &str) -> Result<Snapshot<Module>> {
+        model::number(id, "M-").map_err(invalid)?;
+        let relative = format!("modules/{id}.yaml");
+        let snapshot = self
+            .snapshot(&relative, Module::validate)?
+            .ok_or_else(|| Error::new("not_found", "Module does not exist."))?;
+        if snapshot.value.id != id {
+            return Err(invalid("Module ID does not match its filename."));
+        }
+        Ok(snapshot)
+    }
+
+    /// Parse observed bytes and attach their exact version without normalizing on read.
+    fn snapshot<T: DeserializeOwned>(
+        &self,
+        relative: &str,
+        validate: impl FnOnce(&T) -> std::result::Result<(), String>,
+    ) -> Result<Option<Snapshot<T>>> {
+        let Some(bytes) = self.bytes(relative)? else {
+            return Ok(None);
+        };
+        let value = decode(&bytes)?;
+        validate(&value).map_err(invalid)?;
+        Ok(Some(Snapshot {
+            value,
+            version: self.version(relative, Some(&bytes)),
+            bytes,
+        }))
+    }
+
+    /// Enumerate a bounded immediate module inventory; no recursive repository scan.
+    pub fn inventory(&self) -> Result<Inventory> {
+        let path = self.path("modules")?;
+        if !path.exists() {
+            return Ok(Inventory {
+                ids: Vec::new(),
+                warnings: Vec::new(),
+                complete: true,
+            });
+        }
+        if !path.is_dir() {
+            return Err(Error::new("file_type", "modules must be a directory."));
+        }
+        let mut inventory = Inventory {
+            ids: Vec::new(),
+            warnings: Vec::new(),
+            complete: true,
+        };
+        let entries = fs::read_dir(path).map_err(|_| Error::new("io", "Cannot list modules."))?;
+        for (index, entry) in entries.enumerate() {
+            if index >= MODULE_CAP {
+                inventory.complete = false;
+                inventory
+                    .warnings
+                    .push("Module inventory limit reached; counts are lower bounds.".into());
+                break;
+            }
+            let entry = entry.map_err(|_| Error::new("io", "Cannot inspect module entry."))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if own_temp(&name) {
+                inventory.warnings.push(format!(
+                    "Orphan publication temp ignored: {}",
+                    safe(&name, 160)
+                ));
+                continue;
+            }
+            let id = name
+                .strip_suffix(".yaml")
+                .filter(|s| model::number(s, "M-").is_ok());
+            let regular = entry
+                .file_type()
+                .is_ok_and(|t| t.is_file() && !t.is_symlink());
+            if let Some(id) = id {
+                inventory.ids.push(id.into());
+                if !regular {
+                    inventory.complete = false;
+                    inventory
+                        .warnings
+                        .push(format!("{id}: nonregular module entry."));
+                }
+            } else {
+                inventory.complete = false;
+                inventory
+                    .warnings
+                    .push(format!("Unrecognized module entry: {}", safe(&name, 160)));
+            }
+        }
+        inventory
+            .ids
+            .sort_by_key(|id| model::number(id, "M-").unwrap_or(0));
+        inventory.warnings.sort();
+        Ok(inventory)
+    }
+
+    /// Creation precondition independent of report contents; own directories/lock do not affect it.
+    pub fn allocation_version(&self) -> Result<String> {
+        let inventory = self.inventory()?;
+        let project = self.bytes("project.yaml")?;
+        let state = self.bytes(".agent-tasks/state.yaml")?;
+        let mut digest = Sha256::new();
+        for part in [
+            self.version("project.yaml", project.as_deref()),
+            self.version(".agent-tasks/state.yaml", state.as_deref()),
+        ]
+        .iter()
+        .chain(inventory.ids.iter())
+        .chain(inventory.warnings.iter())
+        {
+            digest.update((part.len() as u64).to_le_bytes());
+            digest.update(part.as_bytes());
+        }
+        digest.update([u8::from(inventory.complete)]);
+        Ok(format!("{:x}", digest.finalize()))
+    }
+
+    /// Return healthy records, named omissions and a snapshot over exactly scanned data.
+    /// ponytail: bounded O(n) file scan; add an index only after measured scan cost matters.
+    pub fn scan(&self, module: Option<&str>) -> Result<Scan> {
+        let inventory = if let Some(id) = module {
+            model::number(id, "M-").map_err(invalid)?;
+            Inventory {
+                ids: vec![id.into()],
+                warnings: Vec::new(),
+                complete: true,
+            }
+        } else {
+            self.inventory()?
+        };
+        let mut scan = Scan {
+            modules: Vec::new(),
+            unreadable: Vec::new(),
+            warnings: inventory.warnings,
+            complete: inventory.complete,
+            version: String::new(),
+        };
+        let mut total = 0usize;
+        let mut digest = Sha256::new();
+        digest.update(self.root.as_os_str().as_encoded_bytes());
+        for id in inventory.ids {
+            let relative = format!("modules/{id}.yaml");
+            let available = SCAN_CAP.saturating_sub(total);
+            let path = match self.path(&relative) {
+                Ok(path) => path,
+                Err(e) => {
+                    scan.complete = false;
+                    scan.unreadable.push(format!("{id}: {}", e.message));
+                    digest.update(id.as_bytes());
+                    digest.update(e.code.as_bytes());
+                    continue;
+                }
+            };
+            if fs::symlink_metadata(&path).is_ok_and(|m| {
+                m.is_file() && m.len() <= RECORD_CAP as u64 && m.len() > available as u64
+            }) {
+                scan.complete = false;
+                scan.unreadable
+                    .push(format!("{id}: aggregate byte budget reached."));
+                digest.update(id.as_bytes());
+                digest.update(b"unscanned");
+                continue;
+            }
+            let raw = read_path(&path, RECORD_CAP.min(available));
+            match raw {
+                Ok(Some(bytes)) if total.saturating_add(bytes.len()) <= SCAN_CAP => {
+                    total += bytes.len();
+                    digest.update(id.as_bytes());
+                    digest.update(self.version(&relative, Some(&bytes)).as_bytes());
+                    match decode::<Module>(&bytes).and_then(|value| {
+                        value.validate().map_err(invalid)?;
+                        if value.id != id {
+                            return Err(invalid("ID differs from filename."));
+                        }
+                        Ok(value)
+                    }) {
+                        Ok(value) => scan.modules.push(Snapshot {
+                            value,
+                            version: self.version(&relative, Some(&bytes)),
+                            bytes,
+                        }),
+                        Err(e) => {
+                            scan.complete = false;
+                            scan.unreadable.push(format!("{id}: {}", e.message));
+                        }
+                    }
+                }
+                Ok(Some(_)) => {
+                    scan.complete = false;
+                    scan.unreadable
+                        .push(format!("{id}: aggregate byte budget reached."));
+                    digest.update(id.as_bytes());
+                    digest.update(b"unscanned");
+                }
+                Ok(None) => {
+                    scan.complete = false;
+                    scan.unreadable.push(format!("{id}: missing record."));
+                    digest.update(id.as_bytes());
+                    digest.update(b"missing");
+                }
+                Err(e) => {
+                    scan.complete = false;
+                    scan.unreadable.push(format!("{id}: {}", e.message));
+                    digest.update(id.as_bytes());
+                    digest.update(e.code.as_bytes());
+                }
+            }
+        }
+        for warning in scan.warnings.iter().chain(&scan.unreadable) {
+            digest.update(warning.as_bytes());
+        }
+        scan.version = format!("{:x}", digest.finalize());
+        Ok(scan)
+    }
+
+    /// Explicit init prepares only the final root and owned directories; all effects are disclosed.
+    pub fn prepare(&self, effects: &mut Vec<String>) -> Result<()> {
+        if !self.root.exists() {
+            fs::create_dir(&self.root)
+                .map_err(|_| Error::new("io", "Cannot create the configured final root."))?;
+            effects.push("Created configured root directory.".into());
+        }
+        for relative in ["modules", ".agent-tasks"] {
+            let path = self.path(relative)?;
+            if !path.exists() {
+                fs::create_dir(&path)
+                    .map_err(|_| Error::new("io", "Cannot prepare owned directory."))?;
+                effects.push(format!("Created {relative}/."));
+            }
+            if !path.is_dir() {
+                return Err(Error::new(
+                    "file_type",
+                    format!("{relative} is not a directory."),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Acquire a fresh advisory handle. Reads never create a lock, writes return busy immediately.
+    pub fn lock(&self, write: bool, effects: &mut Vec<String>) -> Result<Option<File>> {
+        let path = self.path(".agent-tasks/write.lock")?;
+        let file = if write {
+            if !path.parent().is_some_and(Path::is_dir) {
+                return Err(Error::new(
+                    "not_initialized",
+                    "Initialize the configured project explicitly first.",
+                ));
+            }
+            let exists = path.exists();
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let f = options
+                .open(path)
+                .map_err(|_| Error::new("io", "Cannot open writer lock."))?;
+            if !exists {
+                effects.push("Created .agent-tasks/write.lock.".into());
+            }
+            f
+        } else {
+            if !path.exists() {
+                return Ok(None);
+            }
+            File::open(path).map_err(|_| Error::new("io", "Cannot open existing read lock."))?
+        };
+        let result = if write {
+            file.try_lock()
+        } else {
+            file.try_lock_shared()
+        };
+        result.map_err(|_| {
+            Error::new(
+                "busy",
+                "Another cooperating call owns the store lock; retry later.",
+            )
+        })?;
+        Ok(Some(file))
+    }
+
+    /// Preserve exact noncanonical bytes before a guarded canonical replacement.
+    pub fn save<T: Serialize + DeserializeOwned>(
+        &self,
+        relative: &str,
+        value: &T,
+        observed: Option<&[u8]>,
+        terminal: bool,
+        effects: &mut Vec<String>,
+    ) -> Result<String> {
+        let bytes = encode(value)?;
+        let cap = if terminal {
+            RECORD_CAP
+        } else {
+            RECORD_CAP - CLOSING_RESERVE
+        };
+        if bytes.len() > cap {
+            return Err(Error::new(
+                "capacity",
+                "Record capacity reached; preserve review history and reduce current detail or start coherent continuation work.",
+            ));
+        }
+        if let Some(old) = observed {
+            let old_value: T = decode(old)?;
+            if encode(&old_value)? != old {
+                let dir = self.path(".agent-tasks/backups")?;
+                if !dir.exists() {
+                    fs::create_dir(&dir).map_err(|_| {
+                        Error::new("backup", "Cannot create normalization backup directory.")
+                    })?;
+                    effects.push("Created .agent-tasks/backups/.".into());
+                }
+                if !dir.is_dir() {
+                    return Err(Error::new("backup", "Backup location is not a directory."));
+                }
+                let name = Path::new(relative)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| Error::new("path", "Invalid backup record name."))?;
+                let backup = format!(
+                    ".agent-tasks/backups/{name}-{}.yaml",
+                    self.version(relative, Some(old))
+                );
+                match self.bytes(&backup)? {
+                    Some(existing) if existing == old => (),
+                    Some(_) => {
+                        return Err(Error::new(
+                            "backup",
+                            "Version-bound backup conflicts; original record untouched.",
+                        ));
+                    }
+                    None => self.publish(&backup, old, None, effects)?,
+                }
+                effects.push(format!(
+                    "Normalized source; exact original retained at {backup}."
+                ));
+            }
+        }
+        self.publish(relative, &bytes, observed, effects)?;
+        Ok(self.version(relative, Some(&bytes)))
+    }
+
+    /// Publish fully synced bytes. New records use no-clobber hard links; replacements
+    /// recheck exact observed bytes before rename. Post-publication sync failure is
+    /// reported with a visible-effect ledger, never retried or claimed as no effect.
+    fn publish(
+        &self,
+        relative: &str,
+        bytes: &[u8],
+        observed: Option<&[u8]>,
+        effects: &mut Vec<String>,
+    ) -> Result<()> {
+        let path = self.path(relative)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::new("path", "Record has no parent."))?;
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| Error::new("path", "Invalid record name."))?;
+        let temp = parent.join(format!(
+            ".{name}.tmp-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp)
+            .map_err(|_| Error::new("io", "Cannot exclusively create publication temp."))?;
+        let publication = (|| {
+            file.write_all(bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(|_| {
+                    Error::new("io", "Cannot write/sync candidate; work not published.")
+                })?;
+            if self.bytes(relative)?.as_deref() != observed {
+                return Err(Error::new(
+                    "stale",
+                    "Observed bytes changed; work not published. Read context before retrying.",
+                ));
+            }
+            self.path(relative)?;
+            if observed.is_some() {
+                fs::rename(&temp, &path)
+                    .map_err(|_| Error::new("io", "Atomic replacement failed."))?;
+            } else {
+                fs::hard_link(&temp, &path).map_err(|_| {
+                    Error::new(
+                        "publication",
+                        "No-clobber publication failed; no overwrite fallback.",
+                    )
+                })?;
+            }
+            effects.push(format!("Published {relative}."));
+            sync_parent(parent).map_err(|_| Error::new("durability_unknown",format!("{relative} is visibly published; directory sync failed. Inspect current context; do not blindly replay.")))?;
+            Ok(())
+        })();
+        drop(file);
+        let _ = fs::remove_file(&temp);
+        publication
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// One-shot calling-thread fault, never a shipping option or a cross-test global flag.
+    static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Inject one post-publication sync failure in the current test thread only.
+#[cfg(test)]
+pub fn fail_next_directory_sync() {
+    FAIL_DIRECTORY_SYNC.with(|flag| flag.set(true));
+}
+
+/// Sync directory publication; a post-publication failure leaves a visible-effect receipt.
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_DIRECTORY_SYNC.with(|flag| flag.replace(false)) {
+        return Err(std::io::Error::other(
+            "Injected post-publication directory sync failure",
+        ));
+    }
+    File::open(path)?.sync_all()
+}
+
+/// Recognize only our target-specific publication temps; foreign dotfiles remain foreign.
+fn own_temp(name: &str) -> bool {
+    let Some((base, suffix)) = name
+        .strip_prefix('.')
+        .and_then(|s| s.split_once(".yaml.tmp-"))
+    else {
+        return false;
+    };
+    model::number(base, "M-").is_ok()
+        && suffix
+            .split_once('-')
+            .is_some_and(|(pid, n)| pid.parse::<u32>().is_ok() && n.parse::<u64>().is_ok())
+}
+
+/// Quote bounded user text for one-line presentation, escaping newlines and structural punctuation.
+pub fn safe(value: &str, cap: usize) -> String {
+    let mut end = value.len().min(cap);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut result = String::new();
+    result.push('"');
+    for c in value[..end].chars() {
+        for c in c.escape_default() {
+            result.push(c);
+        }
+    }
+    if end < value.len() {
+        result.push('…');
+    }
+    result.push('"');
+    result
+}
