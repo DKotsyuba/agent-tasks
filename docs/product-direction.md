@@ -69,11 +69,27 @@ project remote, schema and needed project settings/references. Remote is descrip
 data, not permission to fetch or inspect a source repository.
 
 One technical file, `.agent-tasks/state.yaml`, holds MCP-owned allocator counters
-and useful derived lookup/cache data. Read the last allocated number there rather
-than scan all work on every creation. Maintain it during managed writes; cold
+and useful derived lookup/cache data. Top-level counters live there; Module-local
+Task/log/criterion high-water counters live in the Module's own YAML, so ordinary
+work recording stays a single-file update. Read a counter instead of scanning
+records to discover a number on every creation. Maintain them during managed writes; cold
 recovery or detected external drift may rebuild relevant derived data. Keep this
 file inside the portable root and out of normal agent responses. Work records and
 documents own their meaning; cached summaries are not another source of truth.
+
+The agreed first-version direction tracks technical allocator state in Git and
+starts with a small lookup/reference cache. Status and review use canonical work;
+validated summary caching can follow measurement. Top-level IDs reserve before
+new-file publication; local IDs and their counter publish in one owner-file write.
+
+Store meaningful result text ONCE in a typed semantic log entry. The current work,
+reviewer pack and status reference that entry. Logs are useful project facts, not
+an operation-receipt platform. Corrections append a superseding entry.
+
+Expected checks are context; only explicitly required planned checks gate accepted
+completion. A reviewer can report check outcomes in the verdict call, so missing
+lead bookkeeping does not force another report/review cycle. Review findings stay
+structured once; they do not automatically create a new Task for every small fix.
 
 ## Proportional tracking and documentation
 
@@ -130,6 +146,15 @@ intent, meaningful result or checklist item; it never types generated IDs,
 timestamps, bookkeeping or a storage-format template. Markdown is an optional
 detail body referenced by structured records. All standard YAML kinds read back
 as compact semantic text, never raw YAML.
+
+Useful additions fit existing structures: open questions in Decisions; dependencies
+on Modules; expected checks in criteria; in-scope gaps and out-of-scope followups
+on results; procedure pitfalls in runbooks; orchestrator handoff on Project/Epic.
+Do not add another registry merely to name those needs.
+
+Managed Markdown metadata lives in the referencing YAML detail record, including
+standalone prose references in the Project, not in a fragile Markdown header or
+the disposable cache. The Markdown body remains faithful flexible text.
 
 Technical dates/attribution are machine-maintained. A recent edit is not proof
 that a decision is still applicable or a runbook was executed successfully;

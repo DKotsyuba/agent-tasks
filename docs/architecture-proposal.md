@@ -1,500 +1,138 @@
-# Portable agent work and project intent — architecture draft
+# Portable agent-tasks — structured architecture proposal
 
-Status: proposed high/medium-level design. The repository contains the standard
-Rust MCP starter only. Work storage, lifecycle, retrieval, Git automation and
-document maintenance below are not implemented or qualified. This draft replaces
-the one-Epic-file candidate; its historical form remains in Git.
+Status: discussion draft. All names, fields, budgets and examples below are proposed. No task-store implementation, migration, release or installation is part of this document.
 
-## 1. Product contract and proportional use
+## A. Purpose, authority and boundaries
 
-Design for the agent: quick orientation, clear actions, less repeated writing,
-fewer unnecessary calls and fewer mistakes. The owner's essential interaction is
-ONE status call containing all report facts. Project documentation, semantic
-summaries and tool replies are in English. The orchestrator may translate that
-complete report into Russian at presentation time, without collecting facts again.
-No mandatory bilingual fields, translation tool or MCP translation engine.
+Keep one useful work/context system, with strict YAML for known structure and optional Markdown for extended reasoning. A microfix or tiny project may use no store and zero tracker calls. A substantial standalone Module is sufficient; an Epic groups genuinely shared outcomes. The current executable remains the Rust starter, not this contract.
 
-Tracking is optional, not the default consequence of a coding request:
+All stored documentation, semantic summaries, tool instructions, and examples are English. project_status supplies all status facts in ONE call; the orchestrator may translate its prose for the Russian-speaking owner. Translation preserves IDs, numbers, dates, states, omissions and uncertainty. No bilingual fields, second report, translation service or MCP language model.
 
-- A self-contained microfix can use code/docstrings, appropriate checks and an
-  ordinary Git commit. No tracker call, new work item, document or development log.
-- A tiny project may have no store. Reads never initialize one.
-- Substantial work can be a standalone Module. An Epic is useful only for a
-  meaningful shared outcome across Modules.
-- Tasks are useful subdivisions, not compulsory wrappers around edits.
-- A fix inside current work can reuse its Task or Module result. Do not invent
-  another item or reopen completed work merely because the same source file changed.
-- A durable decision can be one paragraph, without an Epic or a tracker.
-- Do not create Runbook, Log, TODO or empty decision documents automatically.
+Ordinary internal boundaries: portable store (routing, strict schemas, references, allocation, guarded writes and scoped Git); work (planning, results, review); knowledge (typed records); retrieval (bounded context/search/exact Markdown); presentation (typed views and strict embedded MiniJinja). These are responsibilities, not new crates or a platform. Code/docstrings own implementation; these records own intent and reported facts; Git owns committed history. No source reading, indexing, synchronization, mandatory symbols, runtime polling, daemon/database, Linear/Space integration, or automatic documentation expansion. This explicitly designs a future stateful profile; AGENTS.md:23 and docs/architecture.md:3 still describe the starter.
 
-Applicability guidance belongs in the shared orchestrator/lead skills and relevant
-responses. No mandatory scope-assessment call, numerical size threshold, source
-scanner, automatic log or separate routing system is needed.
+## B. Fixed records and field ownership
 
-## 2. Authority and supported scope
+Each standard kind has one closed, versioned schema. R=required; A=required when applicable; O=optional. MCP generates store/record/item/criterion/log IDs, technical dates, revisions, completion stamps, attribution when available, and relationships implied by operations. Agents provide meaning and intentional references, including lead assignment. Unknown actor stays unknown; an explicit declared identity may be recorded as declared, without authentication machinery. Omitted edit fields preserve values; explicit clear applies only to optional values. Empty or absent checks mean “not reported,” not success. No lead means unassigned; absent alternatives are not recorded, run history never reported, reviewer unidentified and unmanaged Markdown metadata unknown.
 
-| Source | Responsibility |
+References are typed same-store IDs, relative Markdown paths/sections, and optional reported artifact references. An Epic alone owns Module membership; a Module belongs to at most one Epic and may stand alone. No duplicate parent field. IDs survive edits; titles are not identities.
+
+| Kind/home | Agent-supplied meaning | Generated/derived and lifecycle |
+|---|---|---|
+| Project / project.yaml | R title, purpose. O boundaries, priorities, expected checks, bounded glossary, useful references, remote, brief Markdown; checkpoint auto/manual (auto default). | Store identity/schema/dates; navigation and counts derived. Remote is descriptive, never a fetch or checkpoint target. |
+| Epic / epics/E-001.yaml | R title and outcome. A requirements/acceptance. O ordered Module refs, shared context, checks, handoff. | Activity derived; explicit close/cancel needs result/reason. No freeze ceremony. |
+| Module / modules/M-001.yaml | R title and outcome; O specific acceptance, lead{name, handle?}, child work, dependencies with needed outcome, context refs, delivery facts. Outcome is the minimum completion criterion. | ONE file contains all Tasks/Atomics, current references, log and reviews. Planned/working/ready/accepted/canceled; blocking is orthogonal. First meaningful work can establish working; no start call. |
+| Task / Atomic, embedded in its owner | R title. O criterion, required checks, dependencies. Project/Epic checks can live in their existing files. | Open/done/canceled. Done records a meaningful result; cancel needs reason. No Task required for every edit. Work TODO is a projection of these canonical items. |
+| Semantic log/result, embedded in owner | Closed entry variants: result{summary, checks?, gaps?, followups?, artifacts?}; handoff{stopping_point,next_action}; blocker{problem,needed_action,resolver?,waiting_on?}; unblock/cancel/reopen{reason}; delivery fact; meaningful note. | MCP stamps entry, target, actor/date. One canonical result entry; target/current views reference it. Materialized states are updated directly, not rebuilt by replay. Corrections append a superseding entry. Generated plan/review links reuse existing substance. No command diary or hidden operation journal. |
+| Review, in Module | R verdict accepted/changes_requested and summary; O declared reviewer label when caller attribution is unavailable. A findings{text,must_fix}; optional result references addressing earlier findings. | MCP stamps reviewer, finding IDs and accepted semantic basis. Expected project/Epic checks never gate a verdict: unreported ones render 'not reported'. Only a check explicitly planned as required for a criterion or item gates acceptance, and a failed one cannot be accepted. review_module may carry reviewer-reported check statuses, so a forgotten report costs no extra round trip. An accepted verdict resolves earlier must_fix findings (recorded as resolved by review when no result addressed them); a finding the reviewer keeps open makes the verdict changes_requested. Accepted review closes directly. 'Expected' alone adds no gate; a check explicitly planned as required gates even when it is inherited from the Epic or project. The verdict checks current intent/results/required context, excluding its own metadata. Accepted is a dated fact: external supersession later signals applicability; own semantic drift is flagged, and managed scope change requires reopen. |
+| Decision / knowledge | R question or adopted statement. A statement and rationale when adopted. O rejected alternatives with reasons, decider/resolver, scope, supersession, detail. | Open/current/superseded/retired. An open question can resolve in the same record. Supersession preserves predecessor and incoming-reference warnings. Recorded owner decision is context, never execution permission. |
+| Runbook / knowledge | R purpose and ordered steps with description, typed command or instruction, expected outcome. A preconditions, inputs{name,meaning,type,required,default?}, working context and recovery. O pitfalls, scope and detail. Execution results can reference the runbook once. | IDs/step IDs/dates; current/superseded/retired. Last use is derived from those reports, not copied prose. It is computed from canonical work when the runbook is read; citing a runbook in a result never adds a shared-state write. Command is a typed {text, working_context/cwd?} value, not an argv/executor model; reading never executes it. Input names/types/required/defaults are explicit, without expansion. No secrets as input values. Last reported success is tied to a revision; edit date is not verification. |
+| Research / knowledge | R question and findings{claim,basis,evidence/source when applicable}. O conclusion, sources, limitations/open questions, applicability, detail. | IDs/dates; current/superseded/retired. Basis distinguishes measurement, primary/secondary report and inference. Internal reasoning can lack external citation when labelled. No confidence score or automatic age expiry. |
+| Procedural checklist / knowledge | R purpose and ordered item descriptions; O associated work/runbook and detail. Each instance uses open/done/canceled like work; procedural skip is canceled with reason, done needs a meaningful completion fact. | MCP item IDs and completion attribution/dates. Runbook reference records the version used. Checklist progress does not create Tasks or copy a work TODO. Counts remain separate; skipped never means done. |
+| Markdown detail / docs | English flexible body plus intentional relative links/section targets; a managed standalone document has one purpose line for navigation. | MCP keeps identity/date/actor metadata in its referencing YAML detail entry (Project for standalone prose), not a fragile Markdown header or disposable cache. Native bodies remain exact; unmanaged metadata is unknown until managed save. Markdown cannot substitute for a standard typed kind. |
+
+Checks carry criterion/label, status=passed/failed/not_run/not_applicable and optional detail/artifact. Missing required checks prevent accepted completion; marking not_applicable cannot silently waive planned acceptance. Gaps concern unfinished in-scope work; followups are suggestions outside scope, not automatically new Tasks. Findings remain canonical in review: a result can address their IDs; action context shows unresolved findings beside work. No Task per finding by default. Reviewers must act independently; a known reviewer matching the lead is refused. Unknown identity is reported honestly and does not gate the verdict or create an actor.
+
+## C. Additional knowledge that earns its cost
+
+| Candidate and real scenario | Existing home; payload/call burden | Recommendation |
+|---|---|---|
+| Owner question: cold orchestrator must not guess or re-ask | Open Decision + resolver; one question, no new kind/call beyond save_document | Merge |
+| Standing rule/assumption: later agent repeats a rejected approach | Decision rationale/applicability; short premise/consequence, not a risk register | Merge |
+| Procedural lesson: lead repeats known recovery failure | Runbook pitfall/recovery, or Decision for general policy; one short field | Merge |
+| Dependencies: choose startable Module without rebriefing | Module needs ref + needed outcome; compact upstream result in context | Keep field |
+| Expected checks: reviewer cannot interpret “missing” without expectations | Project/Module acceptance/check requirements; no copied check manual | Keep field |
+| Gaps/followups: reveal limits without scope creep | Result optional lists, captured in same call; no backlog file | Keep fields; defer triage workflow |
+| Persistent lead location: resume same lead and locate work | Optional opaque handle + artifact refs; no liveness integration | Merge |
+| Orchestrator resume point: project coordination is interrupted | Same handoff schema at Project/Epic scope; one meaningful update | Reuse |
+| Procedure usefulness: distinguish edited from actually tried | Runbook reference to reported execution, not duplicate narrative | Keep reference |
+| Recent activity: answer “what changed?” | Derived semantic log dates, optional since filter; zero stored duplicate | Keep derived |
+| Environment/resources/glossary: cold agent lacks orientation | Manifest references/constraints and optional term/meaning pairs; a few values, no new kind/call | Merge |
+| Success measures: activity is mistaken for outcome | Existing criterion sentence and reported check detail; no additional measurement machinery | Merge |
+| Incident register: a recurring outage needs its recovery steps | Result + reusable runbook; a register needs upkeep | Defer |
+| Release ledger: “what shipped when” | Delivery facts and artifact refs on results | Defer |
+| Estimate/deadline/priority fields: ordering work under time pressure | Epic order, dependencies, manifest priorities; unmaintained otherwise | Defer until a real scheduling decision needs them |
+| Inter-Module contract records: a consumer needs the producer's target contract | Epic requirement or scoped Decision + Markdown; the implemented contract belongs to code | Reject kind |
+| Source map, live-agent roster, cost/usage: “where is the code, who is running” | Code tools and the runtime own these; stored copies fabricate truth | Reject |
+| Risk register, follow-up backlog platform: speculative lists | Decision rationale, blocker, result followups | Reject register; defer backlog triage |
+
+## D. Semantic tool surface and mini-docs
+
+Keep eight purpose tools plus independent diagnostic get_status. Every work call takes project=<local TOML alias>, or mutually exclusive root for bootstrap. Resolve once; bind locks/observations to the resolved root plus store identity. Same-root aliases coordinate; alias retargeting cannot reuse an old observation. No global current project and no read-created store.
+
+| Tool | Use/input -> result/effects and recovery |
 |---|---|
-| Code and detailed docstrings | Current implemented technical truth |
-| Structured YAML records | Intent, work, decisions, procedures, logs and checklists with known schemas |
-| Referenced Markdown | Flexible narrative and extended explanation when a record's fields are insufficient |
-| Git | Committed history of code and work, in their respective repositories |
+| project_status | Owner asks for progress: project, optional scope/since -> complete scoped facts in English, separate data/detail coverage, no obs. Read-only; invalid files mean partial data. No agent-side scans/polling. |
+| get_context | Enter/resume/review or read known content: ref/view/section -> project or assignment pack, semantic record, TODO/log view, or exact Markdown slice; one obs and omitted routes. Changed continuation refuses, then reread. |
+| search | Unknown reference: words, scope/kind/currentness -> ranked semantic-field/Markdown excerpts with directly readable references. Lexical first; no YAML grep/dump. |
+| plan_work | Intend/create/change work: semantic Project/Epic/Module/child/checklist plan, assignments/membership, obs -> confirmed IDs and new obs. Explicit initialization only; partial result names saved/unattached/pending parts. |
+| record_work | Report what happened once: target, relevant result/checks/state/handoff/blocker/delivery, obs -> one semantic save, current work/log/status/review reuse. A stale replacement returns changed facts, nothing saved and fresh obs; inspect uncertain effects before retry. An explicitly historical note may append without changing current completion. |
+| review_module | Judge independently: Module, verdict/summary/findings, obs -> accepted closure or changes requested. Relevant changed context refuses stale approval. |
+| save_document | Preserve reusable knowledge: one typed Decision/Runbook/Research or Markdown body/detail, optional existing ref and obs -> validated save, generated metadata, exact refs. No raw YAML or arbitrary field bag. |
+| checkpoint | Recover Git or deliberately adopt named store edits: refs/paths and current observation -> commit outcome, including relevant valid machine-owned state. Saved work survives commit failure; no result replay. |
 
-This MCP does not inspect, parse, index, synchronize or verify source. Commit,
-PR, checks and delivery references are reported facts, not independent proof.
-Agents use coding tools separately.
+Mini-doc pattern: “Use when / Skip when / Give / Effect / Returns / Recovery,” with semantic field help and one real call. Policy budget, to be measured: each mini-doc about 700 bytes, all tool discovery about 8 KiB; field help lives in input-schema property descriptions, and a validation error names the field and lists the accepted fields of that variant so one retry suffices. Example: record_work is for a meaningful tracked outcome; skip untracked microfixes and routine narration. Give only applicable fields and the supplied obs. It saves one canonical result, updates work/log views, and checkpoints eligible paths. Reply names confirmed effects/new obs. On lost reply, get_context the target; never retry a creation or result merely to repair presentation/Git.
 
-Start with trusted agents and local filesystems. Several portable stores are
-selected through configured aliases or explicit roots. A team uses one chosen live coordination root;
-clones and worktree copies remain independent snapshots. There is no global
-folder, inferred source-checkout binding or automatic synchronization.
+project_status mini-doc: Use when owner asks status; Skip when assignment context is needed; Give project/scope; Effect none; Returns English report with data/detail coverage; Recovery report named PARTIAL limits without filling gaps. Translate the whole answer for the owner, preserving facts.
 
-MCP-only clients can manage work and Markdown. Implementing code requires the
-agent's separate coding capabilities.
+Routing: owner asks -> project_status; enter -> get_context; unknown ref -> search; intend -> plan_work; happened -> record_work; judge -> review_module; reusable knowledge -> save_document; self-contained fix -> none.
 
-### Store aliases in TOML
+Examples (illustrative, not live APIs):
+- get_context(project="alpha",ref="M-001") -> outcome, inherited constraints, expected acceptance/checks, Tasks/latest results, lead, dependencies, current decisions, handoff/blockers, next action, obs.
+- record_work(project="alpha",ref="M-001/T-02",result="Relative links survive a folder move",checks=[{label:"move scenario",status:"passed"}],transition="done",obs="...") -> “COMMITTED M-001/T-02; result M-001/L-03 saved; Task done; Git committed.”
+- save_document(project="alpha",decision={question:"Storage boundary?",statement:"One YAML per Module",rationale:"Independent leads edit separate files",rejected:[{option:"one Epic file",reason:"unrelated write conflicts"}]},obs="...") -> exact Decision ref, no copied document body.
+- search(project="alpha",query="restore",kind="runbook"), then get_context(project="alpha",ref="RB-002") -> ordered prerequisites/inputs/steps/expected outcomes/recovery; Markdown detail read only if needed.
+- plan_work(project="alpha",checklist={purpose:"Restore rehearsal",items:["Verify restored backup"]},obs="..."); record_work(project="alpha",ref="C-002/I-01",result="Backup restored successfully",transition="done",obs="...").
 
-The proposed user configuration is `~/.agent-tasks/config.toml`, selectable through
-the standard explicit config option. It stores machine-local routing only, not
-Project records or a second copy of business state.
+Typed domain outcomes are projected before strict embedded MiniJinja rendering. Exact IDs, outcomes, omissions, pagination and recovery survive. Rendering failure returns a small outcome-preserving receipt; it never reruns effects or dumps YAML/JSON. Exact MD reads have labelled source/range/revision and real continuation.
 
-```toml
-schema_version = 1
+## E. Agent walk-throughs and status
 
-[aliases]
-alpha = "/work/project-alpha/docs"
-private = "/private/project-beta/notes"
+Microfix: zero calls, records or documents. Cold orchestrator: get_context(project="alpha") gives purpose, constraints, priorities, expected checks, work/attention, open questions, handoff, knowledge routes, uncommitted refs and obs. Delegation passes only alias+Module ref; one lead context restores assignment. Persistent lead records a meaningful result once; reviewer reads that same substance and accepts directly. Checklist progress uses record_work, never a copied Task list. A decision/research record is created only when future work benefits; long reasoning optionally links MD.
+
+Reviewer context gives criterion/checks, results, gaps/followups and addressed findings; TODO shows open items/findings; log shows ordered entries. Inline explicitly linked small sections first, then scoped decision statements; Omitted counts provide exact routes. Oversized Markdown offers a heading outline/section routes or faithful continuation, never a substitute summary.
+
+Runbook read example: “RB-002 Run the gate; last run not reported. Requires: pinned toolchain; repository root. Inputs: none. 1. Check the project. Command: cargo xtask check. Expected: exit 0. Recovery: inspect the first failure, repair, rerun.” Reading executes nothing.
+
+One-call status example for a representative small project (all rows shown, no omissions):
+
+```text
+Alpha — tracked data complete; detail complete
+Modules: 1/2 accepted. Tasks: 2/3 done by report; canceled: 0.
+M-001 Storage — accepted; lead codex-a; Tasks 2/2.
+  T-01 Schema: done. T-02 Move: done.
+  Result: relative links survive a folder move.
+  Checks: move scenario passed by report. Delivery: PR reported; merge not reported.
+M-002 Release guide — working; lead claude-b; Tasks 0/1.
+  T-01 Audience scope: open. Checks: not reported.
+  Blocker: public release scope D-007; resolver owner.
+Attention: resolve D-007 before M-002 can complete.
+Coverage: tracked records only; untracked microfixes and agent liveness excluded.
 ```
 
-Every work/document call carries a common `project` argument: the configured
-project name is its alias. For example, `project_status(project="private")` and
-`get_context(project="alpha", ref="M-001")`. The configuration maps that name to
-the actual documentation directory. An explicit `root` alternative remains useful
-for initial setup and an unregistered store; `project` and `root` are mutually
-exclusive selectors.
+The header carries alias and as-of date, e.g. `OK status alpha "Alpha" as of 2026-10-05; data coverage: complete; detail: full`. Each non-closed Module row shows `last record <date>`, the only honest substitute for liveness. Decisions awaiting the owner form their own group above Attention. When present, one line `Uncommitted: <refs>`. No reply ever suggests creating a record or document.
 
-The configured name is a routing alias. A readable title in `project.yaml` is
-ordinary project content; changing that title does not silently retarget calls.
-Product-wide diagnostic `get_status` requires no selected project.
+The orchestrator translates prose into Russian without collecting more facts. Never trim open Module rows/leads, blockers, owner questions, ready reviews, failed checks, open closure conditions or coverage. Trim older accepted rows, done Task detail, then recent activity; name omitted counts and exact narrowing routes. If essential rows overflow, return PARTIAL with per-Epic routes, never a complete claim. Proposed 16 KiB status budget must be demonstrated on a declared fixture (12 open Modules, 60 Task rows, 20 attention/owner rows; older closed work aggregated); the cap itself proves neither usefulness nor speed.
 
-Resolve the selector once at request entry and bind that request to the actual
-root. There is no mutable server-wide current space. Unknown aliases return a
-focused error with configured choices; missing directories never cause fallback
-to another store or automatic initialization.
+Lost result reply: record_work lands T-02 done with L-18 but loses its reply. One get_context shows current result/event; continue if present, otherwise reassess and submit with fresh obs. Replaying old obs refuses with current event details, without claiming ownership of that event or content-based NOOP. An explicitly historical append-only note can retain a stale basis label; it certifies no current completion.
 
-Observations and write locks belong to the resolved root, not the alias string.
-Two aliases for the same directory share coordination; repointing an alias cannot
-reuse an old observation against another directory. Alias/config changes apply
-to subsequent requests, not the target of an in-flight operation.
+Lost creation reply: creation saves M-005, but its reply/attachment is lost; a lead later edits M-005. The old creation obs now refuses, and get_context shows M-005 as standalone. The caller attaches that exact ID rather than recreating similar text. Unknown append likewise requires inspecting the canonical event list; repeated text is not identity. Interrupted plan: saved child with missing Epic attachment remains visible as standalone work. Inspect confirmed IDs/inventory and attach or continue them; same-content creation is not identity. Compaction: existing agent-run prepares bounded candidates; reviewer examines bytes and incoming links; additions, link updates, retirements follow guarded saves. Originals remain recoverable; interrupted apply reports applied/pending paths. No source inspection or automatic deletion.
 
-Aliases are installation-local conveniences. The portable store retains relative
-links and no machine-specific paths; moving it only requires updating its alias.
-No extra register/open tool is required merely to use a configured alias.
+## F. Ordinary-file integrity, cache and Git
 
-## 3. Coherent responsibilities
+One tracked .agent-tasks/state.yaml contains durable allocator high-water values and disposable lookup/cache sections. Initial cache: ID/path and useful structural reference metadata; status and review read canonical work. State changes on top-level allocation, rename/membership/knowledge-reference changes; ordinary result/handoff writes stay in their one owner file. Later validated summary caching is allowed if measurement warrants it. No cache is approval authority.
 
-| Area | What it provides |
-|---|---|
-| Portable store | Root selection, parsing, integrity, scoped writes, numbering, dates and Git checkpoints |
-| Work cycle | Assignments, results, meaningful completion, Module review and useful handoffs |
-| Context and retrieval | Project/assignment packs, lexical search and exact document sections |
-| Status | Ready owner report with progress, accomplishments, blockers and coverage |
-| Document maintenance | Proportional writing, link hygiene and reviewed compaction |
+A short cooperative root write lock covers reload/validation, relevant obs checks, durable number reservation before publication, atomic replacement of each file and scoped checkpoint. Numbers may have gaps; high-water values never decrease. Supported retirement retains the ID-bearing record/tombstone. Normal allocation reads counters, not a whole-store recount; generated child/criterion/log high-water counters live in their owning YAML, so local allocation reads a counter without an extra shared-state write. Durable reservation before publication applies to top-level numbers in state.yaml and the new files they name. A local Task, criterion or log ID and its owning YAML high-water field publish together in ONE atomic replacement of the owner file; there is no separate counter-only rewrite, so no local allocation needs two writes. Existing-target exclusivity prevents overwrites. Reads do not persist caches or initialize stores. Cold/stale cache falls back to canonical files in memory. Missing/corrupt counters reconcile retained canonical IDs, canceled/archived records and available historical high-water state under the next managed write; incomplete recovery refuses new allocation. Lost issued-ID history requires explicit restoration, not silent recycling. Clones are independent snapshots, not a distributed allocator.
 
-Ordinary Rust modules are sufficient. Do not add a daemon, database, scheduler,
-search index or runtime platform without a demonstrated need.
+One opaque observation (policy target <=128 bytes for single-record operations, 1 KiB hard cap; size and agent copy reliability to be measured) covers operation-relevant contents and actual creation inventory, bound to the resolved root. A T-02 result compares T-02 and inherited acceptance, not an unrelated T-07/note; a handoff compares its current pointer. A managed allocation sequence alone cannot detect native inventory drift. Review basis also covers required context. No proof of reading, three-token ritual or hidden per-agent session. Multi-file operations are explicitly partial, not transactions; confirmed IDs and unfinished steps are returned. Old creation inventory cannot authorize blind replacement after a lost reply, even if an orphan was subsequently edited.
 
-## 4. File and record model
+Valid dirty records remain writable under scoped observations; only Git adoption is deferred. Auto-checkpoint only clean owned business paths; preserve dirty user work and unrelated/conflicting staging. Valid pending MCP-owned state can be included automatically without manual adoption. A failed commit leaves saved work; continue with checkpoint pending, then recover once at a useful boundary, not after each result. One checkpoint(project="alpha",refs=["M-001"],obs="...") commits the selected saved version plus valid relevant state; no repeated result or separate state call. Each write has one Git line: committed + exact commit ID; saved/not committed + reason and pending refs; manual mode; or no repository. Status/orchestrator context list all uncommitted scoped store refs from Git (honest PARTIAL if too large), so checkpoint needs no agent file scan. No repository means saved without Git history. Only committed originals have Git recovery; no push/merge/history rewrite or source access.
 
-| Path | Owns |
-|---|---|
-| `project.yaml` | Identity, short purpose, store schema and optional project-level checks |
-| `epics/E-001.yaml` | Shared intent, requirements, acceptance and Module references |
-| `modules/M-001.yaml` | ONE Module, its assignment, optional Tasks/Atomics, results and review |
-| `knowledge/*.yaml` | Typed runbooks, decisions, checklists and reusable research summaries |
-| `docs/*.md` | Optional strategy, plans and durable rationale |
-| `.agent-tasks/state.yaml` | MCP-owned allocator high-water marks and derived lookup/cache data |
-| `.agent-tasks/` | Coordination and candidate-edit scratch alongside the technical state file |
+Closed schemas reject unknown fields/versions for mutation, malformed references, duplicate IDs/parentage and invalid lifecycle. Reads expose partial coverage instead of inventing empty success. Migration is an explicit deterministic preview/apply operation with a scoped diff and supported-version policy, not an ordinary-write surprise or an agent-run platform. Unsupported YAML preservation refuses that file's mutation; native Markdown remains exact. Locking, durable replacement, Git/index edge cases and preservation require platform qualification.
 
-`project.yaml` is the starting manifest: readable project name, description/purpose,
-optional repository remote, store schema and needed settings/references. The MCP
-writes generated identity and dates. The remote is descriptive project data; it
-does not select the Git checkpoint target or trigger source access. Checkpoints
-remain scoped to the documentation store's enclosing repository.
+## G. First version, verification and limits
 
-YAML is an internal machine-written format. Agents supply intent and meaningful
-field values through tools; they do not construct YAML, internal timestamps or
-allocator records. Human-readable files help maintenance, but YAML formatting is
-not an agent workflow. External edits remain possible and require explicit drift
-handling rather than silent field loss.
+First useful version: portable manifest/Module/Epic, minimal typed knowledge/checklist schemas, one-result log model, eight tools, one-call status, lexical retrieval, counters/lookup cache, ordinary locks and scoped Git. Defer semantic search, compaction automation, checklist templates, generalized backlog/risk/incident systems, log archival and source/runtime integration.
 
-An Epic's Module references are the parent authority. Do not also store a
-competing parent field in each Module. Unreferenced Modules are visible as
-standalone work; unattached files from a partial plan never disappear from status.
+Qualification must exercise zero-paperwork microfixes; cold alias entry/delegation; one result feeding log/status/review; typed runbook/checklist/decision/research reads; stale same-Module review versus unrelated Module edits; missing checks; native edits; partial plan with edited orphan; cache/counter recovery; dirty Git/index and failed commit recovery; post-save rendering failure; exact Markdown continuation; compaction interruption. Measure calls, output/discovery bytes, latency, validation refusals, duplicate writing in transcripts and owner-marked missing/wrong status facts, without claiming unmeasured savings.
 
-Module IDs are project-scoped; Task IDs are local to a Module, such as M-001/T-02.
-A nested Atomic uses the same small work record as a Task. Project/Epic Atomics
-are checkable work outside a Module, including useful integration scenarios.
-Identity survives ordinary edits; allocation is coordinated and never based on
-title uniqueness.
-
-Minimum useful data:
-
-- Project: title, description/purpose, optional repository remote, schema and useful
-  settings/references. A long brief becomes Markdown instead of a copy.
-- Epic: outcome, applicable requirements/acceptance, Module references, optional
-  checks and explicit closure/cancellation.
-- Module: outcome, acceptance, lead, optional Tasks, current results/checks, review,
-  optional delivery facts, references, note and blocker.
-- Task/check: title, optional specific criterion/check, open/done/canceled state
-  and one attributed result. Inherit relevant Module criteria instead of copying.
-- Report: meaningful result, reported checks or explicitly absent checks, author,
-  observation date and optional artifact references.
-- Standard knowledge record: a known kind, schema version, generated identity and
-  dates, its typed semantic fields, and optional relative Markdown detail references.
-- Markdown: relative path and optional section reference for flexible extended text.
-
-Counts, summaries and report drafts are derived. A semantic work log consists of
-structured YAML entries appended by MCP for meaningful work; it is product data,
-not a hidden operation journal. Reuse recorded substance and references rather
-than require another user-authored report or duplicated Task TODO list.
-
-## 5. Minimum work cycle
-
-1. Plan or reuse a Module when tracking helps. Group Modules into an Epic only
-   when the grouping communicates a shared goal.
-2. Assign one persistent lead. Assignment is not evidence the process is running.
-3. Give the lead only the configured project name and Module reference.
-4. The lead gets its assignment, criteria, useful referenced excerpts, existing
-   results and handoff in one call.
-5. Record a Task or Module result once. Task start is not a mandatory extra call.
-6. Review the complete Module independently. The reviewer can inspect locally
-   complete work directly; a missing handover ceremony does not block review.
-7. Accepted review closes the Module in the same call. Changes requested returns
-   it to work with the findings.
-8. Close an Epic when its intended outcome and relevant checks are satisfied.
-   Integration checking is used where actual interactions need it.
-
-Task states can be open/done/canceled. Module readiness follows its actual records:
-planned, work recorded, ready/in review, reviewed complete or canceled. Epic
-activity is derived; membership remains editable with scope changes visible.
-
-Separate three facts: work reported complete, review accepted, delivery reported.
-A PR reference does not imply any of them. Delivery or integration belongs in the
-plan and acceptance when necessary, not as a universal hidden gate.
-
-Missing checks say "not reported." Explicit unmet required checks cannot satisfy
-their criterion. Partial results and blockers can still be saved without dummy
-evidence. Reads never reopen work. Changes to actual reviewed scope/results make
-an old approval non-current; unrelated later microfixes do not.
-
-## 6. Proposed MCP interaction surface
-
-Eight work/document tools, plus the starter's separate diagnostic `get_status`.
-Names and exact schemas remain proposals; tool count is not a design quota.
-
-Each tool has a clear work-related goal, typed inputs and a relevant compact text
-result. Discovery mini-docs explain why to call it, what it changes or reads, what
-to expect, and its recovery route. This is not a grep interface over storage.
-
-Decode YAML into typed work data, compute domain results, project a bounded view
-and render it through strict embedded MiniJinja. Task, description, result and
-review reads expose readable facts, not raw YAML or a second complete JSON copy.
-Expose only actionable IDs/observations, actual outcomes, important omissions and
-safe next actions; internal counters/cache keys do not enter ordinary replies.
-
-| Tool | One useful intent |
-|---|---|
-| `project_status` | Owner report and cold project orientation |
-| `get_context` | Project, assignment, reviewer or exact document context |
-| `search` | Scoped lexical retrieval with useful excerpts |
-| `plan_work` | Create or revise intent, assignments and membership |
-| `record_work` | Results, checks, optional focus/handoff, blockers, cancellation and reopening |
-| `review_module` | Independent verdict and Module closure/return |
-| `save_document` | Save a typed standard knowledge record, or optional Markdown detail text |
-| `checkpoint` | Commit explicitly selected store paths |
-
-Every work/document call selects its alias through the common `project` argument,
-or uses the explicit `root` alternative. Short project names save repetition
-without an implicit current space; correctness does not depend on one server
-process corresponding to one agent.
-
-Context and write replies return ONE opaque observation reference (`obs`).
-The caller copies it where needed; it never assembles hashes or revision maps.
-The reference covers relevant observed inputs, not unrelated sibling Modules.
-Review checks Module intent/results and required context against that observation.
-A recorded approval identifies the accepted content internally and does not
-invalidate itself by writing its own metadata.
-
-Do not add per-Task proof fields, repeated reaffirmation records or read-page
-certificates. A changed input returns a compact current view and assessed recovery,
-not automatic permission to repeat stale reporting. Retained observations can work
-after a restart when the relevant content still matches.
-
-## 7. Agent routines and useful output
-
-### Microfix
-
-Inspect and fix code, update attached documentation where needed, check the result
-and commit when authorized. Tracker calls: zero. New records/documents: zero.
-
-A missing store reports "No tracked project at this root; nothing created."
-It does not automatically prescribe initialization.
-
-### Substantial project entry and delegation
-
-`project_status(project="alpha")` returns purpose, active work, assignments, reported results,
-blockers and coverage. Planning reuses existing work when possible.
-
-`plan_work(project="alpha", ..., obs=...)` returns confirmed work references.
-Delegate only `{project: "alpha", Module reference}`; do not repeat the
-specification in the launch prompt.
-
-### Persistent lead, completion and review
-
-`get_context(project="alpha", ref="M-001")` returns acceptance, relevant sections, Tasks/results, note,
-blocker and observation.
-
-`record_work(project="alpha", ref="M-001/T-02", result=..., checks=..., obs=...)` records the outcome once.
-Its text supplies the Module report, reviewer pack and status. A small improvement
-can be included in existing work rather than becoming another administrative item.
-
-`get_context(project="alpha", ref="M-001", view="reviewer")`, then
-`review_module(project="alpha", ref="M-001", verdict="accepted", summary=..., obs=...)` records reviewed completion.
-Delivery facts remain separate. On interruption, write a useful handoff once;
-the next session restores context through one read.
-
-### Owner status
-
-Illustrative content, not an actual project result:
-
-> E-001 Portable startup — Modules 1/2 accepted; Tasks 3/3 reported complete.
->
-> M-001 Store — accepted after review; lead assigned; Tasks 2/2.
-> Result: relative links survive a folder move.
-> Checks: move scenario passed, as reported.
-> Delivery: PR recorded; merge not reported.
->
-> M-002 Report — ready for review; Tasks 1/1.
-> Result: one report presents work progress.
-> Checks: not reported.
->
-> Attention: review M-002 and supply check information.
-> Coverage: tracked work of this Epic. Untracked microfixes are outside the report.
-
-Use English canonical text, exact work references, known dates and assigned leads.
-The orchestrator translates for the owner if appropriate, preserving reported
-meaning and limitations. It does not infer new facts or rewrite storage.
-Do not claim liveness, checked code, full project activity or zero work from missing
-records. Missing files or omitted required rows make coverage PARTIAL.
-
-### Retrieval and document editing
-
-Search returns relevant work fields/Markdown sections, short evidence excerpts
-and exact routes. Scope and currentness filters reduce noise. Start with lexical
-retrieval; measure misses before adding semantic search or an index.
-
-After a document read, a native guarded edit plus checkpoint uses two calls and
-may carry a small patch. A single `save_document` call edits/checkpoints a section
-but carries its replacement text. Support both; neither always saves more tokens.
-Continuations refuse changed source content rather than silently skipping results.
-
-Document retrieval preserves requested Markdown content. Search by keywords first
-when the needed document is unknown; show titles, useful excerpts and exact routes,
-then read a section or whole document explicitly. Context packs inline only useful
-small sections and name omissions instead of loading the entire document tree.
-
-`save_document` maintains generated creation/update times, attribution and other
-technical metadata itself in a controlled document header. The caller supplies
-content and meaningful relationships, not a handcrafted metadata block. Normal
-document reads can show useful metadata as text and return the Markdown body
-faithfully without dumping the internal header. Native body edits remain supported;
-the next managed save preserves human text and refreshes machine-owned fields.
-
-Standard record reads differ from Markdown reads: decode their strict YAML schema
-and render useful facts, ordered procedure steps, log entries or checklist progress.
-The agent never receives a raw runbook/log/TODO YAML dump. The knowledge writer
-accepts semantic fields for a supported kind and constructs the YAML itself;
-Markdown content remains a separate flexible body or detail reference.
-
-### Technical state and fast paths
-
-One `.agent-tasks/state.yaml` per store contains a small technical schema, allocator
-high-water marks (project-wide containers and Module-local Tasks), and derived
-document/work lookup or summary entries where they avoid repeated parsing.
-Do not add a database or a second business-state store.
-
-Allocate from the appropriate counter under the normal store write lock. Persist
-the reservation before publishing new work; a failed creation may leave a harmless
-numbering gap. Exclusive creation and existing-record checks prevent overwriting
-an already used ID. Ordinary creation does not scan all work to discover a number.
-
-Counters are allocator state, not disposable guessed totals. Cached lookup/results
-are derived data and must identify the source revision they cover. Managed writes
-refresh or invalidate affected entries. Missing/stale/corrupt derived entries are
-rebuilt only for the relevant scope; allocator recovery scans existing records when
-needed, including retained canceled/archived records, rather than on every create.
-Never trust stale cached counts or return cached approval against changed records.
-
-Keep technical state in the selected portable root. Copy/move and Git policies
-must preserve allocator identity or require explicit recovery; derived cache bytes
-do not need their own user-visible history. Choose the exact small contents and
-checkpoint treatment during implementation qualification. Reads never initialize
-a store or create business records; a cold read may compute in memory when a
-technical cache is absent. Do not block healthy work reads merely for cache loss.
-
-## 8. Writes, partial planning and Git
-
-Use a short cooperative store write lock: reload affected files, validate relevant
-references, compare the supplied observation, apply scoped changes and atomically
-replace each file. Reads remain independent. No automatic merge of conflicting
-prose and no protection claim against editors that ignore the lock.
-
-A multi-file plan is NOT a transaction:
-
-1. Create/update Epic intent when needed.
-2. Exclusively create Module files and allocate identities.
-3. Attach successfully created Module references.
-4. Checkpoint confirmed changes.
-
-Creation observations cover the relevant on-disk inventory, including children
-that exist before a parent link is saved. Once a child exists, an old observation
-cannot authorize another blind allocation. Similar content is not an identity key.
-
-Partial outcomes name every saved ID/path, unattached Module and unfinished step.
-After an uncertain reply, inspect context and continue using known IDs. Replaying
-the original batch with a refreshed observation is not promised safe. Do not delete
-saved work to simulate rollback or introduce a generic journal framework.
-
-Managed writes may automatically checkpoint clean owned paths. Pre-existing dirty
-content is preserved and reported as awaiting an explicit checkpoint. Preserve
-unrelated staged/dirty paths and refuse conflicting staging of a selected path.
-A failed commit does not undo a saved result; never replay the result to fix Git.
-
-Commit only named store paths. No push, merge, history rewrite or source inspection.
-Only committed versions have Git recovery. No automatic adoption of dirty text to
-justify destructive YAML normalization.
-
-Prefer stable readable YAML with unrelated fields/comments preserved. If the writer
-cannot preserve a construct, refuse that file's mutation rather than silently drop
-it. Writer/platform/Git edge behavior still needs qualification.
-
-## 9. Documentation and compaction
-
-Write only useful intent or rationale. No periodic narrative log, mandatory document
-bundle or automatic aging. An unreferenced document is not automatically obsolete.
-
-### Optional useful knowledge
-
-Project context starts in the manifest: purpose, boundaries, priorities and
-important constraints. Longer text can be referenced Markdown without another
-copy in YAML.
-
-| Kind | Useful content | When to create it |
-|---|---|---|
-| Decision (YAML) | Question, choice, rationale, alternatives, current/superseded state | A future agent might otherwise repeat a consequential discarded choice |
-| Runbook (YAML) | Prerequisites, inputs, ordered commands/descriptions, expected outcomes and recovery | An operation is nontrivial, environment-specific or expensive to rediscover |
-| Research (YAML + optional MD) | Objective, reusable findings, evidence and sources | The conclusions will help planning or later work, beyond a current short note |
-| Handoff | Stopping point, pending action and actual blocker/recipient | A meaningful interruption or dependency, in the Module YAML |
-| Work log (YAML) | Machine-stamped entries containing meaningful substance and work references | Tracked work has a useful event/result to retain; no extra manual reporting call |
-| Checklist (YAML) | Ordered items with description, completion state and generated attribution/dates | A procedure or substantial work needs checkable progress outside the existing Task view |
-
-Runbooks explain operations such as setting up a test environment, deploying to a
-specific environment or recovering a store. They are not competing descriptions
-of source implementation. Tool error/recovery hints and existing command help
-should cover ordinary tool usage without another manual.
-
-A standard kind has one strict shape. A short decision can still have only a few
-semantic values: strict schema does not mean filling irrelevant optional fields.
-Do not force a new file per event; Module-scoped work log entries may live in its
-existing YAML so a result/log update is one coherent file write. Project-level logs
-can use a dedicated typed YAML when needed. Decisions distinguish current and
-superseded guidance. Research/review can reference flexible Markdown for long detail.
-
-The knowledge-writing interface selects a known kind and accepts its semantic
-inputs. MCP creates the correct record, metadata and references; the agent does
-not submit a hand-written YAML template. Discovery/search/context render those
-records and generate navigation from their metadata and existing references.
-
-### Fixed schemas and generated technical fields
-
-Each supported standard kind has a versioned schema with fixed field meanings,
-types, required/applicable fields and cross-reference rules. Reject unsupported
-fields/kinds and malformed records rather than silently discard them. Preserve
-omitted known fields during partial edits; newer unsupported schema versions do
-not permit blind rewriting. Schema validation is part of the common write path.
-
-Business inputs come from the agent: a choice and rationale, ordered commands and
-their purpose, meaningful work-log substance, or checklist items. MCP owns IDs,
-numbering, creation/update/entry times, actor attribution when known, completion
-stamps and technical links. A recorded edit date never claims a successful check.
-
-Runbook commands are typed data with parameter definitions and intended working
-context. Reading a runbook is not executing it; any future execution capability
-needs its own explicit contract. Do not infer source truth from the procedure.
-
-For tracked work, append useful log entries from the same confirmed result/change
-operation. The agent does not repeat result text or type dates in another log call.
-Avoid per-command narration and logs for untracked microfixes. Git still preserves
-committed history; YAML logs provide structured work facts for context/status.
-
-TODO views over work use canonical Tasks. Independent checklists have one typed
-item schema; automated completion updates do not create a parallel Markdown list.
-Long rationale, discussion or research narrative remains optional Markdown linked
-from these structured records.
-
-Track broken references, superseded guidance still used by active work and material
-that needs review as signals. Last edit time alone does not establish applicability
-or a successful runbook verification. No silent auto-retirement or periodic log.
-
-Compaction applies only to existing documentation:
-
-1. Select a bounded scope, current text, observations and affected incoming links.
-2. Preserve recoverable originals before removing/replacing material. Without
-   committed originals, consolidation retains old material rather than deleting it.
-3. An existing agent runtime may propose candidate patches outside canonical files.
-   It names redundancy, proposed removals and where useful requirements/rationale stay.
-4. Review actual candidate bytes and link changes. Changed originals or candidates
-   require reassessment.
-5. Apply guarded additions first, reference updates second, retirements last through
-   native edits or individual saves.
-6. Checkpoint selected changed paths. Interrupted apply names applied/pending paths;
-   inspect and resume. Never silently roll back over newer edits.
-
-Automatic prepare/apply tools can follow demonstrated need. The first version can
-support this complete workflow using existing agent-run and file capabilities,
-without embedding another agent runner or transaction platform.
-
-## 10. First version and qualification
-
-Smallest useful product: the Module-owned file model, proportional applicability
-guidance, the eight proposed tools, independent Module review, lexical retrieval,
-scoped Git and a complete standardized English status for owner presentation.
-Two short shared workflow
-skills orient orchestrators and leads; tool mini-docs describe purpose, effects,
-required inputs, output and recovery with real examples.
-
-Before implementation is called useful, exercise:
-
-- zero tracking writes/documents for a tiny fix or an untracked-directory read;
-- a meaningful Module without a boilerplate documentation bundle;
-- one-call owner status and lead entry by configured project name/reference;
-- report-once completion and direct accepted-review closure;
-- rejection of review against changed relevant inputs and visibility of missing checks;
-- concurrent writes to separate Module files without lost updates;
-- partial plans and edited-child lost-reply recovery without duplicate allocation;
-- native and MCP document edits, Git failure and explicit checkpoint recovery;
-- compaction interruption without discarded originals or broken active links;
-- correct complete/PARTIAL coverage, with no invented runtime or microfix coverage.
-- semantic text responses for work/results/review, with no raw YAML dumping;
-- machine-maintained document metadata and exact scoped Markdown retrieval;
-- counter allocation without a whole-store scan, plus crash/stale-cache recovery.
-- one fixed schema per standard knowledge kind and rejection of malformed records;
-- structured runbook/log/checklist text views with MCP-generated technical fields;
-- one result call updating its useful work-log entry without repeated agent text.
-- English documentation/results and owner-language translation preserving all facts.
-
-Measure actual calls, bytes, latency and agent errors. Design examples are not
-performance evidence. YAML preservation, filesystem locking, Git/index behavior,
-portable store schema/delivery mapping and client compatibility remain unqualified.
-No implementation, release, installation or service change is part of this draft.
+This remains a high/medium-level design, not an implemented or qualified product. The repository executable is the standard starter. Runtime, filesystem, Git, schema preservation, response budgets and usefulness must be demonstrated on the scenarios above before readiness is claimed.
