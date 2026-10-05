@@ -86,6 +86,32 @@ This applicability guidance belongs in the shared workflow skills and relevant
 existing tool responses. Do not add a mandatory scope-assessment call, line-count
 thresholds, source scanning or another framework to make that decision.
 
+## Useful knowledge, without a mandatory document bundle
+
+Use a small optional menu, chosen by its value to the next agent:
+
+| Information | Home and reason to keep it |
+|---|---|
+| Project context | The start manifest: purpose, boundaries, priorities and important constraints, so cold entry is useful. Expand into Markdown only when necessary. |
+| Decisions | A short Markdown decision record: chosen direction, why, rejected alternatives and when the choice matters. Superseded decisions stay recoverable and are distinguished from current guidance. |
+| Runbooks | Markdown for a nontrivial repeatable operation: prerequisites, steps, expected outcome and recovery. Useful for deployment, environment setup or restoration; do not repeat implementation internals or obvious commands. |
+| Research | Markdown only for reusable conclusions, supporting evidence and sources. Short findings stay in current work or an existing document. |
+| Handoff and open questions | A current Module note/blocker: meaningful stopping point, remaining action and who can resolve it. Write at an interruption or real blocker, not after every command. |
+
+These are optional kinds for discovery, not files generated at initialization.
+One short decisions file may suffice; split documents only when retrieval needs
+it. No development log, duplicated TODO list or extra copy of Git history.
+
+MCP builds navigation from existing metadata and work references: return relevant
+document titles/purposes, current/superseded signals and exact reading routes.
+Do not require the agent to maintain a second hand-written documentation index.
+The initial context should include important constraints and small relevant
+sections, not the whole knowledge collection.
+
+Technical dates/attribution are machine-maintained. A recent edit is not proof
+that a decision is still applicable or a runbook was executed successfully;
+verification and supersession remain explicitly reported semantic facts.
+
 ## Authority boundaries
 
 | Source | Owns |

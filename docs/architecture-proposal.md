@@ -368,6 +368,38 @@ it. Writer/platform/Git edge behavior still needs qualification.
 Write only useful intent or rationale. No periodic log, mandatory decision bundle
 or automatic aging. An unreferenced document is not automatically obsolete.
 
+### Optional useful knowledge
+
+Project context starts in the manifest: purpose, boundaries, priorities and
+important constraints. Longer text can be referenced Markdown without another
+copy in YAML.
+
+| Kind | Useful content | When to create it |
+|---|---|---|
+| Decision | Chosen direction, rationale, rejected alternatives and applicability | A future agent might otherwise repeat a consequential discarded choice |
+| Runbook | Preconditions, repeatable steps, success observations and recovery | An operation is nontrivial, environment-specific or expensive to rediscover |
+| Research | Reusable conclusions, evidence and sources | The conclusions will help planning or later work, beyond a current short note |
+| Handoff | Stopping point, pending action and actual blocker/recipient | A meaningful interruption or dependency, in the Module YAML |
+
+Runbooks explain operations such as setting up a test environment, deploying to a
+specific environment or recovering a store. They are not competing descriptions
+of source implementation. Tool error/recovery hints and existing command help
+should cover ordinary tool usage without another manual.
+
+Documents can be short sections in an existing file; do not force one new file,
+ID or template per event. Decisions must distinguish current and superseded
+guidance. Rejected options preserve why, not a transcript of every agent discussion.
+Research and review can link to one existing useful document instead of copying it.
+
+The small `save_document` interface can accept an optional meaningful kind and
+work reference. The tool fills technical metadata itself. Discovery/search and
+context use that metadata and existing references to generate useful navigation;
+there is no separate manually maintained index or document registry.
+
+Track broken references, superseded guidance still used by active work and material
+that needs review as signals. Last edit time alone does not establish applicability
+or a successful runbook verification. No silent auto-retirement or periodic log.
+
 Compaction applies only to existing documentation:
 
 1. Select a bounded scope, current text, observations and affected incoming links.
