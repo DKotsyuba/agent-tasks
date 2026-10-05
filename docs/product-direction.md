@@ -115,8 +115,10 @@ These ideas guide the design but do not freeze every field, tool or workflow gat
   acceptance criteria and Module references. Long documents remain Markdown.
 - Modules may also exist directly under a Project. Atomics may belong to a
   Project, Epic or Module. Tasks belong to Modules.
-- Tasks have local checks; independent review covers a whole Module.
-  Integration checks verify the seams between completed Modules.
+- Tasks are optional useful subdivisions with local checks where relevant;
+  independent review covers a whole Module. Atomic-shaped checks need no separate
+  review ceremony by default. Integration checks belong to work whose actual
+  interactions warrant them.
 - The MCP handles identifiers and numbering, recording current dates and status
   transitions, Git operations and commits, and other repetitive bookkeeping.
 - The owner can request status and receive the tool's complete report directly,
