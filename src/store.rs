@@ -49,17 +49,24 @@ pub fn invalid(message: impl Into<String>) -> Error {
 /// Capture only the config location; discovery never reads configuration.
 #[derive(Clone)]
 pub struct Config {
-    /// Absolute operator-selected path, absent if no home/default can be selected.
+    /// Absolute operator-selected settings path; the registry lives beside it.
     path: Option<PathBuf>,
 }
-/// Closed configuration; only the operator creates it.
+/// Closed settings, separate from the machine-managed project registry.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Aliases {
-    /// Understood config revision.
+struct Settings {
+    /// Understood settings revision.
     schema_version: u32,
-    /// Independent named portable roots; no global current project.
-    aliases: BTreeMap<String, PathBuf>,
+}
+/// Named portable roots; names/descriptions remain authoritative in project manifests.
+#[derive(serde::Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Aliases {
+    /// Understood registry revision.
+    pub schema_version: u32,
+    /// Independent absolute roots, with no process-global current project.
+    pub aliases: BTreeMap<String, PathBuf>,
 }
 impl Config {
     /// Choose flag, then AGENT_TASKS_CONFIG, then HOME/.agent-tasks/config.toml without I/O.
@@ -73,9 +80,10 @@ impl Config {
                 }),
         }
     }
-    /// Reload the bounded config and resolve one alias once for the entire request.
-    pub fn resolve(&self, alias: &str) -> Result<Store> {
-        model::text(alias, 128).map_err(invalid)?;
+
+    /// Validate optional closed settings and select the sibling registry; never create files.
+    /// Missing settings use revision 1. Legacy inline aliases must be moved explicitly.
+    pub fn registry_path(&self) -> Result<PathBuf> {
         let path = self
             .path
             .as_ref()
@@ -86,33 +94,132 @@ impl Config {
                     "Select an absolute --config path or AGENT_TASKS_CONFIG.",
                 )
             })?;
-        let bytes = read_path(path, 64 * 1024)?.ok_or_else(|| Error::new("config", "Configuration is missing; explicitly create schema_version=1 and [aliases]. Discovery remains available."))?;
-        let config: Aliases = toml::from_str(
-            std::str::from_utf8(&bytes)
-                .map_err(|_| Error::new("config", "Config must be UTF-8."))?,
-        )
-        .map_err(|_| {
-            Error::new(
+        if matches!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("projects.toml" | "projects.lock")
+        ) {
+            return Err(Error::new(
                 "config",
-                "Invalid closed TOML configuration; expected schema_version and aliases only.",
+                "Settings and registry paths must be distinct.",
+            ));
+        }
+        if let Some(bytes) = read_path(path, 64 * 1024)? {
+            let settings: Settings = toml::from_str(std::str::from_utf8(&bytes)
+                .map_err(|_| Error::new("config", "Settings must be UTF-8."))?)
+                .map_err(|_| Error::new("config", "Invalid settings. Move [aliases] to sibling projects.toml; config.toml contains schema_version only."))?;
+            if settings.schema_version != 1 {
+                return Err(Error::new("config", "Unsupported settings schema_version."));
+            }
+        }
+        Ok(path.with_file_name("projects.toml"))
+    }
+
+    /// Read at most 64 KiB and 256 aliases with their exact observed bytes.
+    /// Missing registry is an empty list; malformed data refuses rather than hiding projects.
+    pub fn aliases(&self) -> Result<(Aliases, Option<Vec<u8>>)> {
+        let bytes = read_path(&self.registry_path()?, 64 * 1024)?;
+        let registry = match &bytes {
+            Some(bytes) => toml::from_str::<Aliases>(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| Error::new("config", "Registry must be UTF-8."))?,
+            )
+            .map_err(|_| {
+                Error::new(
+                    "config",
+                    "Invalid closed project registry; expected schema_version and [aliases].",
+                )
+            })?,
+            None => Aliases {
+                schema_version: 1,
+                aliases: BTreeMap::new(),
+            },
+        };
+        if registry.schema_version != 1 || registry.aliases.len() > 256 {
+            return Err(Error::new(
+                "config",
+                "Unsupported registry revision or more than 256 aliases.",
+            ));
+        }
+        for (alias, root) in &registry.aliases {
+            model::text(alias, 128).map_err(invalid)?;
+            if !root.is_absolute() {
+                return Err(Error::new("config", "Registry roots must be absolute."));
+            }
+        }
+        Ok((registry, bytes))
+    }
+
+    /// Explicitly prepare the settings directory and missing settings for registration.
+    /// Existing settings are never normalized or silently migrated; registry publication is separate.
+    pub fn prepare_registry(&self, effects: &mut Vec<String>) -> Result<Store> {
+        let path = self.registry_path()?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::new("config", "Registry has no parent."))?;
+        if !parent.exists() {
+            fs::create_dir_all(parent)
+                .map_err(|_| Error::new("io", "Cannot prepare settings directory."))?;
+            effects.push("Created settings directory.".into());
+        }
+        let store = Store::from_root(parent)?;
+        let settings = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|p| p.to_str())
+            .ok_or_else(|| Error::new("config", "Settings filename must be UTF-8."))?;
+        if store.bytes(settings)?.is_none() {
+            store.publish(settings, b"schema_version = 1\n", None, effects)?;
+        }
+        Ok(store)
+    }
+
+    /// Reload the registry and resolve one alias once for the entire business request.
+    pub fn resolve(&self, alias: &str) -> Result<Store> {
+        model::text(alias, 128).map_err(invalid)?;
+        let (registry, _) = self.aliases()?;
+        let root = registry.aliases.get(alias).ok_or_else(|| {
+            Error::new(
+                "alias",
+                "Unknown project alias. Use get_project_list or register_project.",
             )
         })?;
-        if config.schema_version != 1 {
-            return Err(Error::new("config", "Unsupported config schema_version."));
-        }
-        let root = config
-            .aliases
-            .get(alias)
-            .filter(|p| p.is_absolute())
-            .ok_or_else(|| {
-                Error::new(
-                    "alias",
-                    "Unknown alias or nonabsolute root; inspect the operator configuration.",
-                )
-            })?;
-        Ok(Store {
-            root: prospective(root)?,
-        })
+        Store::from_root(root)
+    }
+}
+
+/// Own one acquired advisory lock; explicit unlock releases it even while a forked child
+/// temporarily retains the file descriptor. Never constructed for a failed acquisition.
+pub struct LockGuard {
+    /// Acquired open-file description; callers cannot unlock another owner's handle.
+    file: File,
+}
+
+/// A cloned/inherited descriptor must not prolong the parent's completed lock lifetime.
+#[cfg(test)]
+#[test]
+#[allow(clippy::unwrap_used, reason = "Disposable lock regression")]
+fn lock_release_survives_a_duplicate_descriptor() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::from_root(dir.path()).unwrap();
+    let guard = store
+        .file_lock("lock", true, &mut Vec::new())
+        .unwrap()
+        .unwrap();
+    let inherited = guard.file.try_clone().unwrap();
+    drop(guard);
+    let next = store.file_lock("lock", true, &mut Vec::new());
+    assert!(
+        next.is_ok(),
+        "Closed parent must release despite an inherited descriptor"
+    );
+    drop(inherited);
+}
+
+impl Drop for LockGuard {
+    /// Release this owned lock before closing the descriptor; close remains the error fallback.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 
@@ -341,6 +448,19 @@ pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 }
 
 impl Store {
+    /// Resolve an absolute existing root or one missing final child without creating it.
+    pub fn from_root(root: &Path) -> Result<Self> {
+        if !root.is_absolute() {
+            return Err(Error::new(
+                "path",
+                "Documentation directory must be absolute.",
+            ));
+        }
+        Ok(Self {
+            root: prospective(root)?,
+        })
+    }
+
     /// Validate each owned path component, refusing links and non-directory ancestors.
     pub fn path(&self, relative: &str) -> Result<PathBuf> {
         if prospective(&self.root)? != self.root {
@@ -655,8 +775,19 @@ impl Store {
     }
 
     /// Acquire a fresh advisory handle. Reads never create a lock, writes return busy immediately.
-    pub fn lock(&self, write: bool, effects: &mut Vec<String>) -> Result<Option<File>> {
-        let path = self.path(".agent-tasks/write.lock")?;
+    pub fn lock(&self, write: bool, effects: &mut Vec<String>) -> Result<Option<LockGuard>> {
+        self.file_lock(".agent-tasks/write.lock", write, effects)
+    }
+
+    /// Lock one validated relative coordination file; readers never create it.
+    /// Writers create mode-0600 only in an existing parent; contention refuses immediately.
+    pub fn file_lock(
+        &self,
+        relative: &str,
+        write: bool,
+        effects: &mut Vec<String>,
+    ) -> Result<Option<LockGuard>> {
+        let path = self.path(relative)?;
         let file = if write {
             if !path.parent().is_some_and(Path::is_dir) {
                 return Err(Error::new(
@@ -676,7 +807,7 @@ impl Store {
                 .open(path)
                 .map_err(|_| Error::new("io", "Cannot open writer lock."))?;
             if !exists {
-                effects.push("Created .agent-tasks/write.lock.".into());
+                effects.push(format!("Created {relative}."));
             }
             f
         } else {
@@ -696,7 +827,7 @@ impl Store {
                 "Another cooperating call owns the store lock; retry later.",
             )
         })?;
-        Ok(Some(file))
+        Ok(Some(LockGuard { file }))
     }
 
     /// Preserve exact noncanonical bytes before a guarded canonical replacement.
@@ -763,7 +894,7 @@ impl Store {
     /// Publish fully synced bytes. New records use no-clobber hard links; replacements
     /// recheck exact observed bytes before rename. Post-publication sync failure is
     /// reported with a visible-effect ledger, never retried or claimed as no effect.
-    fn publish(
+    pub(crate) fn publish(
         &self,
         relative: &str,
         bytes: &[u8],

@@ -2,11 +2,19 @@
 
 Rust stdio MCP for portable strategic work. Agents plan Modules/Tasks, report outcomes and independently review a whole Module. The owner gets one compact English status. YAML is structured internal storage; strict MiniJinja renders semantic text. Code/docstrings and Git retain their authority.
 
-This is the minimal local core. The full future roadmap stays in docs/architecture-proposal.md. Tiny fixes may need no records. Epics/Atomics, Markdown/knowledge writers, automatic Git, agents, compaction and indexes remain deferred.
+This is the minimal local core. The full future roadmap stays in docs/architecture-proposal.md. Tiny fixes may need no records. Epics/Atomics, Markdown/knowledge writers, ongoing automatic Git, agents, compaction and indexes remain deferred.
 
 ## Configure and start
 
-The operator creates an absolute config. Root parents must already exist:
+Settings and the project registry are separate. Select an absolute config path; the default is HOME/.agent-tasks/config.toml. Registration creates missing settings. Root parents must already exist.
+
+config.toml contains settings only:
+
+```toml
+schema_version = 1
+```
+
+Sibling projects.toml is the machine-managed alias registry:
 
 ```toml
 schema_version = 1
@@ -27,6 +35,8 @@ Precedence: --config, AGENT_TASKS_CONFIG, then $HOME/.agent-tasks/config.toml. T
 | Tool | Purpose |
 |---|---|
 | get_status | Product identity and declared qualification |
+| register_project | Create documentation, initialize Git and register its alias |
+| get_project_list | Discover aliases and manifest-derived names/descriptions without paths |
 | get_context | Intent/evidence/conditions, versions and bounded detail views |
 | project_status | One owner-ready progress/leads/blockers/review overview |
 | search | Bounded lexical work search with references/excerpts |
@@ -39,9 +49,9 @@ Live descriptions are mini documentation. Shapes are closed. Edit omission prese
 ## Workflow
 
 ```text
-get_context(project="product")
-plan_work(project="product", op="init_project", version="<allocation_version>",
-          title="Product", purpose="Strategic purpose")
+get_project_list()
+register_project(project="product", doc_dir="/absolute/project/documentation",
+                 name="Product", description="Strategic purpose")
 get_context(project="product")
 plan_work(project="product", op="create_module", version="<allocation_version>",
           title="Portable storage", outcome="Guarded file updates",
@@ -60,6 +70,10 @@ project_status(project="product")
 ```
 
 Use actual returned versions: init/create_module use Allocation version; edit_project manifest Version; Module/Task writes whole Module Version. IDs/UTC dates/activity are generated. Reads never create roots. The orchestrator may translate status without changing coverage/unknown facts. Reported references/checks do not prove live agents or queried Git contents.
+
+register_project needs no prior version. It creates project.yaml, modules/, .agent-tasks/state.yaml, README.md and .gitignore, initializes a local Git repository and commits the four bootstrap files before publishing the alias. Identical completed registration is a no-op; conflicts never overwrite or retarget. The source repository remote is manifest metadata; optional docs_remote sets a separate documentation origin without contacting it. No push or ongoing auto-commit occurs. Partial failures retain files/staging and disclosed effects for inspection.
+
+get_project_list accepts {} and optional start/limit/version paging. Missing or unreadable roots remain unavailable entries. Descriptions are previews; get_context supplies full intent. For existing 0.7.0 settings, explicitly move [aliases] into sibling projects.toml while retaining schema_version = 1 in both files. Reads never perform that migration.
 
 ## Storage and recovery
 

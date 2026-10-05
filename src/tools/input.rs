@@ -41,6 +41,38 @@ impl<T> Patch<T> {
     }
 }
 
+/// Explicit one-call documentation registration; metadata is human-authored, dates are generated.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterArgs {
+    /// Unique project alias, at most 128 UTF-8 bytes; later calls need only this name.
+    pub project: String,
+    /// Absolute final documentation folder; its parent must already exist.
+    pub doc_dir: std::path::PathBuf,
+    /// Human project name, at most 256 UTF-8 bytes.
+    pub name: String,
+    /// Strategic description, at most 1024 UTF-8 bytes.
+    pub description: String,
+    /// Optional source-code repository URL stored as a reported manifest field, not a Git remote.
+    pub remote: Option<String>,
+    /// Optional separate documentation origin; added locally, never pushed.
+    pub docs_remote: Option<String>,
+}
+
+/// Discover projects with no required arguments; optional snapshot pagination bounds large registries.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectListArgs {
+    /// Zero-based project offset, default zero.
+    #[serde(default)]
+    pub start: usize,
+    /// Maximum displayed projects, 1-20, default 20.
+    #[serde(default = "page_limit")]
+    pub limit: usize,
+    /// Exact previous snapshot; required on continuation.
+    pub version: Option<String>,
+}
+
 /// Allowlisted context projection; YAML is never an agent-facing response.
 #[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

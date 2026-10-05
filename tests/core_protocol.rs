@@ -71,11 +71,13 @@ async fn call(
 async fn core_stdio_cycle_and_cold_restart() {
     tokio::time::timeout(Duration::from_secs(30),async {
         let temp=tempfile::tempdir().unwrap();let root=temp.path().join("portable-docs");let config=temp.path().join("config.toml");
-        std::fs::write(&config,format!("schema_version = 1\n[aliases]\nproduct = {}\n",serde_json::to_string(&root).unwrap())).unwrap();
+        std::fs::write(&config,"schema_version = 1\n").unwrap();
         let client=connect(&config,temp.path()).await;
-        assert_eq!(client.list_tools(Default::default()).await.unwrap().tools.len(),7);
-        let context=call(&client,"get_context",json!({"project":"product"}),false).await;assert!(!root.exists());
-        call(&client,"plan_work",json!({"project":"product","version":field(&context,"Allocation version: "),"op":"init_project","title":"Portable product","purpose":"Give agents work and the owner status"}),false).await;
+        assert_eq!(client.list_tools(Default::default()).await.unwrap().tools.len(),9);
+        let listing=call(&client,"get_project_list",json!({}),false).await;assert!(listing.contains("No projects registered") && !root.exists());
+        call(&client,"register_project",json!({"project":"product","doc_dir":root,"name":"Portable product","description":"Give agents work and the owner status"}),false).await;
+        assert!(root.join(".git").is_dir());
+        let listing=call(&client,"get_project_list",json!({}),false).await;assert!(listing.contains("Portable product") && !listing.contains(root.to_str().unwrap()));
         let context=call(&client,"get_context",json!({"project":"product"}),false).await;
         let created=call(&client,"plan_work",json!({"project":"product","version":field(&context,"Allocation version: "),"op":"create_module","title":"File-backed workflow","outcome":"Work survives process restarts","lead":{"name":"lead"},"tasks":[{"title":"Persist the report","required_checks":["restart"]}]}),false).await;
         assert!(created.starts_with("SAVED M-001"));let old=field(&created,"Version: ");

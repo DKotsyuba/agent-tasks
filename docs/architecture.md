@@ -22,7 +22,7 @@ Rust registry definitions are authoritative. Schemars derives structural schemas
 
 ## Configuration and state
 
-Precedence: absolute --config, AGENT_TASKS_CONFIG, then $HOME/.agent-tasks/config.toml. The discontinued Linear configuration is not read. Capture only the location at startup; reload aliases for each business call. Missing config never blocks identity/discovery/doctor/export. Only the operator writes config:
+Precedence: absolute --config, AGENT_TASKS_CONFIG, then $HOME/.agent-tasks/config.toml. Capture only the location at startup; reload sibling projects.toml for each business call. Missing config never blocks identity/discovery/doctor/export. Settings contain schema_version only. Inline aliases refuse with an explicit migration instruction; reads do not move them. The following registry lives in projects.toml:
 
 ```toml
 schema_version = 1
@@ -32,6 +32,14 @@ other = "/absolute/other/documentation"
 ```
 
 Every business call takes project=<alias>. Resolve one canonical root per request. No raw-root argument/shared current project exists. An absent root requires an existing parent and one final directory name. Same-root aliases coordinate; differently located clones remain independent and retargeting invalidates old versions.
+
+register_project is the explicit one-call entrypoint. It accepts an alias, absolute doc_dir, English name/description, optional reported source remote and separate docs_remote. It serializes registration with a sibling projects.lock, then locks the documentation root. Foreign files, conflicting aliases/metadata and Git worktree files refuse. Matching completed registration is unchanged even after human documents are added. Partial bootstrap effects are retained, and an identical inspected retry may finish them. The registry binding is published only after successful local Git bootstrap. No cross-directory transaction or automatic rollback is claimed.
+
+Bootstrap reuses normal allocator/manifest publication, adds README.md and .gitignore and initializes Git with branch main. It commits only the four bootstrap files, using the declared machine identity agent-tasks / agent-tasks@localhost. Existing HEAD/history is preserved; hooks and signing are not bypassed. Git calls have a 30-second bound, receive argv directly, suppress provider output and remove inherited directory/index overrides. No remote push/fetch occurs and ordinary work writes remain uncommitted.
+
+Hosts with a minimal stdio environment must pass SSH_AUTH_SOCK when the operator's Git signing policy uses an SSH agent. Missing signing capability leaves files/staging intact and does not publish the alias. Repair the host environment, inspect the repository, then repeat the same registration intent. Unit fixtures isolate machine Git configuration; shipping calls preserve it.
+
+get_project_list reads bounded registry/manifests and renders alias/name/description previews without paths. Unavailable roots remain named rows and make data coverage partial. Paging snapshots bind registry and manifest observations; stale continuation refuses. The registry is limited to 64 KiB / 256 aliases. Settings and the registry are distinct files; project names/descriptions are not duplicated in the registry.
 
 | Owned relative path | Data |
 |---|---|

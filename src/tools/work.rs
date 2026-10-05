@@ -56,6 +56,8 @@ struct Failure<'a> {
     effects: &'a [String],
     /// Distinguish setup-only effects from visibly published work.
     published: bool,
+    /// Tool-specific inspection route; registration may not have published an alias yet.
+    recovery: &'a str,
 }
 /// Mutation template input; the receipt remains separate from the effects ledger.
 #[derive(Serialize)]
@@ -70,16 +72,20 @@ struct Saved<'a> {
 pub fn templates() -> Vec<(&'static str, &'static str)> {
     vec![
         (
+            "project_registered",
+            "{% if changed %}REGISTERED{% else %}UNCHANGED{% endif %} {{ project }} — {{ name }}\nVersion: {{ version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}Next: get_context(project=\"{{ project }}\") for orientation, or project_status for progress.\n",
+        ),
+        (
             "core_page",
-            "{{ heading }}\nData coverage: {{ coverage }}; detail coverage: {{ detail_coverage }}\n{% if version %}Version: {{ version }}\nSnapshot version: {{ snapshot_version }}\n{% endif %}{% if allocation_version %}Allocation version: {{ allocation_version }}\n{% endif %}{% for line in lines %}{{ line }}\n{% endfor %}{% for row in rows %}{{ row }}\n{% endfor %}{% if next_start != none %}Next: start={{ next_start }}; version={{ snapshot_version }}; remaining={{ remaining }}. Keep the same project, ref/module, view/query and review_index.\n{% elif remaining %}{{ remaining }} detail rows omitted; narrow project_status with module=M-001.\n{% endif %}",
+            "{{ heading }}\nData coverage: {{ coverage }}; detail coverage: {{ detail_coverage }}\n{% if version %}Version: {{ version }}\nSnapshot version: {{ snapshot_version }}\n{% endif %}{% if allocation_version %}Allocation version: {{ allocation_version }}\n{% endif %}{% for line in lines %}{{ line }}\n{% endfor %}{% for row in rows %}{{ row }}\n{% endfor %}{% if next_start != none %}Next: start={{ next_start }}; version={{ snapshot_version }}; remaining={{ remaining }}. Keep the same tool and selection.\n{% elif remaining %}{{ remaining }} detail rows omitted; narrow project_status with module=M-001.\n{% endif %}",
         ),
         (
             "core_ack",
-            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }}\n{% if ack.target == \"Project\" %}Project state:{% else %}Module phase:{% endif %} {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}Next: get_context with project only for Project, or ref={{ ack.target }} for Module/Task. Use project_status for the complete tracked overview. Do not replay a lost reply blindly.\n",
+            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }}\n{% if ack.target == \"Project\" %}Project state:{% else %}Module phase:{% endif %} {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}Next: {% if ack.target == \"Project\" %}get_context with project only; omit ref.{% else %}get_context with ref={{ ack.target }}.{% endif %} Use project_status for the complete tracked overview. Do not replay a lost reply blindly.\n",
         ),
         (
             "core_error",
-            "ERROR {{ code }}: {{ message }}\n{% if published %}Visible publication occurred; inspect current context before another mutation. Outcome/durability may be partial.\n{% else %}No business publication confirmed by this call.\n{% endif %}{% for effect in effects %}{{ effect }}\n{% endfor %}Next: get_context to inspect current work/version; repair the reported condition before retrying.\n",
+            "ERROR {{ code }}: {{ message }}\n{% if published %}Visible publication occurred; outcome/durability may be partial.\n{% else %}No business publication confirmed by this call.\n{% endif %}{% for effect in effects %}{{ effect }}\n{% endfor %}Next: {{ recovery }}\n",
         ),
     ]
 }
@@ -93,6 +99,8 @@ pub fn call(
     templates: &Templates,
 ) -> Option<CallToolResult> {
     if ![
+        "register_project",
+        "get_project_list",
         "get_context",
         "project_status",
         "search",
@@ -107,6 +115,10 @@ pub fn call(
     let mut effects = Vec::new();
     let result = (|| -> Result<String> {
         match name {
+            "register_project" => {
+                super::projects::register(config, decode_args(args)?, templates, &mut effects)
+            }
+            "get_project_list" => super::projects::list(config, decode_args(args)?, templates),
             "get_context" => {
                 let args = decode_args(args)?;
                 super::read::context(config, args, templates)
@@ -142,8 +154,19 @@ pub fn call(
                 message: store::safe(&e.message, 600),
                 effects: &effects,
                 published: effects.iter().any(|e| e.starts_with("Published ")),
+                recovery: match name {
+                    "register_project" => {
+                        "Inspect the requested documentation root and get_project_list; the alias may be unpublished. Resolve the cause before repeating the same intent."
+                    }
+                    "get_project_list" => {
+                        "Inspect settings and projects.toml; reads do not repair or migrate them."
+                    }
+                    _ => {
+                        "Use get_context to inspect current work/version; repair the condition before retrying."
+                    }
+                },
             };
-            let text=templates.render("core_error",&failure).unwrap_or_else(|_| format!("ERROR {}. Presentation degraded.\n{}\nEffects: {}\nInspect get_context before retrying.\n",e.code,failure.message,if effects.is_empty(){"none confirmed".into()}else{effects.join("\n")}));
+            let text=templates.render("core_error",&failure).unwrap_or_else(|_| format!("ERROR {}. Presentation degraded.\n{}\nEffects: {}\nInspect current state before retrying.\n",e.code,failure.message,if effects.is_empty(){"none confirmed".into()}else{effects.join("\n")}));
             (text, true)
         }
     };
@@ -271,6 +294,60 @@ fn save_module(
     Ok(ack(target, version, value.phase(), true))
 }
 
+/// Initialize missing manifest/allocator records under the caller's root lock.
+/// Reject existing manifests, foreign modules and inconsistent partial allocators; retain every effect.
+pub(super) fn initialize(
+    store: &Store,
+    project: Project,
+    effects: &mut Vec<String>,
+) -> Result<Ack> {
+    if store.project()?.is_some() {
+        return Err(Error::new(
+            "already_initialized",
+            "Project already exists; use edit_project with its manifest version.",
+        ));
+    }
+    let inventory = store.inventory()?;
+    require_inventory(&inventory)?;
+    if !inventory.ids.is_empty() {
+        return Err(Error::new(
+            "partial_init",
+            "Modules without a manifest are not an empty initialization.",
+        ));
+    }
+    project.validate().map_err(arguments)?;
+    let old = store.bytes(".agent-tasks/state.yaml")?;
+    let allocator = Allocator {
+        schema_version: SCHEMA,
+        next_module: 1,
+    };
+    if let Some(bytes) = &old
+        && store::decode::<Allocator>(bytes)? != allocator
+    {
+        return Err(Error::new(
+            "partial_init",
+            "Existing allocator is inconsistent with empty initialization; restore a retained copy.",
+        ));
+    }
+    let expected_state = old.clone().unwrap_or(store::encode(&allocator)?);
+    if old.is_none() {
+        store.save(".agent-tasks/state.yaml", &allocator, None, false, effects)?;
+    }
+    let after_inventory = store.inventory()?;
+    require_inventory(&after_inventory)?;
+    if store.bytes("project.yaml")?.is_some()
+        || store.bytes(".agent-tasks/state.yaml")?.as_deref() != Some(expected_state.as_slice())
+        || !after_inventory.ids.is_empty()
+    {
+        return Err(Error::new(
+            "partial_init",
+            "Initialization changed after allocator publication; inspect context before resuming.",
+        ));
+    }
+    let version = store.save("project.yaml", &project, None, false, effects)?;
+    Ok(ack("Project", version, "initialized", true))
+}
+
 /// Execute the closed plan operation under one root lock; creations reserve numbers before publication.
 fn plan(
     config: &Config,
@@ -291,61 +368,19 @@ fn plan(
             remote,
         } => {
             expect_allocation(&store, &common.version)?;
-            if store.project()?.is_some() {
-                return Err(Error::new(
-                    "already_initialized",
-                    "Project already exists; use edit_project with its manifest version.",
-                ));
-            }
-            let inventory = store.inventory()?;
-            require_inventory(&inventory)?;
-            if !inventory.ids.is_empty() {
-                return Err(Error::new(
-                    "partial_init",
-                    "Modules without a manifest are not an empty initialization.",
-                ));
-            }
-            let old = store.bytes(".agent-tasks/state.yaml")?;
-            let allocator = Allocator {
-                schema_version: SCHEMA,
-                next_module: 1,
-            };
-            if let Some(bytes) = &old
-                && store::decode::<Allocator>(bytes)? != allocator
-            {
-                return Err(Error::new(
-                    "partial_init",
-                    "Existing allocator is inconsistent with empty initialization; restore a retained copy.",
-                ));
-            }
             let at = store::now();
-            let project = Project {
-                schema_version: SCHEMA,
-                title,
-                purpose,
-                remote,
-                created_at: at.clone(),
-                updated_at: at,
-            };
-            project.validate().map_err(arguments)?;
-            let expected_state = old.clone().unwrap_or(store::encode(&allocator)?);
-            if old.is_none() {
-                store.save(".agent-tasks/state.yaml", &allocator, None, false, effects)?;
-            }
-            let after_inventory = store.inventory()?;
-            require_inventory(&after_inventory)?;
-            if store.bytes("project.yaml")?.is_some()
-                || store.bytes(".agent-tasks/state.yaml")?.as_deref()
-                    != Some(expected_state.as_slice())
-                || !after_inventory.ids.is_empty()
-            {
-                return Err(Error::new(
-                    "partial_init",
-                    "Initialization changed after allocator publication; inspect context before resuming.",
-                ));
-            }
-            let version = store.save("project.yaml", &project, None, false, effects)?;
-            Ok(ack("Project", version, "initialized", true))
+            initialize(
+                &store,
+                Project {
+                    schema_version: SCHEMA,
+                    title,
+                    purpose,
+                    remote,
+                    created_at: at.clone(),
+                    updated_at: at,
+                },
+                effects,
+            )
         }
         Plan::EditProject {
             title,

@@ -1,5 +1,6 @@
 //! Authoritative Rust registry; discovery and schema export share the same definitions.
 mod input;
+mod projects;
 mod read;
 mod work;
 use crate::{response::Templates, store::Config};
@@ -17,6 +18,8 @@ pub fn definitions() -> Vec<Value> {
         // xtask:definitions
     ];
     result.extend([
+        definition("register_project", "Purpose: Create an independently versioned project documentation repository and make it addressable by alias in one call.\nInput: project is a unique alias (ASCII letters/digits/dash/underscore/dot); doc_dir is an absolute final directory whose parent exists; name and description are English project intent. Optional remote is the SOURCE repository metadata; docs_remote is a separate documentation Git origin. Empty remote strings mean absent. No read/version precondition is needed for first registration.\nEffects: explicit local directory/files, generated dates/allocator, Git init and one initial commit, then alias publication in projects.toml beside the selected config.toml. Creates README.md, project.yaml, modules/, .agent-tasks/state.yaml and .gitignore. No push, fetch or network call; later writes are not auto-committed.\nExisting alias/root/metadata conflicts refuse without overwrite or retargeting. Identical completed registration is UNCHANGED and never adds a commit. A failed bootstrap may leave local files or Git staging; inspect the disclosed effects and repository before retrying with the same intent.\nOutput: compact registration receipt with alias, title, version and observed effects; no directory path. Next use get_context(project=<alias>) to plan work. To change existing project metadata use plan_work edit_project.", schema::<input::RegisterArgs>(), false),
+        definition("get_project_list", "Purpose: Discover registered projects and choose the alias needed to work with their documentation.\nInput: {} returns the first page. Optional start=0, limit=1-20 (default 20) and version support continuation; reuse the returned snapshot with unchanged paging scope.\nOutput: aliases, manifest-derived English names/descriptions, data/detail coverage and continuation. Filesystem paths are omitted. Uninitialized, missing, unreadable or busy projects remain listed as unavailable; they are not silently dropped. Missing registry is a valid empty list, malformed registry is an error.\nEffects: read only. Reloads sibling projects.toml and project manifests; does not create, repair, query Git, start agents or write a status document. Follow a selected entry with get_context(project=<alias>); use register_project to add a new project.", schema::<input::ProjectListArgs>(), true),
         definition("get_context","Purpose: Read enough current context to choose the next action and obtain the correct write precondition.\nInput: project is a configured alias. Omit ref for Project; otherwise use M-001 or M-001/T-001. Do not pass ref=\"Project\".\nViews: summary is the default. Project supports summary only. Module supports summary, tasks, results, checks, review and log. Task supports summary, results, checks and log; review belongs to its Module.\nsummary returns orientation, phase/counts, lead, blockers/handoff and remaining acceptance conditions; it is not the full task list or result body. Use tasks for the Module's children, results for current reports/artifacts, checks for reported/required evidence, review for a retained verdict, and log for recent generated activity. A Module results view previews Task results; read the Task ref for its full result.\nOutput is compact English text with separate Data coverage and Detail coverage. Version is the editable manifest/whole-Module version. Allocation version is the Project creation precondition for init_project/create_module. Snapshot version is for READ continuation, never a write token.\nPages: start defaults 0; limit defaults 20 and must be 1-20. When Next supplies start/version, continue with Snapshot version and unchanged project/ref/view/review_index. review_index is zero-based; omission selects latest. A changed selection or snapshot refuses. Narrow scope/view after capacity limits.\nEffects: read only; never creates, repairs or finishes initialization. An absent configured root returns orientation and a creation precondition. Unknown aliases/missing config refuse safely.",
             schema::<input::ContextArgs>(),true),
         definition("project_status","Purpose: Produce the tracked-work overview that the orchestrator can present to the owner in one call.\nInput: project is a configured alias; optional module=M-001 narrows both displayed work and totals to that Module. Omit module for project-wide totals.\nOutput: compact English text with project purpose, readable Module/Task counts and phases, declared leads/handles, current result summaries, blockers, latest review information and last reported activity. This is not live agent monitoring or independent artifact verification.\nData coverage reports unreadable/unscanned work; PARTIAL counts are lower bounds, not zero. Detail coverage separately reports omitted text. Project-wide status shows at most four Task details per Module before response-budget limits; counts still include readable Tasks. Use module narrowing or get_context view=tasks/results/checks/review for detail.\nEffects: read only. No version is needed. Does not save a status document, change lifecycle, start agents or inspect Git. The project must have a valid manifest.",
@@ -41,7 +44,7 @@ fn schema<T: schemars::JsonSchema>() -> Value {
 /// Build one local closed-world catalog entry with its actual mutation/read hints.
 fn definition(name: &str, description: &str, input: Value, read: bool) -> Value {
     json!({"name":name,"description":description,"inputSchema":input,
-    "annotations":{"readOnlyHint":read,"destructiveHint":!read,"idempotentHint":read,"openWorldHint":false}})
+    "annotations":{"readOnlyHint":read,"destructiveHint":!read && name != "register_project","idempotentHint":read || name == "register_project","openWorldHint":false}})
 }
 
 /// Register trusted product layouts without configuration access.
@@ -65,6 +68,8 @@ mod core_tests;
 pub fn incomplete() -> Vec<&'static str> {
     let statuses: &[(&str, bool)] = &[
         ("get_status", true),
+        ("register_project", true),
+        ("get_project_list", true),
         ("get_context", true),
         ("project_status", true),
         ("search", true),

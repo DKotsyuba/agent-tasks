@@ -11,7 +11,7 @@ use crate::{
 use sha2::{Digest, Sha256};
 
 /// New typed page with explicit data and detail coverage; empty does not mean unreadable.
-fn page(heading: String, version: String) -> Page {
+pub(super) fn page(heading: String, version: String) -> Page {
     Page {
         heading,
         lines: Vec::new(),
@@ -27,7 +27,12 @@ fn page(heading: String, version: String) -> Page {
 }
 
 /// Require a bounded page and its exact prior snapshot for continuation.
-fn continuation(start: usize, limit: usize, expected: Option<&str>, snapshot: &str) -> Result<()> {
+pub(super) fn continuation(
+    start: usize,
+    limit: usize,
+    expected: Option<&str>,
+    snapshot: &str,
+) -> Result<()> {
     if limit == 0 || limit > 20 {
         return Err(Error::new(
             "invalid_arguments",
@@ -53,7 +58,7 @@ fn continuation(start: usize, limit: usize, expected: Option<&str>, snapshot: &s
 
 /// Fit the largest prefix under 8 KiB with exact offsets. Check the full page
 /// first because its final footer can be shorter; then grow only until the bound.
-fn render_page(
+pub(super) fn render_page(
     mut value: Page,
     start: usize,
     limit: usize,

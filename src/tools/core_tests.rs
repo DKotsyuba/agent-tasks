@@ -33,8 +33,9 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("docs");
         let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "schema_version = 1\n").unwrap();
         fs::write(
-            &config_path,
+            directory.path().join("projects.toml"),
             format!(
                 "schema_version = 1\n[aliases]\nalpha = {}\nsame = {}\n",
                 serde_json::to_string(&root).unwrap(),
@@ -137,11 +138,204 @@ fn field(text: &str, label: &str) -> String {
         .to_owned()
 }
 
+/// Registration persists a separate registry and a real Git commit; replay and conflicts preserve data.
+#[tokio::test]
+async fn core_project_registration_and_listing() {
+    let f = Fixture::new();
+    let root = f.directory.path().join("registered");
+    let args = json!({"project":"registered","doc_dir":root,"name":"Registered product",
+        "description":"A portable onboarding example","remote":"https://example.invalid/source",
+        "docs_remote":"https://example.invalid/documentation"});
+    let reply = f.call("register_project", args.clone(), false).await;
+    assert!(reply.starts_with("REGISTERED registered") && !reply.contains(root.to_str().unwrap()));
+    let manifest = f
+        .config
+        .resolve("registered")
+        .unwrap()
+        .project()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        manifest.value.remote.as_deref(),
+        Some("https://example.invalid/source")
+    );
+    assert_eq!(
+        fs::read_to_string(f.directory.path().join("config.toml")).unwrap(),
+        "schema_version = 1\n"
+    );
+    assert!(root.join(".git").is_dir());
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["status", "--porcelain"]).stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(git(&["rev-list", "--count", "HEAD"]).stdout)
+            .unwrap()
+            .trim(),
+        "1"
+    );
+    assert_eq!(
+        String::from_utf8(git(&["remote", "get-url", "origin"]).stdout)
+            .unwrap()
+            .trim(),
+        "https://example.invalid/documentation"
+    );
+    let version = manifest.version.clone();
+    fs::write(root.join("notes.md"), "# Human notes\n").unwrap();
+    let repeat = f.call("register_project", args.clone(), false).await;
+    assert!(repeat.starts_with("UNCHANGED registered"));
+    assert_eq!(
+        version,
+        f.config
+            .resolve("registered")
+            .unwrap()
+            .project()
+            .unwrap()
+            .unwrap()
+            .version
+    );
+    assert_eq!(
+        String::from_utf8(git(&["rev-list", "--count", "HEAD"]).stdout)
+            .unwrap()
+            .trim(),
+        "1"
+    );
+    let listing = f.call("get_project_list", json!({}), false).await;
+    assert!(listing.contains("Registered product") && listing.contains("onboarding"));
+    assert!(listing.contains("alpha") && listing.contains("unavailable"));
+    assert!(!listing.contains(root.to_str().unwrap()));
+    let mut conflict = args.clone();
+    conflict["doc_dir"] = json!(f.directory.path().join("other-root"));
+    f.call("register_project", conflict, true).await;
+    assert!(!f.directory.path().join("other-root").exists());
+    let mut conflict = args.clone();
+    conflict["docs_remote"] = json!("https://example.invalid/different-origin");
+    f.call("register_project", conflict, true).await;
+    let mut conflict = args;
+    conflict["description"] = json!("Do not overwrite the old purpose");
+    f.call("register_project", conflict, true).await;
+    assert_eq!(
+        version,
+        f.config
+            .resolve("registered")
+            .unwrap()
+            .project()
+            .unwrap()
+            .unwrap()
+            .version
+    );
+    f.call("get_project_list", json!({"unexpected":true}), true)
+        .await;
+    let page = f.call("get_project_list", json!({"limit":1}), false).await;
+    let token = field(&page, "Snapshot version: ");
+    let next = f
+        .call(
+            "get_project_list",
+            json!({"limit":1,"start":1,"version":token}),
+            false,
+        )
+        .await;
+    assert!(next.contains("Registered product"));
+    let store = f.config.resolve("registered").unwrap();
+    let snapshot = store.project().unwrap().unwrap();
+    let mut project = snapshot.value.clone();
+    project.purpose = "Changed description".into();
+    store
+        .save(
+            "project.yaml",
+            &project,
+            Some(&snapshot.bytes),
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+    f.call(
+        "get_project_list",
+        json!({"limit":1,"start":1,"version":field(&page,"Snapshot version: ")}),
+        true,
+    )
+    .await;
+}
+
+/// Foreign content and a failed publication remain intact; explicit retry can finish a partial bootstrap.
+#[tokio::test]
+async fn core_project_registration_refusals_and_partial_retry() {
+    let f = Fixture::new();
+    let root = f.directory.path().join("foreign");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("owner.txt"), "Preserve me").unwrap();
+    let args = json!({"project":"foreign","doc_dir":root,"name":"Example","description":"Must not overwrite"});
+    f.call("register_project", args, true).await;
+    assert_eq!(
+        fs::read_to_string(root.join("owner.txt")).unwrap(),
+        "Preserve me"
+    );
+    assert!(!root.join("project.yaml").exists());
+    f.call("register_project",json!({"project":"relative","doc_dir":"relative","name":"Example","description":"Invalid root"}),true).await;
+    let root = f.directory.path().join("partial");
+    let args = json!({"project":"partial","doc_dir":root,"name":"Partial example","description":"Resume an explicit bootstrap"});
+    store::fail_next_directory_sync();
+    let error = f.call("register_project", args.clone(), true).await;
+    assert!(error.contains("durability_unknown"));
+    assert!(f.config.resolve("partial").is_err());
+    f.call("register_project", args, false).await;
+    assert!(
+        f.config
+            .resolve("partial")
+            .unwrap()
+            .project()
+            .unwrap()
+            .is_some()
+    );
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.directory.path().join("projects.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let busy = f.call("register_project",json!({"project":"busy","doc_dir":f.directory.path().join("busy"),"name":"Busy","description":"Do not race the registry"}),true).await;
+    assert!(busy.contains("busy") && !f.directory.path().join("busy").exists());
+}
+
+/// A missing registry is empty without writes; inline aliases refuse with a migration instruction.
+#[tokio::test]
+async fn core_project_registry_cold_and_legacy_config() {
+    let f = Fixture::new();
+    fs::remove_file(f.directory.path().join("projects.toml")).unwrap();
+    let listing = f.call("get_project_list", json!({}), false).await;
+    assert!(listing.contains("No projects registered"));
+    assert!(!f.directory.path().join("projects.toml").exists());
+    f.call("register_project", json!({"project":"empty-remotes","doc_dir":f.directory.path().join("empty-remotes"),"name":"Empty remotes","description":"Local documentation needs no remote","remote":"","docs_remote":""}), false).await;
+    assert_eq!(
+        f.config
+            .resolve("empty-remotes")
+            .unwrap()
+            .project()
+            .unwrap()
+            .unwrap()
+            .value
+            .remote,
+        None
+    );
+    fs::write(
+        f.directory.path().join("config.toml"),
+        "schema_version = 1\n[aliases]\nlegacy = '/absolute/docs'\n",
+    )
+    .unwrap();
+    let refused = f.call("get_project_list", json!({}), true).await;
+    assert!(refused.contains("Move [aliases]"));
+}
+
 /// Configuration-independent discovery and alias/root binding remain usable after a cold start.
 #[tokio::test]
 async fn core_config_cold_aliases_and_read_only_absence() {
     let f = Fixture::new();
-    assert_eq!(super::definitions().len(), 7);
+    assert_eq!(super::definitions().len(), 9);
     f.call("get_status", json!({}), false).await;
     let absent = f
         .call("get_context", json!({"project":"alpha"}), false)
@@ -172,7 +366,7 @@ async fn core_config_cold_aliases_and_read_only_absence() {
     )
     .await
     .unwrap();
-    assert_eq!(bad.is_error, Some(true));
+    assert_eq!(bad.is_error, Some(false)); // Missing settings still use the sibling registry.
     f.init().await;
     let m = f.module(vec![], None).await;
     let old = f.version(&m).await;
@@ -188,7 +382,7 @@ async fn core_config_cold_aliases_and_read_only_absence() {
         fs::copy(f.root.join(relative), other.join(relative)).unwrap();
     }
     fs::write(
-        f.directory.path().join("config.toml"),
+        f.directory.path().join("projects.toml"),
         format!(
             "schema_version = 1\n[aliases]\nalpha = {}\n",
             serde_json::to_string(&other).unwrap()

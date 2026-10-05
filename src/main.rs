@@ -99,7 +99,7 @@ impl ServerHandler for Handler {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
-            .with_instructions("Use get_status for identity, get_context(project=<alias>) to resume or obtain write versions, and project_status for one complete tracked overview. Project aliases are operator-configured. All work content is English. Microfixes may require no tracked records. Tool descriptions define evidence, effects and recovery. Unknown outcomes must be inspected before another mutation.")
+            .with_instructions("Use get_status for identity, get_project_list to discover aliases, register_project to create documentation, get_context(project=<alias>) to resume or obtain write versions, and project_status for one complete tracked overview. The MCP manages aliases separately from settings. All work content is English. Microfixes may require no tracked records. Tool descriptions define evidence, effects and recovery. Unknown outcomes must be inspected before another mutation.")
     }
     /// Return the static catalog; modern requests cache it privately for 60 seconds.
     /// Pagination is unused; legacy sessions retain their original wire fields.
