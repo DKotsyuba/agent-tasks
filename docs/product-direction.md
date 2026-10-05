@@ -12,7 +12,8 @@ and API examples remain proposals for discussion, not accepted implementation.
 
 Give agents a small, useful project context, maintain a readable task tree and
 project knowledge, and produce an owner-ready status report in one tool call.
-The product stores its authoritative data in portable, human-editable files.
+The product stores work in portable text files. The MCP forms and maintains
+structured YAML; agents use semantic tools and readable replies, not YAML dumps.
 It does not depend on Linear or on a globally fixed knowledge directory.
 
 ## Design priorities
@@ -35,6 +36,30 @@ inside it. An Epic holds its intent and references to Modules, rather than their
 full work trees. This reduces cross-lead write conflicts and makes module history
 separate in Git. Cross-file references and partial plan writes still need a small,
 honest design. The rest of the earlier model remains open to justified revision.
+
+## Semantic tools and machine-maintained data
+
+Keep a limited set of clear, flexible tools with one understandable purpose each.
+They are work/context operations, not grep wrappers over YAML. Structured data
+is machine-maintained storage; normal work, result, description and review reads
+return compact text projected through embedded MiniJinja. Preserve meaningful
+identifiers, actual outcomes, limits and recovery routes, not internal fields.
+
+Markdown can be retrieved faithfully, usually by searching first and then reading
+the useful section or document. Do not put every document body into an entry pack.
+The MCP writes technical document metadata itself; the agent supplies useful text,
+not timestamps, internal headers or bookkeeping.
+
+The start manifest remains `project.yaml`: title, description/purpose, optional
+project remote, schema and needed project settings/references. Remote is descriptive
+data, not permission to fetch or inspect a source repository.
+
+One technical file, `.agent-tasks/state.yaml`, holds MCP-owned allocator counters
+and useful derived lookup/cache data. Read the last allocated number there rather
+than scan all work on every creation. Maintain it during managed writes; cold
+recovery or detected external drift may rebuild relevant derived data. Keep this
+file inside the portable root and out of normal agent responses. Work records and
+documents own their meaning; cached summaries are not another source of truth.
 
 ## Proportional tracking and documentation
 

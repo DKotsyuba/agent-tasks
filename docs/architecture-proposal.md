@@ -108,7 +108,20 @@ search index or runtime platform without a demonstrated need.
 | `epics/E-001.yaml` | Shared intent, requirements, acceptance and Module references |
 | `modules/M-001.yaml` | ONE Module, its assignment, optional Tasks/Atomics, results and review |
 | `docs/*.md` | Optional strategy, plans and durable rationale |
-| `.agent-tasks/` | Disposable coordination and candidate-edit scratch only |
+| `.agent-tasks/state.yaml` | MCP-owned allocator high-water marks and derived lookup/cache data |
+| `.agent-tasks/` | Coordination and candidate-edit scratch alongside the technical state file |
+
+`project.yaml` is the starting manifest: readable project name, description/purpose,
+optional repository remote, store schema and needed settings/references. The MCP
+writes generated identity and dates. The remote is descriptive project data; it
+does not select the Git checkpoint target or trigger source access. Checkpoints
+remain scoped to the documentation store's enclosing repository.
+
+YAML is an internal machine-written format. Agents supply intent and meaningful
+field values through tools; they do not construct YAML, internal timestamps or
+allocator records. Human-readable files help maintenance, but YAML formatting is
+not an agent workflow. External edits remain possible and require explicit drift
+handling rather than silent field loss.
 
 An Epic's Module references are the parent authority. Do not also store a
 competing parent field in each Module. Unreferenced Modules are visible as
@@ -122,7 +135,8 @@ title uniqueness.
 
 Minimum useful data:
 
-- Project: title, purpose, schema. A long brief becomes Markdown instead of a copy.
+- Project: title, description/purpose, optional repository remote, schema and useful
+  settings/references. A long brief becomes Markdown instead of a copy.
 - Epic: outcome, applicable requirements/acceptance, Module references, optional
   checks and explicit closure/cancellation.
 - Module: outcome, acceptance, lead, optional Tasks, current results/checks, review,
@@ -170,6 +184,16 @@ an old approval non-current; unrelated later microfixes do not.
 
 Eight work/document tools, plus the starter's separate diagnostic `get_status`.
 Names and exact schemas remain proposals; tool count is not a design quota.
+
+Each tool has a clear work-related goal, typed inputs and a relevant compact text
+result. Discovery mini-docs explain why to call it, what it changes or reads, what
+to expect, and its recovery route. This is not a grep interface over storage.
+
+Decode YAML into typed work data, compute domain results, project a bounded view
+and render it through strict embedded MiniJinja. Task, description, result and
+review reads expose readable facts, not raw YAML or a second complete JSON copy.
+Expose only actionable IDs/observations, actual outcomes, important omissions and
+safe next actions; internal counters/cache keys do not enter ordinary replies.
 
 | Tool | One useful intent |
 |---|---|
@@ -265,6 +289,44 @@ may carry a small patch. A single `save_document` call edits/checkpoints a secti
 but carries its replacement text. Support both; neither always saves more tokens.
 Continuations refuse changed source content rather than silently skipping results.
 
+Document retrieval preserves requested Markdown content. Search by keywords first
+when the needed document is unknown; show titles, useful excerpts and exact routes,
+then read a section or whole document explicitly. Context packs inline only useful
+small sections and name omissions instead of loading the entire document tree.
+
+`save_document` maintains generated creation/update times, attribution and other
+technical metadata itself in a controlled document header. The caller supplies
+content and meaningful relationships, not a handcrafted metadata block. Normal
+document reads can show useful metadata as text and return the Markdown body
+faithfully without dumping the internal header. Native body edits remain supported;
+the next managed save preserves human text and refreshes machine-owned fields.
+
+### Technical state and fast paths
+
+One `.agent-tasks/state.yaml` per store contains a small technical schema, allocator
+high-water marks (project-wide containers and Module-local Tasks), and derived
+document/work lookup or summary entries where they avoid repeated parsing.
+Do not add a database or a second business-state store.
+
+Allocate from the appropriate counter under the normal store write lock. Persist
+the reservation before publishing new work; a failed creation may leave a harmless
+numbering gap. Exclusive creation and existing-record checks prevent overwriting
+an already used ID. Ordinary creation does not scan all work to discover a number.
+
+Counters are allocator state, not disposable guessed totals. Cached lookup/results
+are derived data and must identify the source revision they cover. Managed writes
+refresh or invalidate affected entries. Missing/stale/corrupt derived entries are
+rebuilt only for the relevant scope; allocator recovery scans existing records when
+needed, including retained canceled/archived records, rather than on every create.
+Never trust stale cached counts or return cached approval against changed records.
+
+Keep technical state in the selected portable root. Copy/move and Git policies
+must preserve allocator identity or require explicit recovery; derived cache bytes
+do not need their own user-visible history. Choose the exact small contents and
+checkpoint treatment during implementation qualification. Reads never initialize
+a store or create business records; a cold read may compute in memory when a
+technical cache is absent. Do not block healthy work reads merely for cache loss.
+
 ## 8. Writes, partial planning and Git
 
 Use a short cooperative store write lock: reload affected files, validate relevant
@@ -344,6 +406,9 @@ Before implementation is called useful, exercise:
 - native and MCP document edits, Git failure and explicit checkpoint recovery;
 - compaction interruption without discarded originals or broken active links;
 - correct complete/PARTIAL coverage, with no invented runtime or microfix coverage.
+- semantic text responses for work/results/review, with no raw YAML dumping;
+- machine-maintained document metadata and exact scoped Markdown retrieval;
+- counter allocation without a whole-store scan, plus crash/stale-cache recovery.
 
 Measure actual calls, bytes, latency and agent errors. Design examples are not
 performance evidence. YAML preservation, filesystem locking, Git/index behavior,
