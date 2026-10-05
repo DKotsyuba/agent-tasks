@@ -2,6 +2,10 @@
 
 Status: discussion draft. All names, fields, budgets and examples below are proposed. No task-store implementation, migration, release or installation is part of this document.
 
+This is the full roadmap. Implement the smaller
+[minimal core](minimal-core-implementation-plan.md) first; later record kinds and
+automation are additions based on observed agent usefulness, not prerequisites.
+
 ## A. Purpose, authority and boundaries
 
 Keep one useful work/context system, with strict YAML for known structure and optional Markdown for extended reasoning. A microfix or tiny project may use no store and zero tracker calls. A substantial standalone Module is sufficient; an Epic groups genuinely shared outcomes. The current executable remains the Rust starter, not this contract.

@@ -8,6 +8,11 @@ The more detailed [architecture proposal](architecture-proposal.md) models
 agent entry, work, status, retrieval and documentation maintenance. Its defaults
 and API examples remain proposals for discussion, not accepted implementation.
 
+The [minimal-core implementation plan](minimal-core-implementation-plan.md) is
+the current technical implementation target. The broader design below remains
+the roadmap for incremental additions demonstrated useful by agent experience.
+Technical planning has not started source implementation.
+
 ## Product purpose
 
 Give agents a small, useful project context, maintain a readable task tree and
