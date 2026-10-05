@@ -33,7 +33,8 @@ scanner, automatic log or separate routing system is needed.
 | Source | Responsibility |
 |---|---|
 | Code and detailed docstrings | Current implemented technical truth |
-| Markdown and YAML work store | Intent, strategy, requirements, work and reported results |
+| Structured YAML records | Intent, work, decisions, procedures, logs and checklists with known schemas |
+| Referenced Markdown | Flexible narrative and extended explanation when a record's fields are insufficient |
 | Git | Committed history of code and work, in their respective repositories |
 
 This MCP does not inspect, parse, index, synchronize or verify source. Commit,
@@ -107,6 +108,7 @@ search index or runtime platform without a demonstrated need.
 | `project.yaml` | Identity, short purpose, store schema and optional project-level checks |
 | `epics/E-001.yaml` | Shared intent, requirements, acceptance and Module references |
 | `modules/M-001.yaml` | ONE Module, its assignment, optional Tasks/Atomics, results and review |
+| `knowledge/*.yaml` | Typed runbooks, decisions, checklists and reusable research summaries |
 | `docs/*.md` | Optional strategy, plans and durable rationale |
 | `.agent-tasks/state.yaml` | MCP-owned allocator high-water marks and derived lookup/cache data |
 | `.agent-tasks/` | Coordination and candidate-edit scratch alongside the technical state file |
@@ -145,11 +147,14 @@ Minimum useful data:
   and one attributed result. Inherit relevant Module criteria instead of copying.
 - Report: meaningful result, reported checks or explicitly absent checks, author,
   observation date and optional artifact references.
-- Document: ordinary relative path and optional section reference. No mandatory
-  registry, generated document identity or taxonomy.
+- Standard knowledge record: a known kind, schema version, generated identity and
+  dates, its typed semantic fields, and optional relative Markdown detail references.
+- Markdown: relative path and optional section reference for flexible extended text.
 
-Counts, summaries, report drafts and activity are derived. Do not persist another
-TODO list, copied owner report or independent development event stream.
+Counts, summaries and report drafts are derived. A semantic work log consists of
+structured YAML entries appended by MCP for meaningful work; it is product data,
+not a hidden operation journal. Reuse recorded substance and references rather
+than require another user-authored report or duplicated Task TODO list.
 
 ## 5. Minimum work cycle
 
@@ -203,7 +208,7 @@ safe next actions; internal counters/cache keys do not enter ordinary replies.
 | `plan_work` | Create or revise intent, assignments and membership |
 | `record_work` | Results, checks, optional focus/handoff, blockers, cancellation and reopening |
 | `review_module` | Independent verdict and Module closure/return |
-| `save_document` | Guarded edit of one known Markdown path or unique section |
+| `save_document` | Save a typed standard knowledge record, or optional Markdown detail text |
 | `checkpoint` | Commit explicitly selected store paths |
 
 Every work/document call selects its alias through the common `project` argument,
@@ -301,6 +306,12 @@ document reads can show useful metadata as text and return the Markdown body
 faithfully without dumping the internal header. Native body edits remain supported;
 the next managed save preserves human text and refreshes machine-owned fields.
 
+Standard record reads differ from Markdown reads: decode their strict YAML schema
+and render useful facts, ordered procedure steps, log entries or checklist progress.
+The agent never receives a raw runbook/log/TODO YAML dump. The knowledge writer
+accepts semantic fields for a supported kind and constructs the YAML itself;
+Markdown content remains a separate flexible body or detail reference.
+
 ### Technical state and fast paths
 
 One `.agent-tasks/state.yaml` per store contains a small technical schema, allocator
@@ -365,8 +376,8 @@ it. Writer/platform/Git edge behavior still needs qualification.
 
 ## 9. Documentation and compaction
 
-Write only useful intent or rationale. No periodic log, mandatory decision bundle
-or automatic aging. An unreferenced document is not automatically obsolete.
+Write only useful intent or rationale. No periodic narrative log, mandatory document
+bundle or automatic aging. An unreferenced document is not automatically obsolete.
 
 ### Optional useful knowledge
 
@@ -376,25 +387,56 @@ copy in YAML.
 
 | Kind | Useful content | When to create it |
 |---|---|---|
-| Decision | Chosen direction, rationale, rejected alternatives and applicability | A future agent might otherwise repeat a consequential discarded choice |
-| Runbook | Preconditions, repeatable steps, success observations and recovery | An operation is nontrivial, environment-specific or expensive to rediscover |
-| Research | Reusable conclusions, evidence and sources | The conclusions will help planning or later work, beyond a current short note |
+| Decision (YAML) | Question, choice, rationale, alternatives, current/superseded state | A future agent might otherwise repeat a consequential discarded choice |
+| Runbook (YAML) | Prerequisites, inputs, ordered commands/descriptions, expected outcomes and recovery | An operation is nontrivial, environment-specific or expensive to rediscover |
+| Research (YAML + optional MD) | Objective, reusable findings, evidence and sources | The conclusions will help planning or later work, beyond a current short note |
 | Handoff | Stopping point, pending action and actual blocker/recipient | A meaningful interruption or dependency, in the Module YAML |
+| Work log (YAML) | Machine-stamped entries containing meaningful substance and work references | Tracked work has a useful event/result to retain; no extra manual reporting call |
+| Checklist (YAML) | Ordered items with description, completion state and generated attribution/dates | A procedure or substantial work needs checkable progress outside the existing Task view |
 
 Runbooks explain operations such as setting up a test environment, deploying to a
 specific environment or recovering a store. They are not competing descriptions
 of source implementation. Tool error/recovery hints and existing command help
 should cover ordinary tool usage without another manual.
 
-Documents can be short sections in an existing file; do not force one new file,
-ID or template per event. Decisions must distinguish current and superseded
-guidance. Rejected options preserve why, not a transcript of every agent discussion.
-Research and review can link to one existing useful document instead of copying it.
+A standard kind has one strict shape. A short decision can still have only a few
+semantic values: strict schema does not mean filling irrelevant optional fields.
+Do not force a new file per event; Module-scoped work log entries may live in its
+existing YAML so a result/log update is one coherent file write. Project-level logs
+can use a dedicated typed YAML when needed. Decisions distinguish current and
+superseded guidance. Research/review can reference flexible Markdown for long detail.
 
-The small `save_document` interface can accept an optional meaningful kind and
-work reference. The tool fills technical metadata itself. Discovery/search and
-context use that metadata and existing references to generate useful navigation;
-there is no separate manually maintained index or document registry.
+The knowledge-writing interface selects a known kind and accepts its semantic
+inputs. MCP creates the correct record, metadata and references; the agent does
+not submit a hand-written YAML template. Discovery/search/context render those
+records and generate navigation from their metadata and existing references.
+
+### Fixed schemas and generated technical fields
+
+Each supported standard kind has a versioned schema with fixed field meanings,
+types, required/applicable fields and cross-reference rules. Reject unsupported
+fields/kinds and malformed records rather than silently discard them. Preserve
+omitted known fields during partial edits; newer unsupported schema versions do
+not permit blind rewriting. Schema validation is part of the common write path.
+
+Business inputs come from the agent: a choice and rationale, ordered commands and
+their purpose, meaningful work-log substance, or checklist items. MCP owns IDs,
+numbering, creation/update/entry times, actor attribution when known, completion
+stamps and technical links. A recorded edit date never claims a successful check.
+
+Runbook commands are typed data with parameter definitions and intended working
+context. Reading a runbook is not executing it; any future execution capability
+needs its own explicit contract. Do not infer source truth from the procedure.
+
+For tracked work, append useful log entries from the same confirmed result/change
+operation. The agent does not repeat result text or type dates in another log call.
+Avoid per-command narration and logs for untracked microfixes. Git still preserves
+committed history; YAML logs provide structured work facts for context/status.
+
+TODO views over work use canonical Tasks. Independent checklists have one typed
+item schema; automated completion updates do not create a parallel Markdown list.
+Long rationale, discussion or research narrative remains optional Markdown linked
+from these structured records.
 
 Track broken references, superseded guidance still used by active work and material
 that needs review as signals. Last edit time alone does not establish applicability
@@ -441,6 +483,9 @@ Before implementation is called useful, exercise:
 - semantic text responses for work/results/review, with no raw YAML dumping;
 - machine-maintained document metadata and exact scoped Markdown retrieval;
 - counter allocation without a whole-store scan, plus crash/stale-cache recovery.
+- one fixed schema per standard knowledge kind and rejection of malformed records;
+- structured runbook/log/checklist text views with MCP-generated technical fields;
+- one result call updating its useful work-log entry without repeated agent text.
 
 Measure actual calls, bytes, latency and agent errors. Design examples are not
 performance evidence. YAML preservation, filesystem locking, Git/index behavior,

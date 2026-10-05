@@ -50,6 +50,13 @@ the useful section or document. Do not put every document body into an entry pac
 The MCP writes technical document metadata itself; the agent supplies useful text,
 not timestamps, internal headers or bookkeeping.
 
+YAML is the foundation for everything with a useful known structure. Markdown
+supplies flexible explanatory text, not arbitrary versions of standard document
+types. Runbooks, decisions, semantic work logs, checklists and structured research
+summaries each have ONE strict versioned schema. The MCP forms those records from
+semantic inputs, validates fields/types/references and fills generated data.
+No agent-authored YAML or custom free-form schema is required.
+
 The start manifest remains `project.yaml`: title, description/purpose, optional
 project remote, schema and needed project settings/references. Remote is descriptive
 data, not permission to fetch or inspect a source repository.
@@ -93,20 +100,29 @@ Use a small optional menu, chosen by its value to the next agent:
 | Information | Home and reason to keep it |
 |---|---|
 | Project context | The start manifest: purpose, boundaries, priorities and important constraints, so cold entry is useful. Expand into Markdown only when necessary. |
-| Decisions | A short Markdown decision record: chosen direction, why, rejected alternatives and when the choice matters. Superseded decisions stay recoverable and are distinguished from current guidance. |
-| Runbooks | Markdown for a nontrivial repeatable operation: prerequisites, steps, expected outcome and recovery. Useful for deployment, environment setup or restoration; do not repeat implementation internals or obvious commands. |
-| Research | Markdown only for reusable conclusions, supporting evidence and sources. Short findings stay in current work or an existing document. |
+| Decisions | A structured YAML record: question, chosen direction, rationale, alternatives and current/superseded state. Longer explanation may reference Markdown. |
+| Runbooks | Strict YAML: purpose, prerequisites, inputs, ordered steps with commands and descriptions, expected outcomes and recovery. Reading it returns a useful text procedure. |
+| Research | Structured YAML conclusions/evidence/sources when reusable; optional Markdown holds extended analysis. Short findings can stay in current work. |
 | Handoff and open questions | A current Module note/blocker: meaningful stopping point, remaining action and who can resolve it. Write at an interruption or real blocker, not after every command. |
+| Work log | Structured YAML entries maintained/appended by MCP for meaningful tracked work. Agent supplies useful substance; IDs, dates, author/context and links are generated. |
+| TODO/checklist | Typed YAML items and completion data. Work TODO views reuse existing Tasks; independent procedural checklists use the same consistent item shape. |
 
-These are optional kinds for discovery, not files generated at initialization.
-One short decisions file may suffice; split documents only when retrieval needs
-it. No development log, duplicated TODO list or extra copy of Git history.
+These are optional kinds, not an empty bundle created at initialization. Their
+shape is strict WHEN used. Meaningful tracked events can be logged automatically
+from the same work call without another agent-authored report; microfixes do not
+require a log. TODO views must not duplicate the canonical Task list.
 
 MCP builds navigation from existing metadata and work references: return relevant
 document titles/purposes, current/superseded signals and exact reading routes.
 Do not require the agent to maintain a second hand-written documentation index.
 The initial context should include important constraints and small relevant
 sections, not the whole knowledge collection.
+
+Technical fields are always MCP-owned. The agent provides the decision, command
+intent, meaningful result or checklist item; it never types generated IDs,
+timestamps, bookkeeping or a storage-format template. Markdown is an optional
+detail body referenced by structured records. All standard YAML kinds read back
+as compact semantic text, never raw YAML.
 
 Technical dates/attribution are machine-maintained. A recent edit is not proof
 that a decision is still applicable or a runbook was executed successfully;
@@ -158,7 +174,8 @@ strategy or reinterpret the implemented behavior of code.
 These ideas guide the design but do not freeze every field, tool or workflow gate.
 
 - Rust and the standard family MCP template, including compact MiniJinja replies.
-- Markdown stores documents; YAML stores structured work and links to documents.
+- YAML stores standard structured work/knowledge records; Markdown holds flexible
+  extended text referenced from those records.
 - A project is the root of the work tree. The existing Epic, Module, Task and
   Atomic model and workflow remain the starting point.
 - One Module YAML contains its specification, acceptance criteria, Tasks,
