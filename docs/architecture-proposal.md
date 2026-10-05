@@ -1,8 +1,15 @@
 # Portable project strategy and task MCP — shared proposal v5
 
+> Comparative draft, superseded as the current file-layout proposal. The chosen
+> direction is now one YAML per Module; see [product direction](product-direction.md).
+> The earlier one-Epic-file model below is background material for revision, not
+> an accepted constraint. Earlier owner ideas and lifecycle rules are flexible
+> starting points. Optimize agent productivity and one-call owner status before
+> preserving an old gate, field or tool. No product behavior is implemented here.
+
 Status: discussion draft. No proposed behavior is implemented, qualified or measured. The current repository is the standard Rust MCP starter exposing only `get_status`. Tool, field and file names below are proposals.
 
-Legend: [R] firm owner requirement · [D] recommended default chosen here · [O] owner choice (real product/risk trade-off) · [U] unknown, needs a spike or a measurement.
+Legend for this comparative draft: [R] input assumptions of the original design exercise, now revisable · [D] proposed default · [O] possible product trade-off · [U] unknown, needs a spike or measurement.
 
 ## 1. Boundaries
 

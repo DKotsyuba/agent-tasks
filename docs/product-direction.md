@@ -15,6 +15,27 @@ project knowledge, and produce an owner-ready status report in one tool call.
 The product stores its authoritative data in portable, human-editable files.
 It does not depend on Linear or on a globally fixed knowledge directory.
 
+## Design priorities
+
+The product is designed primarily for agents: quick orientation, clear actions,
+less duplicated writing, fewer unnecessary tool calls and fewer workflow errors.
+The owner-facing requirement is a standardized status report produced by ONE
+tool call and relayed without manual file scans, runtime polling or rewriting.
+It must show progress by Task and Module, active work, reported results and
+blockers, with truthful coverage and assignment attribution.
+
+The initial ideas are starting points, not a frozen specification. Architects
+may simplify lifecycle gates, required fields, tools, storage and document rules
+when a concrete agent scenario benefits. Choose technical defaults rather than
+passing technical choices back to the owner. Preserve data and report truthfully;
+do not claim implemented behavior or measured savings during design.
+
+The current chosen granularity is ONE YAML PER MODULE. Its Tasks and Atomics stay
+inside it. An Epic holds its intent and references to Modules, rather than their
+full work trees. This reduces cross-lead write conflicts and makes module history
+separate in Git. Cross-file references and partial plan writes still need a small,
+honest design. The rest of the earlier model remains open to justified revision.
+
 ## Authority boundaries
 
 | Source | Owns |
@@ -56,15 +77,17 @@ YAML validation, Markdown references, numbering, timestamps, coordinated writes
 and scoped commits. That foundation automates bookkeeping; it does not determine
 strategy or reinterpret the implemented behavior of code.
 
-## Requested foundation
+## Current starting model
+
+These ideas guide the design but do not freeze every field, tool or workflow gate.
 
 - Rust and the standard family MCP template, including compact MiniJinja replies.
 - Markdown stores documents; YAML stores structured work and links to documents.
 - A project is the root of the work tree. The existing Epic, Module, Task and
   Atomic model and workflow remain the starting point.
-- One Epic YAML contains its structured specification, acceptance criteria,
-  Modules, Tasks, Atomics and their important work data. Long supporting documents
-  remain Markdown and are referenced from YAML.
+- One Module YAML contains its specification, acceptance criteria, Tasks,
+  Atomics, status and results. An Epic YAML contains its intent, requirements,
+  acceptance criteria and Module references. Long documents remain Markdown.
 - Modules may also exist directly under a Project. Atomics may belong to a
   Project, Epic or Module. Tasks belong to Modules.
 - Tasks have local checks; independent review covers a whole Module.
@@ -87,15 +110,15 @@ strategy or reinterpret the implemented behavior of code.
 | Structured integrity | Validate schema, unique identifiers, existing references, parent relationships and workflow conditions. Invalid manually edited data produces actionable diagnostics. |
 | Context | Return the project brief, assigned work, relevant current decisions, contracts and next action within a declared budget. Retrieve long documents explicitly. |
 | Status | Deterministically compute progress, leads, blockers and required actions from structured data. Expose freshness and incomplete coverage rather than inventing counts. |
-| Writes | Scoped edits preserve unrelated fields and documents. Concurrent edits to the same Epic file must not overwrite one another; use an observed revision and a scoped write lock. |
+| Writes | Leads edit separate Module files. Scoped edits preserve other fields and documents; coordinate shared Project/Epic writes and refuse stale overwrites of the same work. |
 | Git | Commit only explicitly owned paths; preserve unrelated staged and dirty work. No automatic push, merge, branch deletion or history rewrite. Separate code and documentation repositories remain possible. |
 | Documentation | Keep a short project brief, strategic rationale and intended changes. Implemented technical decisions live in code documentation independently; no synchronization or required source links. Git supplies committed history. |
 | Search | Start with text, structured filters and links. Return ranked excerpts and exact document routes. Add semantic retrieval only if measured misses justify it. |
 | Compaction | Produce a reviewed diff against a known document-store revision. Preserve current goals, requirements, target contracts and durable reasons behind choices. Propose removing redundant implementation prose without inferring technical truth from source code. Superseded decisions remain recoverable in history. |
 
-An Epic-sized YAML is intentionally the first model to evaluate. Parallel leads
-editing different Modules still share that file: write conflict behavior needs
-to be decided before implementation, rather than hidden by last-writer-wins.
+File layout and tool contracts should be tested against the agent's cold entry,
+lead assignment, completion, interruption and owner-status scenarios. Do not keep
+a constraint solely because it appeared in the discontinued Linear workflow.
 
 ## Questions for the next design discussion
 
