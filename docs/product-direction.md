@@ -4,6 +4,9 @@ This document records the proposed product direction. The repository currently
 contains the standard MCP starter only. None of the storage, workflow, search,
 Git automation or documentation maintenance described below is implemented.
 Names and file layouts in this document are proposals, not an exported API.
+The more detailed [architecture proposal](architecture-proposal.md) models
+agent entry, work, status, retrieval and documentation maintenance. Its defaults
+and API examples remain proposals for discussion, not accepted implementation.
 
 ## Product purpose
 
