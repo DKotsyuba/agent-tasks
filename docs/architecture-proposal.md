@@ -41,12 +41,45 @@ PR, checks and delivery references are reported facts, not independent proof.
 Agents use coding tools separately.
 
 Start with trusted agents and local filesystems. Several portable stores are
-supported by explicit roots. A team uses one chosen live coordination root;
+selected through configured aliases or explicit roots. A team uses one chosen live coordination root;
 clones and worktree copies remain independent snapshots. There is no global
 folder, inferred source-checkout binding or automatic synchronization.
 
 MCP-only clients can manage work and Markdown. Implementing code requires the
 agent's separate coding capabilities.
+
+### Store aliases in TOML
+
+The proposed user configuration is `~/.agent-tasks/config.toml`, selectable through
+the standard explicit config option. It stores machine-local routing only, not
+Project records or a second copy of business state.
+
+```toml
+schema_version = 1
+
+[aliases]
+alpha = "/work/project-alpha/docs"
+private = "/private/project-beta/notes"
+```
+
+Every work/document call accepts `store="alpha"` instead of a repeated directory
+path. For example, `project_status(store="private")` and
+`get_context(store="alpha", ref="M-001")`. An explicit absolute root remains useful
+for initial setup and an unregistered store.
+
+Resolve the selector once at request entry and bind that request to the actual
+root. There is no mutable server-wide current space. Unknown aliases return a
+focused error with configured choices; missing directories never cause fallback
+to another store or automatic initialization.
+
+Observations and write locks belong to the resolved root, not the alias string.
+Two aliases for the same directory share coordination; repointing an alias cannot
+reuse an old observation against another directory. Alias/config changes apply
+to subsequent requests, not the target of an in-flight operation.
+
+Aliases are installation-local conveniences. The portable store retains relative
+links and no machine-specific paths; moving it only requires updating its alias.
+No extra register/open tool is required merely to use a configured alias.
 
 ## 3. Coherent responsibilities
 
@@ -143,8 +176,9 @@ Names and exact schemas remain proposals; tool count is not a design quota.
 | `save_document` | Guarded edit of one known Markdown path or unique section |
 | `checkpoint` | Commit explicitly selected store paths |
 
-Every call can name its store root. A disposable default may save repetition, but
-correctness does not depend on one server process corresponding to one agent.
+Every work/document call names its store alias or explicit root. Short aliases
+save repetition without an implicit current space; correctness does not depend
+on one server process corresponding to one agent.
 
 Context and write replies return ONE opaque observation reference (`obs`).
 The caller copies it where needed; it never assembles hashes or revision maps.

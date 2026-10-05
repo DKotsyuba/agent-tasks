@@ -131,7 +131,8 @@ These ideas guide the design but do not freeze every field, tool or workflow gat
 
 | Concern | Proposed behavior |
 |---|---|
-| Opening a store | An explicit start/open call takes a documentation root, similar to opening a workspace. Each later call identifies that store. |
+| Opening a store | Calls select a short store alias from TOML configuration, or an explicit documentation root. No separate open/register call is required; no shared mutable current space. |
+| Store aliases | Machine-local config maps name to absolute folder. Aliases resolve per request; portable records keep relative links. Changing a mapping does not retarget an in-flight write or an old observation. |
 | Portability | Relative paths and stable identifiers inside the root; moving or cloning the directory preserves links. No machine-specific absolute paths in canonical records. |
 | Work-record source of truth | YAML and Markdown own strategy, work records and document links. Code owns implemented behavior. A search index is disposable and never owns authoritative records. |
 | Structured integrity | Validate schema, unique identifiers, existing references, parent relationships and workflow conditions. Invalid manually edited data produces actionable diagnostics. |
