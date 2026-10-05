@@ -94,6 +94,6 @@ async fn core_stdio_cycle_and_cold_restart() {
         assert_eq!(yaml["tasks"][0]["state"].as_str(),Some("done"));assert_eq!(yaml["reviews"][0]["verdict"].as_str(),Some("accepted"));
         let binary=std::env::var_os("MCP_TEST_BINARY").map(std::path::PathBuf::from).unwrap_or_else(||env!("CARGO_BIN_EXE_agent-tasks").into());
         let doctor=std::process::Command::new(binary).args(["--config","/absent/not-a-config","doctor","--json"]).env_clear().output().unwrap();
-        assert!(doctor.status.success());let doctor:Value=serde_json::from_slice(&doctor.stdout).unwrap();assert_eq!(doctor["local_ready"],true);assert_eq!(doctor["release_qualification"],"not_verified");
+        assert!(doctor.status.success());let doctor:Value=serde_json::from_slice(&doctor.stdout).unwrap();assert_eq!(doctor["local_ready"],true);let family:toml::Value=toml::from_str(include_str!("../family.toml")).unwrap(); assert_eq!(doctor["release_qualification"].as_str(),family["qualification"].as_str());
     }).await.expect("Bounded SDK/stdio cycle");
 }

@@ -1,6 +1,6 @@
 # Minimal core — technical implementation plan
 
-Status: minimal core implemented locally; release/host qualification remains not_verified. The [full structured roadmap](architecture-proposal.md) is preserved; [architecture.md](architecture.md) describes actual contracts. Project content is English; the orchestrator may translate complete status for the owner.
+Status: minimal core implemented; release preparation is qualified for macOS arm64 and MCP Inspector CLI 2.7.0 as recorded in RELEASE_ACCEPTANCE.md. The [full structured roadmap](architecture-proposal.md) is preserved; [architecture.md](architecture.md) describes actual contracts. Project content is English; the orchestrator may translate complete status for the owner.
 
 The implemented MVP is a file-backed work tracker inside the Rust binary: Project manifest, standalone Modules with Tasks, six business tools and diagnostic `get_status`. Broader roadmap behavior remains deferred.
 

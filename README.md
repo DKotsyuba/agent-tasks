@@ -87,7 +87,7 @@ Rust registry definitions are authoritative; schemas/tools.json is a reviewed ex
 
 The template baseline is pinned in .family/origin.json. Upgrades are read-only plans applied through reviewed Git changes. Runtime/build needs no private template access.
 
-Release stays disabled and qualification not_verified. Local SDK/filesystem checks are not certification of all hosts/platforms. Installation never restarts services, changes host configuration or migrates portable roots. Binary rollback does not undo stored work. Package only committed source:
+Release is enabled for macOS arm64 with MCP Inspector CLI 2.7.0 host acceptance recorded in docs/RELEASE_ACCEPTANCE.md. This qualification does not certify other hosts/platforms or power-loss durability. Installation never restarts services, changes host configuration or migrates portable roots. Binary rollback does not undo stored work. Package only committed source:
 
 ```bash
 cargo xtask package

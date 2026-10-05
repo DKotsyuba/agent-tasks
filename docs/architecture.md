@@ -1,6 +1,6 @@
 # Architecture
 
-Implemented local core: Rust 2024, pinned toolchain, in-process stdio MCP, portable file state and one binary. Release/host qualification remains not_verified; publication stays disabled.
+Implemented core: Rust 2024, pinned toolchain, in-process stdio MCP, portable file state and one binary. Release qualification covers macOS arm64 and MCP Inspector CLI 2.7.0 only; see RELEASE_ACCEPTANCE.md.
 
 ## Boundaries
 
@@ -94,6 +94,6 @@ Focused tests cover operation shapes against JSON Schema and serde, native file 
 
 The real SDK/stdio test plans work, completes a Task, independently accepts a Module, reads status/search, restarts the binary and checks persisted closure. Existing protocol tests preserve discovery equality, modern private cache hints, legacy omission, invalid/unknown calls and EOF.
 
-Full gate: cargo xtask check. Supply-chain gate: cargo deny check after explicit fetch. Current macOS temporary-filesystem/SDK tests are not power-loss certification or qualification of other platforms/filesystems/hosts. Qualification stays not_verified.
+Full gate: cargo xtask check. Supply-chain gate: cargo deny check after explicit fetch. Native acceptance additionally uses the independent MCP Inspector CLI, including fresh-process work persistence. This is not power-loss certification or qualification of other platforms/filesystems/hosts.
 
 Standard installation manages immutable releases under declared product home/bin only. Portable roots are external user-selected data. Binary rollback does not undo their data/schema/effects. Migration/repair or service restart is never implicit.
