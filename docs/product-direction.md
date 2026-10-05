@@ -21,9 +21,16 @@ It does not depend on Linear or on a globally fixed knowledge directory.
 The product is designed primarily for agents: quick orientation, clear actions,
 less duplicated writing, fewer unnecessary tool calls and fewer workflow errors.
 The owner-facing requirement is a standardized status report produced by ONE
-tool call and relayed without manual file scans, runtime polling or rewriting.
+tool call, without manual file scans, runtime polling or reassembling the facts.
 It must show progress by Task and Module, active work, reported results and
 blockers, with truthful coverage and assignment attribution.
+
+All project documentation and semantic work content are maintained in ENGLISH:
+descriptions, requirements, results, reviews, decisions, research, runbooks,
+work-log substance, checklists and Markdown. The orchestrator may translate the
+complete status into Russian when presenting it to this owner. Preserve facts,
+IDs, numbers, dates, coverage and uncertainty; no stored bilingual duplicates or
+translation engine inside the MCP is needed.
 
 The initial ideas are starting points, not a frozen specification. Architects
 may simplify lifecycle gates, required fields, tools, storage and document rules
@@ -190,7 +197,7 @@ These ideas guide the design but do not freeze every field, tool or workflow gat
 - The MCP handles identifiers and numbering, recording current dates and status
   transitions, Git operations and commits, and other repetitive bookkeeping.
 - The owner can request status and receive the tool's complete report directly,
-  without the agent assembling counts or rewriting the response.
+  without the agent assembling counts; presentation-language translation is allowed.
 - Documentation and decisions must stay discoverable and useful. An explicit
   compaction operation can delegate a scoped Markdown cleanup through agent-run.
 - Search returns useful scoped matches in one call, with routes to exact content.

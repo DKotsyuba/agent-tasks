@@ -9,7 +9,10 @@ the one-Epic-file candidate; its historical form remains in Git.
 
 Design for the agent: quick orientation, clear actions, less repeated writing,
 fewer unnecessary calls and fewer mistakes. The owner's essential interaction is
-ONE status call whose standardized Russian report can be printed unchanged.
+ONE status call containing all report facts. Project documentation, semantic
+summaries and tool replies are in English. The orchestrator may translate that
+complete report into Russian at presentation time, without collecting facts again.
+No mandatory bilingual fields, translation tool or MCP translation engine.
 
 Tracking is optional, not the default consequence of a coding request:
 
@@ -265,21 +268,23 @@ the next session restores context through one read.
 
 Illustrative content, not an actual project result:
 
-> E-001 Переносимый запуск — модули 1/2 приняты; задачи 3/3 выполнены по отчётам.
+> E-001 Portable startup — Modules 1/2 accepted; Tasks 3/3 reported complete.
 >
-> M-001 Хранилище — принят после ревью; лид назначен; задачи 2/2.
-> Сделано: относительные ссылки сохраняются после переноса.
-> Проверки: сценарий переноса пройден по отчёту.
-> Доставка: PR указан; слияние не сообщено.
+> M-001 Store — accepted after review; lead assigned; Tasks 2/2.
+> Result: relative links survive a folder move.
+> Checks: move scenario passed, as reported.
+> Delivery: PR recorded; merge not reported.
 >
-> M-002 Отчёт — готов к ревью; задачи 1/1.
-> Сделано: сформирован единый отчёт о ходе работ.
-> Проверки: не сообщены.
+> M-002 Report — ready for review; Tasks 1/1.
+> Result: one report presents work progress.
+> Checks: not reported.
 >
-> Требует внимания: ревью M-002 и сведения о проверках.
-> Покрытие: учтённые работы выбранного эпика. Микрофиксы вне трекера сюда не входят.
+> Attention: review M-002 and supply check information.
+> Coverage: tracked work of this Epic. Untracked microfixes are outside the report.
 
-Use Russian owner labels, exact work references, known dates and assigned leads.
+Use English canonical text, exact work references, known dates and assigned leads.
+The orchestrator translates for the owner if appropriate, preserving reported
+meaning and limitations. It does not infer new facts or rewrite storage.
 Do not claim liveness, checked code, full project activity or zero work from missing
 records. Missing files or omitted required rows make coverage PARTIAL.
 
@@ -464,7 +469,8 @@ without embedding another agent runner or transaction platform.
 
 Smallest useful product: the Module-owned file model, proportional applicability
 guidance, the eight proposed tools, independent Module review, lexical retrieval,
-scoped Git and directly relayable Russian owner status. Two short shared workflow
+scoped Git and a complete standardized English status for owner presentation.
+Two short shared workflow
 skills orient orchestrators and leads; tool mini-docs describe purpose, effects,
 required inputs, output and recovery with real examples.
 
@@ -486,6 +492,7 @@ Before implementation is called useful, exercise:
 - one fixed schema per standard knowledge kind and rejection of malformed records;
 - structured runbook/log/checklist text views with MCP-generated technical fields;
 - one result call updating its useful work-log entry without repeated agent text.
+- English documentation/results and owner-language translation preserving all facts.
 
 Measure actual calls, bytes, latency and agent errors. Design examples are not
 performance evidence. YAML preservation, filesystem locking, Git/index behavior,
