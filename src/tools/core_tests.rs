@@ -811,6 +811,63 @@ fn core_contract_all_operation_shapes() {
     }
 }
 
+/// Project search routes and receipt scope labels remain usable and populated views never look empty.
+#[tokio::test]
+async fn core_presentation_action_routes_and_scope_labels() {
+    let f = Fixture::new();
+    f.init().await;
+    let id = f
+        .module(vec![json!({"title":"Deliver result"})], None)
+        .await;
+    let saved = f
+        .record(
+            &format!("{id}/T-001"),
+            json!({"op":"result","state":"done","summary":"Delivered"}),
+            false,
+        )
+        .await;
+    assert!(saved.contains("Module phase: ready"));
+    assert!(!saved.contains("T-001 — ready"));
+    let context = f
+        .call("get_context", json!({"project":"alpha","ref":id}), false)
+        .await;
+    assert!(!context.contains("No entries in this view"));
+    f.review(
+        &id,
+        json!({"verdict":"accepted","summary":"Independent result accepted","actor":"reviewer"}),
+        false,
+    )
+    .await;
+    let review = f
+        .call(
+            "get_context",
+            json!({"project":"alpha","ref":id,"view":"review"}),
+            false,
+        )
+        .await;
+    assert!(review.contains("This review has no findings or check updates"));
+    let found = f
+        .call(
+            "search",
+            json!({"project":"alpha","query":"strategic intent"}),
+            false,
+        )
+        .await;
+    assert!(found.contains("Project ") && found.contains("omit ref"));
+    let root = f
+        .call("get_context", json!({"project":"alpha"}), false)
+        .await;
+    assert!(root.contains("Portable work"));
+}
+
+/// Every registered tool advertises an object root so independent MCP clients retain write tools.
+#[test]
+fn core_contract_mcp_object_roots() {
+    for tool in super::definitions() {
+        assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
+    }
+}
+
 /// Decode only structural argument shapes; domain readiness is tested through real tools.
 fn input_shape<T: serde::de::DeserializeOwned>(value: Value) -> bool {
     serde_json::from_value::<T>(value).is_ok()

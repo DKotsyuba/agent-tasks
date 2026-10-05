@@ -66,7 +66,7 @@ struct Saved<'a> {
     effects: &'a [String],
 }
 
-/// Compile-time closed layouts for compact normal text, not DTO dumps.
+/// Closed text layouts preserve execution effects, scope labels and exact continuation tokens.
 pub fn templates() -> Vec<(&'static str, &'static str)> {
     vec![
         (
@@ -75,7 +75,7 @@ pub fn templates() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "core_ack",
-            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }} — {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}Next: get_context for this target; project_status for the complete tracked overview. Do not replay a lost reply blindly.\n",
+            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }}\n{% if ack.target == \"Project\" %}Project state:{% else %}Module phase:{% endif %} {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}Next: get_context with project only for Project, or ref={{ ack.target }} for Module/Task. Use project_status for the complete tracked overview. Do not replay a lost reply blindly.\n",
         ),
         (
             "core_error",

@@ -18,7 +18,7 @@ Tiny changes may use no tracker records. The implemented hierarchy is Project â†
 | src/tools/read.rs | Semantic context/search/status, coverage and actual pagination |
 | src/response.rs | Strict embedded MiniJinja and 8 KiB output cap |
 
-Rust registry definitions are authoritative. Schemars derives structural schemas from the same closed serde inputs; schemas/tools.json is a reviewed export. Readiness, UTF-8 byte bounds and versions are separate domain conditions. Storage DTOs never enter templates.
+Rust registry definitions are authoritative. Schemars derives structural schemas from the same closed serde inputs; every tool has the explicit root type object required by MCP, including operation unions. schemas/tools.json is a reviewed export. Readiness, UTF-8 byte bounds and versions are separate domain conditions. Storage DTOs never enter templates.
 
 ## Configuration and state
 
@@ -86,7 +86,7 @@ Versions bind canonical root, relative target and exact bytes. Project context s
 
 Healthy aggregate records remain readable with named omissions. Data/detail coverage are separate; PARTIAL counts are lower bounds and unknown work is not zero. project_status reports scoped progress/leads/summaries/blockers/review attention/last report; never live agent presence. The declared small fixture is three Modules/twelve Tasks/three leads/two blockers. Larger detail may need Module narrowing.
 
-Search is Unicode-lowercase all-term semantic-field substring matching, ranked by matching-field count then numeric ref. It is not Markdown/code/semantic search. Continuation hashes bind tool/ref/query/view/review selection and the exact data snapshot; changing a selection refuses instead of skipping new rows. Editable file Version is distinct. Choose the largest fitting prefix, advance by displayed rows; never post-truncate or skip.
+Search is Unicode-lowercase all-term semantic-field substring matching, ranked by matching-field count then numeric ref. It is not Markdown/code/semantic search. Project hits open with omitted ref; Module/Task hits use their returned ref. Receipts explicitly label the owning Module phase, distinct from Task completion. Empty detail rows use view-specific wording. Continuation hashes bind tool/ref/query/view/review selection and the exact data snapshot; changing a selection refuses instead of skipping new rows. Editable file Version is distinct. Choose the largest fitting prefix, advance by displayed rows; never post-truncate or skip.
 
 ## Verification and delivery
 

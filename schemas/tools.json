@@ -6,7 +6,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Report product identity and declared release qualification. Read-only and configuration-independent; it does not inspect project work. Use project_status for the actual tracked progress.",
+    "description": "Purpose: Check the MCP product identity and declared release qualification.\nUse this for connection/diagnostic orientation. For progress of tracked work, use project_status.\nInput: an empty object {}. Configuration is not required.\nOutput: one English text block naming the product, version and qualification. not_verified is a release/host qualification statement, not a claim that a work item failed.\nEffects: none. Does not inspect work, create storage, access Git or query agents.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {},
@@ -21,7 +21,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Read compact context for a configured project alias, Module (M-001), or embedded Task (M-001/T-001). Start here before planning or resuming work. Returns human-readable intent, current facts, conditions, exact file version and bounded details; project context also returns allocation_version. Select summary/tasks/results/checks/review/log; no task-specific review exists. Reads create/repair nothing. For continuation keep the same scope/view/review_index and use the returned start and snapshot version. Use manifest Version for edit_project, allocation_version for init_project/create_module, and Module Version for all child writes. Missing configuration is a safe refusal; YAML is internal storage.",
+    "description": "Purpose: Read enough current context to choose the next action and obtain the correct write precondition.\nInput: project is a configured alias. Omit ref for Project; otherwise use M-001 or M-001/T-001. Do not pass ref=\"Project\".\nViews: summary is the default. Project supports summary only. Module supports summary, tasks, results, checks, review and log. Task supports summary, results, checks and log; review belongs to its Module.\nsummary returns orientation, phase/counts, lead, blockers/handoff and remaining acceptance conditions; it is not the full task list or result body. Use tasks for the Module's children, results for current reports/artifacts, checks for reported/required evidence, review for a retained verdict, and log for recent generated activity. A Module results view previews Task results; read the Task ref for its full result.\nOutput is compact English text with separate Data coverage and Detail coverage. Version is the editable manifest/whole-Module version. Allocation version is the Project creation precondition for init_project/create_module. Snapshot version is for READ continuation, never a write token.\nPages: start defaults 0; limit defaults 20 and must be 1-20. When Next supplies start/version, continue with Snapshot version and unchanged project/ref/view/review_index. review_index is zero-based; omission selects latest. A changed selection or snapshot refuses. Narrow scope/view after capacity limits.\nEffects: read only; never creates, repairs or finishes initialization. An absent configured root returns orientation and a creation precondition. Unknown aliases/missing config refuse safely.",
     "inputSchema": {
       "$defs": {
         "View": {
@@ -125,7 +125,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Produce one English status suitable for the owner: project purpose, readable Module/Task progress, declared leads, current summaries, blockers, review attention and last reported activity. One call replaces manual status collection. Read-only; never polls live agents or Git. Unknown/unreadable work is explicit PARTIAL with lower-bound counts, not zero. Long detail is omitted explicitly; module=M-001 narrows the response. Only tracked work is counted; small fixes may have no tracker records.",
+    "description": "Purpose: Produce the tracked-work overview that the orchestrator can present to the owner in one call.\nInput: project is a configured alias; optional module=M-001 narrows both displayed work and totals to that Module. Omit module for project-wide totals.\nOutput: compact English text with project purpose, readable Module/Task counts and phases, declared leads/handles, current result summaries, blockers, latest review information and last reported activity. This is not live agent monitoring or independent artifact verification.\nData coverage reports unreadable/unscanned work; PARTIAL counts are lower bounds, not zero. Detail coverage separately reports omitted text. Project-wide status shows at most four Task details per Module before response-budget limits; counts still include readable Tasks. Use module narrowing or get_context view=tasks/results/checks/review for detail.\nEffects: read only. No version is needed. Does not save a status document, change lifecycle, start agents or inspect Git. The project must have a valid manifest.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -158,7 +158,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Find tracked work by 1–8 words (maximum 256 UTF-8 bytes). All terms must match semantic fields using Unicode lowercase substring matching; rank by matching-field count then numeric reference. Returns references, field labels and relevant excerpts rather than YAML. Read matches through get_context and select detail views. Optional module narrows the scan; later pages require the exact prior snapshot with unchanged project/query/module. Coverage limits/unreadable records remain explicit. This is lexical work search; Markdown/code/semantic search is outside the core.",
+    "description": "Purpose: Find relevant tracked work before opening its context.\nInput: project alias and query containing 1-8 whitespace-separated words, at most 256 UTF-8 bytes. Optional module=M-001 restricts the scope.\nMatching: Unicode lowercase substring search across semantic fields. Every term must match somewhere in that target; different terms may match different fields. It is not regex, fuzzy, semantic, source-code or Markdown-document search. Rank by matching-field count, then numeric reference.\nOutput: references, titles, matching-field labels, bounded excerpts, match count and explicit data/detail coverage. An excerpt is a preview, not the complete report or proof that the whole repository was searched.\nOpen Module/Task hits with get_context ref=<reference>. A Project hit is opened with get_context(project=...) and OMITTED ref; current rendering shows Project as its label, not a legal ref.\nPages: start defaults 0; limit defaults 20, range 1-20. Continue using Snapshot version and returned Next start, preserving project/query/module. Changed data/selection refuses rather than skipping.\nEffects: read only; no write token, repair, global scan or external query. Requires initialized project context.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -217,7 +217,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Create or partially edit strategic work. init_project explicitly initializes the final configured root; edit_project changes orientation; create_module allocates one standalone Module and optional initial Tasks; edit_module/add_task/edit_task change one whole Module file. Obtain get_context first. init_project/create_module require allocation_version, edit_project manifest Version, all Module/Task operations Module Version. IDs, UTC dates, counters and concise activity are generated. Edit omission preserves; null clears only optional remote/lead/criterion; [] clears a check list. Required fields cannot be cleared. No status cascades, agents, Git or external writes. Stale/busy/validation refuses; unknown or partial publication requires inspecting context before retry, never blind replay.",
+    "description": "Purpose: Create or partially edit the work plan, not report completion.\nInput: project alias, op and the correct current version; actor is optional declared attribution, not authentication. Do not supply generated IDs, dates or raw YAML.\nOperations:\n- init_project: explicitly create missing owned project storage; requires title/purpose, optional reported remote. Obtain Project Allocation version first. Root parent must already exist; reads do not create it.\n- edit_project: optional title/purpose/remote patch; use Project Version.\n- create_module: required title/outcome, optional lead={name,handle}, required_checks and initial semantic tasks; use Project Allocation version. Returns the generated M-001 reference. Maximum 32 Tasks per Module.\n- edit_module: module plus optional title/outcome/lead/required_checks; use that Module Version.\n- add_task: module/title, optional criterion/required_checks; use Module Version. MCP allocates the next Task ID.\n- edit_task: ref=M-001/T-001 and optional title/criterion/required_checks; use the owning Module Version.\nEdit omission preserves existing data; null clears only optional remote/lead/criterion; [] clears a list. Required fields cannot be cleared. Plan edits preserve unrelated results/history but semantic changes make old Module approval historical. Canceled work must be reopened explicitly.\nOutput: SAVED or UNCHANGED, generated target/current file Version, owning Module phase where applicable, and disclosed filesystem effects. After init_project, read Project context again for fresh Allocation version before create_module. Do not treat the returned manifest Version as an allocation token.\nEffects: explicit local storage writes with generated IDs/UTC dates/activity. No status setter/cascade, Git action, agent launch or document writer. On stale/busy/validation refusal follow the diagnostic. A partial/uncertain publication or lost reply requires inspecting current context/log/inventory before another mutation; never blindly replay.",
     "inputSchema": {
       "$defs": {
         "Lead": {
@@ -608,7 +608,8 @@
           "type": "object"
         }
       ],
-      "title": "Plan"
+      "title": "Plan",
+      "type": "object"
     },
     "name": "plan_work"
   },
@@ -619,7 +620,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Save current result, blocker, handoff or explicit cancel/reopen on one Module or owned Task using its current whole-Module Version. result replaces summary/checks/gaps/followups/artifacts; it is not a partial patch. Task state optionally open/done; completion needs a meaningful result, no separate task review. Module-only blocker/handoff records actionable context. Clear/reopen/cancel require reasons; absent clears are no-ops. Canceled work permits reopen only; a canceled parent blocks child writes. Module cancellation requires terminal children, never cascades. Semantic changes invalidate old module approval; handoff does not. Evidence/artifact strings are reported, not Git-verified. Reads after lost replies determine effects; mutation is not replay-idempotent.",
+    "description": "Purpose: Record current outcome, an actionable obstacle/resume point, or an explicit lifecycle decision.\nInput: project alias, op, ref and current owning Module Version; actor is optional declared attribution.\nOperations:\n- result: required summary; optional checks/gaps/followups/artifacts constitute a COMPLETE current report replacement. Omitted lists become empty and erase the prior current lists; include every current check/artifact you intend to retain. Task state may be open or done; omission PRESERVES its current state, so reporting a result alone does not complete an open Task. Module results must omit state; Module acceptance uses review_module.\n- blocker: Module only; problem/needed_action, optional resolver.\n- handoff: Module only; stopping_point/next_action. Handoff does not invalidate current approval.\n- clear_blocker/clear_handoff: Module only, required reason; absent data is a no-op.\n- cancel: required reason; Module children must already be terminal. Never cascades.\n- reopen: required reason; resumes the same target and makes old Module approval historical.\nCanceled targets accept reopen only; canceled parents block child writes. Done Tasks need a meaningful result. Failed/missing check reports can coexist with Task done; explicit required checks must pass before Module acceptance.\nOutput: SAVED or UNCHANGED, target, current owning Module phase and whole-Module Version, plus effects. For a Task receipt, ready/accepted/etc. is the MODULE phase, not a Task state; inspect Task context/status for its state. Current report and reviewer updates retain declared attribution.\nEffects: local writes, generated dates and activity. Artifact/commit/PR references are reported strings; no Git/GitHub verification, commit, PR operation or agent launch occurs. Semantic changes invalidate old approval. Inspect context after stale/partial/uncertain outcomes; do not replay blindly.",
     "inputSchema": {
       "$defs": {
         "CheckInput": {
@@ -1040,7 +1041,8 @@
           "type": "object"
         }
       ],
-      "title": "Work"
+      "title": "Work",
+      "type": "object"
     },
     "name": "record_work"
   },
@@ -1051,7 +1053,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Record an independent whole-Module review against its current Version. accepted requires no open Tasks/blocker/in-scope gaps, every explicit required check passed, and meaningful delivery evidence; canceled children are excluded. changes_requested is a successfully saved negative verdict, not a tool error. Optional check updates replace canonical target checks while preserving before/after attribution; lead summary author/date stays unchanged. Known lead cannot self-review; unknown identity stays unknown. Reviews are retained and bound to current semantic basis/epoch; later semantic edits or reopen make approval historical. Accepted directly yields accepted phase: no hidden PR/merge gate or external verification. Read view=review for report/history, and project_status for closure attention.",
+    "description": "Purpose: Save an independent verdict on the WHOLE Module, not review or close a Task separately.\nInput: project alias, module=M-001, current Module Version, verdict=accepted|changes_requested and summary; optional findings={text,must_fix}, checks={target,label,status,detail} and actor. Supply reviewer attribution when known. A known lead matching actor by name/handle cannot self-review; unknown identities remain unknown rather than authenticated.\naccepted requires an open Module with no open Tasks, blocker or in-scope gaps; all explicitly required Module/Task check labels must have passed. Canceled children are excluded. If no Task is done, the Module needs its own meaningful result. not_applicable does not waive required checks. accepted cannot contain must_fix findings.\nchanges_requested saves a negative conclusion without requiring acceptance readiness. It is a successful call with isError=false, not a tool failure.\nOptional check updates replace canonical Module/owned Task check reports BEFORE validation/verdict capture. They retain before/after provenance without changing the lead result-summary author/date. Canceled Task checks cannot be changed by review.\nOutput: a saved receipt with current Module Version and derived phase. accepted immediately yields accepted while current; no separate status move/merge gate is required. Read get_context ref=M-001 view=review for conclusion/findings/check updates/history, using zero-based review_index if needed.\nEffects: local review/history/check/activity writes, no Git merge or artifact verification. Later semantic changes/reopen make approval historical; handoff alone does not. Retained reviews are not silently pruned. On a lost/partial/uncertain reply inspect current review/context before another write.",
     "inputSchema": {
       "$defs": {
         "CheckStatus": {

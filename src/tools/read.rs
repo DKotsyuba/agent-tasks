@@ -517,7 +517,18 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
         }
     }
     if value.rows.is_empty() {
-        value.lines.push("No entries in this view.".into());
+        let empty = match args.view {
+            View::Summary => "No additional acceptance conditions or review-detail rows.",
+            View::Review if !m.reviews.is_empty() => {
+                "This review has no findings or check updates."
+            }
+            View::Review => "No review recorded.",
+            View::Tasks => "No tasks in this module.",
+            View::Checks => "No required or reported checks in this scope.",
+            View::Log => "No retained generated events in this scope.",
+            View::Results => "No result-detail rows in this scope.",
+        };
+        value.lines.push(empty.into());
     }
     render_page(value, args.start, args.limit, true, templates)
 }
@@ -953,7 +964,7 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
             .map(|id| format!("Scope: module {id}."))
             .unwrap_or("Scope: tracked project work.".into()),
     );
-    value.lines.push("Read a match with get_context ref=<reference>; select results/checks/review for its full evidence.".into());
+    value.lines.push("Open Module/Task hits with get_context ref=<reference>. For a Project hit, call get_context with project only and omit ref. Select results/checks/review for full evidence.".into());
     warnings(&mut value, &scan.warnings);
     warnings(&mut value, &scan.unreadable);
     for h in hits {

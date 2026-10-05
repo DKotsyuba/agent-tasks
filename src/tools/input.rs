@@ -394,9 +394,10 @@ pub fn mutation<T: serde::de::DeserializeOwned>(
     ))
 }
 
-/// Generate the same closed variant schemas used by serde, adding flat common fields.
+/// Generate closed serde variants with flat common fields and the MCP-required root object type.
 pub fn mutation_schema<T: JsonSchema>(record: bool) -> Value {
     let mut schema = serde_json::to_value(schemars::schema_for!(T)).unwrap_or(Value::Null);
+    schema["type"] = Value::String("object".into());
     if let Some(variants) = schema.get_mut("oneOf").and_then(Value::as_array_mut) {
         for variant in variants {
             if let Some(props) = variant.get_mut("properties").and_then(Value::as_object_mut) {
