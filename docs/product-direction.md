@@ -36,6 +36,31 @@ full work trees. This reduces cross-lead write conflicts and makes module histor
 separate in Git. Cross-file references and partial plan writes still need a small,
 honest design. The rest of the earlier model remains open to justified revision.
 
+## Proportional tracking and documentation
+
+Use the system when there is substantial project work worth planning, coordinating
+or reporting. Do not create a work hierarchy for every quick fix. A small project
+with one or two scripts may need no store or separate strategic documents at all.
+Code documentation and the ordinary Git commit can be sufficient.
+
+- A microfix does not require a standalone Epic, Module, Task or Atomic, a
+  development log, a status note or a copied result report.
+- A real Module may contain useful Tasks, but each tiny edit is not automatically
+  another Task. Reuse the current assignment and record a meaningful outcome once.
+- Save documents for useful intent, constraints or durable rationale. Large work
+  does not automatically require Runbook, Log, TODO or decision templates.
+- A short consequential decision can be recorded without inventing a work tree.
+- Reads never initialize a store, create records or demand documentation merely
+  because files or a project exist.
+- Status covers tracked work. It does not claim complete coverage of unrecorded
+  microfixes or live-agent activity.
+
+The agent decides whether tracking is useful from the requested outcome and the
+need for delegation, coordination, requirements, acceptance or durable context.
+This applicability guidance belongs in the shared workflow skills and relevant
+existing tool responses. Do not add a mandatory scope-assessment call, line-count
+thresholds, source scanning or another framework to make that decision.
+
 ## Authority boundaries
 
 | Source | Owns |
