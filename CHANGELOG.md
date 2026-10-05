@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.8.0
+
+### Added
+
+- register_project creates portable project documentation, its generated manifest and allocator, a README and ignore rules, and a local Git repository with one initial commit before publishing the alias.
+- get_project_list discovers project aliases and manifest-derived names/descriptions without exposing documentation locations; unavailable projects remain visible.
+- Source repository metadata and the optional documentation Git origin are separate. Registration never pushes or fetches.
+
+### Breaking changes
+
+- Move the aliases table from config.toml to sibling projects.toml. Both files retain schema_version = 1; existing documentation roots and work records are unchanged. Inline aliases receive an explicit migration instruction rather than automatic conversion during reads.
+- The MCP now exposes nine tools. Project registration is explicit and repeatable; ordinary work writes are still not automatically committed.
+
+### Fixed
+
+- Release owned advisory locks explicitly so inherited descriptors in forked Git children cannot retain a completed caller's lock.
+- Preserve initial-commit failures and partial effects, with registration-specific recovery guidance. Operator Git signing and hooks remain enabled.
+- Correct Project creation guidance to omit ref instead of suggesting the invalid ref=Project.
+
 ## 0.7.0
 
 ### Breaking changes

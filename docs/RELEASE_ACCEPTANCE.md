@@ -4,7 +4,17 @@
 
 Native target: aarch64-apple-darwin on macOS arm64. Independent host: MCP Inspector CLI 2.7.0, running with Node 24.4.0. Qualification is limited to that named target/client; it does not certify Linux/Windows, Codex/Claude, arbitrary filesystems or power-loss durability.
 
-## Executed checks on 2026-10-05
+## Registration release 0.8.0 — checks on 2026-10-05
+
+- Native 0.8.0 source passed cargo xtask check: 75 tests, formatting, Clippy, rustdoc, structural rules and exported/live discovery contract checks. cargo deny --locked check reported advisories, bans, licenses and sources OK.
+- Independent Inspector modern discovery retained all nine tools. Legacy identity returned agent-tasks 0.8.0, registration created the portable records and one initial Git commit, and an identical fresh-process registration returned UNCHANGED without a second commit.
+- Independent modern project discovery returned the registered alias, manifest name and description without the documentation directory. Empty source/documentation remote strings were accepted as absent.
+- Bootstrap preserved the operator's SSH signing policy. A minimal client environment needs SSH_AUTH_SOCK when that policy uses an SSH agent; missing signing capability refuses with retained local effects rather than silently disabling signing.
+- Registry/alias conflicts, foreign content, incomplete bootstrap recovery, snapshot continuation, read-only missing-registry behavior and explicit lock release with a duplicated descriptor have native regression coverage.
+
+Inspector reported zero schema portability errors and 32 warnings for the nine-tool catalog. Qualification remains limited to the named native target and independent client.
+
+## Portable core 0.7.0 — checks on 2026-10-05
 
 - The 0.7.0 source passed cargo xtask check: 71 tests, formatting, Clippy, rustdoc, structural rules and exported/live discovery contract checks.
 - cargo deny --locked check reported advisories, bans, licenses and sources OK.
@@ -25,4 +35,6 @@ Publication preserves separate CI source and payload jobs, the release environme
 
 ## Breaking transition
 
-Version 0.7.0 replaces the discontinued Linear API and shared HTTP gateway with local stdio/file storage. Old configuration, credentials, releases and history are preserved; they are not interpreted or migrated. Configure project aliases in HOME/.agent-tasks/config.toml or select an explicit path. Binary rollback does not restore work data or transparently restart the former gateway.
+Version 0.7.0 replaced the discontinued Linear API and shared HTTP gateway with local stdio/file storage. Old configuration, credentials, releases and history are preserved; they are not interpreted or migrated.
+
+Version 0.8.0 separates settings from project bindings: HOME/.agent-tasks/config.toml contains schema_version = 1; sibling projects.toml contains schema_version = 1 and the aliases table. Move that table explicitly when upgrading from 0.7.0. Existing YAML/Markdown roots are unchanged. Binary rollback does not restore configuration or work data; restore the retained 0.7.0 settings as a separate operation if rolling back.
