@@ -21,11 +21,16 @@ It does not depend on Linear or on a globally fixed knowledge directory.
 | Git history | The historical progression of code, strategy, Epics, Modules and Tasks through their committed changes. |
 
 The task/document system must not become a competing description of the current
-implementation. Agents inspect code and its documentation for technical truth;
-work records link to relevant source instead of copying implementation details.
+implementation. Agents inspect code and its documentation through their code
+tools for technical truth; this MCP does not read, index or synchronize source.
 A planned contract is a target, not evidence that the current code implements it.
 Once implemented, the current technical contract belongs with the code; the work
-record retains acceptance results and a route to the implementation revision.
+record retains the agent's reported result and acceptance evidence.
+
+Respecting code authority does not require a mechanical link to code. Source
+symbols, file paths and docstrings are not required fields or integrity targets.
+Optional commit or PR references remain reported artifacts, not a requirement
+for source parsing or automatic verification of implemented behavior.
 
 Git preserves both code and work history. Workflow status remains a structured
 record: a commit alone does not imply review, acceptance or completion.
@@ -39,7 +44,7 @@ decomposition into implementation Modules or a commitment to separate crates.
 |---|---|---|
 | Project direction | Understand why the project exists and where it should go. | Goals, boundaries, priorities, requirements and intended outcomes. |
 | Work cycle | Know what to do, who owns it and what completes it. | Epic/Module/Task/Atomic tree, assignments, criteria, dependencies, transitions, review and integration. |
-| Context and retrieval | Enter a project or assignment quickly and find relevant information. | Bounded context packs, scoped document/work search, links to current code documentation and exact retrieval. |
+| Context and retrieval | Enter a project or assignment quickly and find relevant information. | Bounded context packs, scoped Markdown/YAML search and exact document/work retrieval. Code inspection belongs to the agent's IDE. |
 | Status and attention | Give the owner a ready report and identify the next useful action. | Computed progress, active work, leads, blockers, review/merge conditions and honest coverage. |
 | Knowledge maintenance | Keep strategic documentation useful without duplicating code or history. | Durable rationale, current versus superseded plans, document links, scoped compaction proposals and preservation of recoverable history. |
 
@@ -81,9 +86,9 @@ strategy or reinterpret the implemented behavior of code.
 | Status | Deterministically compute progress, leads, blockers and required actions from structured data. Expose freshness and incomplete coverage rather than inventing counts. |
 | Writes | Scoped edits preserve unrelated fields and documents. Concurrent edits to the same Epic file must not overwrite one another; use an observed revision and a scoped write lock. |
 | Git | Commit only explicitly owned paths; preserve unrelated staged and dirty work. No automatic push, merge, branch deletion or history rewrite. Separate code and documentation repositories remain possible. |
-| Documentation | Keep a short project brief, strategic rationale and intended changes. Implemented technical decisions live in code documentation; link to them instead of duplicating them. Git supplies committed history. |
+| Documentation | Keep a short project brief, strategic rationale and intended changes. Implemented technical decisions live in code documentation independently; no synchronization or required source links. Git supplies committed history. |
 | Search | Start with text, structured filters and links. Return ranked excerpts and exact document routes. Add semantic retrieval only if measured misses justify it. |
-| Compaction | Produce a reviewed diff against a known source revision. Preserve current goals, requirements, target contracts and durable reasons behind choices. Remove duplicate implementation prose in favor of code references. Superseded decisions remain recoverable in history. |
+| Compaction | Produce a reviewed diff against a known document-store revision. Preserve current goals, requirements, target contracts and durable reasons behind choices. Propose removing redundant implementation prose without inferring technical truth from source code. Superseded decisions remain recoverable in history. |
 
 An Epic-sized YAML is intentionally the first model to evaluate. Parallel leads
 editing different Modules still share that file: write conflict behavior needs
