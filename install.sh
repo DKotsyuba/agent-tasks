@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Public/bootstrap installer for the single-binary-v1 profile. No tar extraction.
-# Adapted from the family template at 7f094e0 for agent-tasks.
-# --adopt-existing additionally adopts a known legacy plain executable after an
-# identity check; it is preserved byte-exactly next to the launcher.
+# Authenticated/public bootstrap for the single-binary-v1 profile. No tar extraction.
 set +x
 set -euo pipefail
 umask 077
@@ -11,15 +8,13 @@ REPO='DKotsyuba/agent-tasks'
 version=''
 home=${AGENT_TASKS_HOME:-"$HOME/.$PRODUCT"}
 bin_dir="$HOME/.local/bin"
-adopt=0
 while (($#)); do
   case "$1" in
-    --help) echo 'install.sh --version X.Y.Z [--repo OWNER/REPO] [--home ABS_PATH] [--bin-dir ABS_PATH] [--adopt-existing]'; exit 0;;
+    --help) echo 'install.sh --version X.Y.Z [--repo OWNER/REPO] [--home ABS_PATH] [--bin-dir ABS_PATH]'; exit 0;;
     --version|--repo|--home|--bin-dir)
       (($# >= 2)) || { echo 'Missing option value' >&2; exit 2; }
       case "$1" in --version) version=$2;; --repo) REPO=$2;; --home) home=$2;; --bin-dir) bin_dir=$2;; esac
       shift 2;;
-    --adopt-existing) adopt=1; shift;;
     *) echo 'Unknown installation option' >&2; exit 2;;
   esac
 done
@@ -41,7 +36,6 @@ download() {
     [[ "$size" =~ ^[0-9]+$ ]] && ((size <= max)) || { echo 'Invalid or excessive release asset size' >&2; return 1; }
     GH_HOST=github.com gh release download "v$version" --repo "$REPO" --pattern "$name" --output "$output"
   else
-    # The repository is public; the plain HTTPS origin is the documented default.
     curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
       --connect-timeout 15 --max-time 300 --max-filesize "$max" \
       "https://github.com/$REPO/releases/download/v$version/$name" --output "$output"
@@ -61,8 +55,4 @@ done
 unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
 mkdir -p "$bin_dir"
 chmod 700 "$temp/bundle/$asset"
-if ((adopt)); then
-  "$temp/bundle/$asset" self-install --bundle "$temp/bundle" --home "$home" --bin-dir "$bin_dir" --adopt-existing
-else
-  "$temp/bundle/$asset" self-install --bundle "$temp/bundle" --home "$home" --bin-dir "$bin_dir"
-fi
+"$temp/bundle/$asset" self-install --bundle "$temp/bundle" --home "$home" --bin-dir "$bin_dir"

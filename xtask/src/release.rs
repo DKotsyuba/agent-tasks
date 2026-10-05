@@ -1,32 +1,25 @@
 //! Explicit release operations. Local preparation never commits, tags or pushes.
-//! Adapted from the family template at 7f094e0: the readiness gate is this
-//! product's contract/transport/CLI suites executed against the exact payload
-//! binary through MCP_TEST_BINARY, and publication refuses while family.toml
-//! declares an unqualified release.
-use crate::{Project, Result, capture, run, text};
+use crate::{Project, Result, capture, json, run, text};
 use clap::Subcommand;
-use family_delivery::Manifest;
-use serde_json::{Value, json};
-use std::io::Write;
-use std::process::Command;
-use std::time::{Duration, Instant};
-use std::{fs, path::PathBuf};
-
+use family_delivery::{Manifest, verify};
+use serde_json::Value;
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    process::Command,
+    time::{Duration, Instant},
+};
 #[derive(Subcommand)]
 pub enum Release {
     /// Show version/CHANGELOG edits; --apply performs local edits only.
     Prepare {
-        /// Target semver version, e.g. 0.5.0.
         version: String,
-        /// Apply the local edits instead of only previewing them.
         #[arg(long)]
         apply: bool,
     },
     /// Publish an accepted CI bundle through a complete draft; never replace a release.
-    Publish {
-        /// Verified bundle directory built from the exact accepted commit.
-        directory: PathBuf,
-    },
+    Publish { directory: PathBuf },
     /// Observe one exact tag/commit and validate its run and bytes. No install or wake claim.
     Wait {
         #[arg(long)]
@@ -41,7 +34,6 @@ pub enum Release {
         result_file: Option<PathBuf>,
     },
 }
-
 fn repo_valid(repo: &str) -> bool {
     let parts: Vec<_> = repo.split('/').collect();
     parts.len() == 2
@@ -52,7 +44,6 @@ fn repo_valid(repo: &str) -> bool {
                     .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
         })
 }
-
 /// Accept both `## Unreleased` and the bracketed Keep-a-Changelog heading form.
 fn unreleased_heading(changelog: &str) -> Result<&'static str> {
     ["## Unreleased", "## [Unreleased]"]
@@ -60,7 +51,6 @@ fn unreleased_heading(changelog: &str) -> Result<&'static str> {
         .find(|h| changelog.matches(h).count() == 1)
         .ok_or("expected exactly one Unreleased section".into())
 }
-
 /// Replace the `version` key of `[workspace.package]` in place, preserving key
 /// order, inline tables and comments; None when that exact line is absent.
 fn bump_workspace_version(source: &str, from: &str, to: &str) -> Option<String> {
@@ -86,7 +76,6 @@ fn bump_workspace_version(source: &str, from: &str, to: &str) -> Option<String> 
     }
     bumped.then_some(out)
 }
-
 fn prepare(project: &Project, version: &str, apply: bool) -> Result<()> {
     let old = semver::Version::parse(&project.version)?;
     let new = semver::Version::parse(version)?;
@@ -100,8 +89,7 @@ fn prepare(project: &Project, version: &str, apply: bool) -> Result<()> {
     let unreleased = unreleased_heading(&changelog)?;
     println!(
         "{}",
-        json!({"dry_run":!apply,"old":project.version,"new":version,
-               "files":["Cargo.toml","Cargo.lock","CHANGELOG.md"],"remote_writes":0})
+        json!({"dry_run":!apply,"old":project.version,"new":version,"files":["Cargo.toml","Cargo.lock","CHANGELOG.md"],"remote_writes":0})
     );
     if !apply {
         return Ok(());
@@ -136,50 +124,13 @@ fn prepare(project: &Project, version: &str, apply: bool) -> Result<()> {
     );
     Ok(())
 }
-
-/// Run the exact-payload acceptance suites against one binary: contract
-/// (discovery/dispatch vs the committed schema), protocol (bounded raw revision
-/// compatibility and EOF), transport (real HTTP/stdio calls), and CLI
-/// (doctor/config/aliases). The selected binary is tested without publication;
-/// a setup or failed suite aborts acceptance.
-fn payload_tests(project: &Project, binary: &str) -> Result<()> {
-    for suite in ["contract", "protocol", "transport", "cli"] {
-        let args = [
-            "test",
-            "--frozen",
-            "--package",
-            project.name.as_str(),
-            "--test",
-            suite,
-        ];
-
-        let ok = Command::new("cargo")
-            .current_dir(&project.root)
-            .args(args)
-            .env("MCP_TEST_BINARY", binary)
-            .env_remove("GH_TOKEN")
-            .env_remove("GITHUB_TOKEN")
-            .env_remove("GH_ENTERPRISE_TOKEN")
-            .env_remove("GITHUB_ENTERPRISE_TOKEN")
-            .stdin(std::process::Stdio::null())
-            .status()?
-            .success();
-        if !ok {
-            return Err(format!("shipped-payload {suite} acceptance failed").into());
-        }
-    }
-    Ok(())
-}
-
 fn publish(project: &Project, directory: PathBuf) -> Result<()> {
     let directory = fs::canonicalize(directory)?;
-    let m = family_delivery::verify(&directory)?;
+    let m = verify(&directory)?;
     let tag = format!("v{}", m.version);
     let repo = project.family["repository"]
         .as_str()
         .ok_or("repository missing")?;
-    // Qualification flags are reviewed declarations backed by separate native
-    // host evidence; they are never flipped to make a pipeline green.
     if !repo_valid(repo)
         || project.family["release"]["enabled"].as_bool() != Some(true)
         || project.family["qualification"].as_str() != Some("verified")
@@ -221,19 +172,39 @@ fn publish(project: &Project, directory: PathBuf) -> Result<()> {
     if text(&project.root, binary_str, &["--version"])? != format!("{} {}", m.product, m.version) {
         return Err("packaged binary identity mismatch".into());
     }
-    if !Command::new("cargo")
-        .current_dir(&project.root)
-        .args(["deny", "--locked", "check"])
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN")
-        .stdin(std::process::Stdio::null())
-        .status()?
-        .success()
-    {
-        return Err("supply-chain check failed for the release source".into());
+    let incomplete: Vec<String> = serde_json::from_slice(&capture(
+        &project.root,
+        binary_str,
+        &["contract", "readiness"],
+        10,
+    )?)?;
+    if !incomplete.is_empty() {
+        return Err("unimplemented tools block release".into());
     }
-    payload_tests(project, binary_str)?;
-    if family_delivery::verify(&directory)? != m {
+    for args in [
+        vec!["deny", "--locked", "check"],
+        vec![
+            "test",
+            "--frozen",
+            "-p",
+            &project.name,
+            "--test",
+            "protocol",
+        ],
+    ] {
+        if !Command::new("cargo")
+            .current_dir(&project.root)
+            .args(args)
+            .env("MCP_TEST_BINARY", &binary)
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .status()?
+            .success()
+        {
+            return Err("supply-chain or shipped-binary acceptance failed".into());
+        }
+    }
+    if verify(&directory)? != m {
         return Err("payload changed after acceptance".into());
     }
     let changelog = fs::read_to_string(project.root.join("CHANGELOG.md"))?;
@@ -250,13 +221,13 @@ fn publish(project: &Project, directory: PathBuf) -> Result<()> {
     }
     let notes = project.root.join("target/release-notes.md");
     fs::write(&notes, section)?;
-    let manifest_path = directory.join("release-manifest.json");
+    let manifest = directory.join("release-manifest.json");
     let installer = project.root.join("install.sh");
     let sums_path = project.root.join("target/SHA256SUMS");
     let mut sums = String::new();
     for (name, file) in [
         (m.binary.as_str(), &binary),
-        ("release-manifest.json", &manifest_path),
+        ("release-manifest.json", &manifest),
         ("install.sh", &installer),
     ] {
         sums.push_str(&format!("{}  {name}\n", family_delivery::digest(file)?.1));
@@ -271,7 +242,7 @@ fn publish(project: &Project, directory: PathBuf) -> Result<()> {
             "create",
             &tag,
             binary_str,
-            manifest_path.to_str().ok_or("manifest path")?,
+            manifest.to_str().ok_or("manifest path")?,
             installer.to_str().ok_or("installer path")?,
             sums_path.to_str().ok_or("checksum path")?,
             "--repo",
@@ -305,7 +276,7 @@ fn publish(project: &Project, directory: PathBuf) -> Result<()> {
             "release-manifest.json",
         ],
     )?;
-    if family_delivery::verify(&verify_dir)? != m {
+    if verify(&verify_dir)? != m {
         return Err("uploaded payload differs; draft left unpublished".into());
     }
     let bootstrap_dir = project
@@ -329,8 +300,8 @@ fn publish(project: &Project, directory: PathBuf) -> Result<()> {
             "SHA256SUMS",
         ],
     )?;
-    if fs::read(bootstrap_dir.join("install.sh"))? != fs::read(&installer)?
-        || fs::read(bootstrap_dir.join("SHA256SUMS"))? != fs::read(&sums_path)?
+    if fs::read(bootstrap_dir.join("install.sh"))? != fs::read(installer)?
+        || fs::read(bootstrap_dir.join("SHA256SUMS"))? != fs::read(sums_path)?
     {
         return Err("bootstrap assets differ; draft left unpublished".into());
     }
@@ -341,12 +312,10 @@ fn publish(project: &Project, directory: PathBuf) -> Result<()> {
     run(&project.root, "gh", &args)?;
     println!(
         "{}",
-        json!({"status":"published","tag":tag,"commit":m.source_commit,
-               "artifact_integrity":"verified","provenance_verification":"not_performed"})
+        json!({"status":"published","tag":tag,"commit":m.source_commit,"artifact_integrity":"verified","provenance_verification":"not_performed"})
     );
     Ok(())
 }
-
 fn wait(
     project: &Project,
     repo: &str,
@@ -397,14 +366,9 @@ fn wait(
         let data: Value = match response {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
             Err(_) => {
-                std::thread::sleep(Duration::from_secs(
-                    2.min(
-                        deadline
-                            .saturating_duration_since(Instant::now())
-                            .as_secs()
-                            .max(1),
-                    ),
-                ));
+                std::thread::sleep(
+                    Duration::from_secs(2).min(deadline.saturating_duration_since(Instant::now())),
+                );
                 continue;
             }
         };
@@ -528,17 +492,13 @@ fn wait(
             ],
             remaining()?,
         )?;
-        if family_delivery::verify(&dir)? != m {
+        if verify(&dir)? != m {
             return Err("downloaded bytes differ from observed manifest".into());
         }
-        let event = json!({"schema_version":1,"status":"published","repo":repo,"tag":tag,
-            "commit":commit,"run_id":run_id,"run_attempt":m.run_attempt,
-            "verified_assets":[m.binary,"release-manifest.json"],
-            "artifact_integrity":"verified","provenance_verification":"not_performed",
-            "installed":false,"agent_awakened":false});
-        let text_json = serde_json::to_string(&event)?;
+        let event = json!({"schema_version":1,"status":"published","repo":repo,"tag":tag,"commit":commit,"run_id":run_id,"run_attempt":m.run_attempt,"verified_assets":[m.binary,"release-manifest.json"],"artifact_integrity":"verified","provenance_verification":"not_performed","installed":false,"agent_awakened":false});
+        let text = serde_json::to_string(&event)?;
         if let Some(path) = result_file {
-            let mut opts = fs::OpenOptions::new();
+            let mut opts = OpenOptions::new();
             opts.write(true).create_new(true);
             #[cfg(unix)]
             {
@@ -546,15 +506,13 @@ fn wait(
                 opts.mode(0o600);
             }
             let mut file = opts.open(path)?;
-            file.write_all(text_json.as_bytes())?;
+            file.write_all(text.as_bytes())?;
             file.sync_all()?;
         }
-        println!("{text_json}");
+        println!("{text}");
         return Ok(());
     }
 }
-
-/// Dispatch one release subcommand.
 pub fn execute(project: &Project, command: Release) -> Result<()> {
     match command {
         Release::Prepare { version, apply } => prepare(project, &version, apply),
@@ -568,21 +526,17 @@ pub fn execute(project: &Project, command: Release) -> Result<()> {
         } => wait(project, &repo, &tag, &commit, timeout, result_file),
     }
 }
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "Test assertions fail explicitly")]
 mod tests {
     use super::*;
-    use crate::state_schema_for;
-
     #[test]
     fn repository_scope() {
-        assert!(repo_valid("DKotsyuba/agent-tasks"));
+        assert!(repo_valid("DKotsyuba/agent-example"));
         for r in ["x", "x/y/z", "x/y?token=a", "/x", "https://github.com/x/y"] {
             assert!(!repo_valid(r));
         }
     }
-
     #[test]
     fn unreleased_heading_forms() {
         assert_eq!(
@@ -595,11 +549,10 @@ mod tests {
         );
         assert!(unreleased_heading("# C\nno headings\n").is_err());
     }
-
     #[test]
     fn version_bump_changes_exactly_one_line() {
-        let source = "# top comment\n[workspace]\nmembers = [\"xtask\"]\n\n[workspace.package]\nversion = \"0.4.0\"\nedition = \"2024\"\n\n[dependencies]\nclap = { version = \"4.5\", features = [\"derive\"] }\n";
-        let bumped = bump_workspace_version(source, "0.4.0", "0.5.0").unwrap();
+        let source = "# top comment\n[workspace]\nmembers = [\"xtask\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nclap = { version = \"4.5\", features = [\"derive\"] }\n";
+        let bumped = bump_workspace_version(source, "0.1.0", "0.1.1").unwrap();
         assert_eq!(
             bumped
                 .lines()
@@ -610,22 +563,8 @@ mod tests {
         );
         assert_eq!(
             bumped,
-            source.replacen("version = \"0.4.0\"", "version = \"0.5.0\"", 1)
+            source.replacen("version = \"0.1.0\"", "version = \"0.1.1\"", 1)
         );
         assert!(bump_workspace_version(source, "9.9.9", "1.0.0").is_none());
-    }
-
-    #[test]
-    fn external_state_profile_maps_to_zero_local_state_schema() {
-        let family: toml::Value = toml::from_str(include_str!("../../family.toml")).unwrap();
-        // `external` packages with state_schema = 0: no LOCAL business state.
-        assert_eq!(state_schema_for(&family).unwrap(), 0);
-        assert_eq!(family["profiles"]["state"].as_str(), Some("external"));
-        let none: toml::Value = toml::from_str("[profiles]\nstate = \"none\"\n").unwrap();
-        assert_eq!(state_schema_for(&none).unwrap(), 0);
-        let local: toml::Value = toml::from_str("[profiles]\nstate = \"local\"\n").unwrap();
-        assert_eq!(state_schema_for(&local).unwrap(), 1);
-        let invalid: toml::Value = toml::from_str("[profiles]\nstate = \"wat\"\n").unwrap();
-        assert!(state_schema_for(&invalid).is_err());
     }
 }

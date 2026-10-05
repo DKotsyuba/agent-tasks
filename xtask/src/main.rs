@@ -1,13 +1,13 @@
-//! Rust-only product automation for agent-tasks. The tool contract is
-//! schema-first: `schemas/tools.json` is the single authority, and this gate
-//! verifies it against the embedded catalogue, the gateway dispatch vocabulary
-//! and real-binary MCP discovery. No interpreter or generator is involved.
+//! Rust-only product automation; no implicit remote writes or runtime interpreter.
 #![allow(clippy::print_stdout, reason = "Developer CLI, not MCP")]
-
 mod release;
+mod upgrade;
 
 use clap::{Parser, Subcommand};
-use family_delivery::Manifest;
+use family_delivery::{Manifest, Result};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -22,26 +22,35 @@ struct Cli {
     #[command(subcommand)]
     command: Task,
 }
-
 #[derive(Subcommand)]
 enum Task {
     /// Network preparation without changing Cargo.lock.
     Prepare,
-    /// Canonical non-mutating gate: fmt, clippy, tests, rustdoc, contract, standard.
+    /// Check the canonical source without formatting or updating snapshots.
     Check,
-    /// Check declarative family invariants for this product's profile.
+    /// Check declarative Rust family invariants.
     Standard {
         #[command(subcommand)]
-        command: Option<StandardCommand>,
+        command: Standard,
     },
-    /// Verify the authoritative schema snapshot against dispatch and discovery.
+    /// Verify or explicitly update the real tool-discovery snapshot.
     Contract {
         #[command(subcommand)]
-        command: Option<ContractCommand>,
+        command: Contract,
     },
-    /// Focused test suites.
+    /// Add a typed, registered, non-executing tool skeleton and fixture.
+    AddTool {
+        name: String,
+        #[arg(long, default_value = "read")]
+        effect: String,
+        #[arg(long, default_value = "entity")]
+        response: String,
+        #[arg(long)]
+        idempotent: bool,
+    },
+    /// Focused tests: protocol, presentation or delivery.
     Test { suite: String },
-    /// Build a new immutable single-binary bundle, or verify an existing one.
+    /// Build a new immutable single-binary directory, or verify an existing one.
     Package {
         #[command(subcommand)]
         command: Option<PackageCommand>,
@@ -51,47 +60,48 @@ enum Task {
         #[command(subcommand)]
         command: release::Release,
     },
+    /// Read-only three-way template update plan.
+    Template {
+        #[command(subcommand)]
+        command: upgrade::Template,
+    },
 }
-
 #[derive(Subcommand)]
-enum StandardCommand {
+enum Standard {
     Check,
 }
-
 #[derive(Subcommand)]
-enum ContractCommand {
+enum Contract {
     Check,
+    Update,
 }
-
 #[derive(Subcommand)]
 enum PackageCommand {
-    /// Validate one bundle directory against its own manifest.
     Verify { directory: PathBuf },
 }
 
-/// Parsed repository identity used by every gate.
-struct Project {
-    /// Repository root (parent of this crate).
-    root: PathBuf,
-    /// Product package name from Cargo.
-    name: String,
-    /// Workspace package version.
-    version: String,
-    /// Cargo target directory.
-    target_dir: PathBuf,
-    /// Root Cargo manifest as raw TOML.
-    manifest: toml::Value,
-    /// family.toml profile metadata.
-    family: toml::Value,
+/// Workspace identity and gate inputs loaded once for a developer command.
+pub(crate) struct Project {
+    /// Product root containing the Cargo and family manifests.
+    pub root: PathBuf,
+    /// Root application package and executable name.
+    pub name: String,
+    /// Shared application version declared by the workspace.
+    pub version: String,
+    /// Cargo's effective build output directory, including environment overrides.
+    pub target_dir: PathBuf,
+    /// Whether workspace features or incomplete metadata require both feature gates.
+    has_features: bool,
+    /// Parsed root Cargo manifest used for structural checks.
+    pub manifest: toml::Value,
+    /// Parsed product profiles, identity and qualification declarations.
+    pub family: toml::Value,
 }
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-/// Run one helper with GitHub transport credentials removed unless it is gh.
 fn helper(root: &Path, program: &str) -> Command {
     let mut command = Command::new(program);
-    command.current_dir(root).stdin(Stdio::null());
-    // Only gh needs these transport credentials; cargo/git must not inherit them.
+    command.current_dir(root);
+    // Only gh needs these transport credentials. This does not sandbox credential files.
     if program != "gh" {
         for name in [
             "GH_TOKEN",
@@ -105,16 +115,8 @@ fn helper(root: &Path, program: &str) -> Command {
     command
 }
 
-fn run(root: &Path, program: &str, args: &[&str]) -> Result<()> {
-    println!("xtask: {program} {}", args.join(" "));
-    if !helper(root, program).args(args).status()?.success() {
-        return Err(format!("{program} failed").into());
-    }
-    Ok(())
-}
-
 /// Capture bounded output and stop a hung direct helper; no descendant-tree guarantee.
-fn capture(root: &Path, program: &str, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
+pub(crate) fn capture(root: &Path, program: &str, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
     let mut child = helper(root, program)
         .args(args)
         .stdin(Stdio::null())
@@ -162,36 +164,75 @@ fn capture(root: &Path, program: &str, args: &[&str], seconds: u64) -> Result<Ve
     }
     Ok(result)
 }
-
-/// One trimmed helper output line set, bounded in time and size.
-fn text(root: &Path, program: &str, args: &[&str]) -> Result<String> {
-    Ok(String::from_utf8(capture(root, program, args, 120)?)?
+pub(crate) fn text(root: &Path, program: &str, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8(capture(root, program, args, 60)?)?
         .trim()
         .to_owned())
 }
-
-/// Map the declared family state profile to the delivery state schema.
-/// `external` (this product) and `none` both carry 0 — meaning no LOCAL
-/// business state — while `local` stamps the store layout version. Anything
-/// else is refused rather than guessed.
-fn state_schema_for(family: &toml::Value) -> Result<u32> {
-    match family["profiles"]["state"].as_str() {
-        Some("external") | Some("none") => Ok(0),
-        Some("local") => Ok(family_delivery::CURRENT_STATE_SCHEMA),
-        other => Err(format!("unsupported state profile for packaging: {other:?}").into()),
+pub(crate) fn run(root: &Path, program: &str, args: &[&str]) -> Result<()> {
+    eprintln!("xtask: {program} {}", args.join(" "));
+    if !helper(root, program).args(args).status()?.success() {
+        return Err(format!("{program} failed").into());
     }
+    Ok(())
+}
+
+fn tool_name_valid(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 40
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+fn check_destination(root: &Path, relative: &Path) -> Result<()> {
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err("invalid generated path".into());
+        }
+        path.push(component);
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err("generated path has a symlink ancestor".into());
+        }
+    }
+    Ok(())
+}
+
+/// Detect whether default and all-feature gates can differ from Cargo metadata v1.
+/// Only nonempty, complete workspace membership with empty feature maps returns false;
+/// dependency features are irrelevant, while implicit optional features count as features.
+fn workspace_has_features(metadata: &Value) -> bool {
+    let Some(members) = metadata["workspace_members"]
+        .as_array()
+        .filter(|members| !members.is_empty())
+    else {
+        return true;
+    };
+    let Some(packages) = metadata["packages"].as_array() else {
+        return true;
+    };
+    members.iter().any(|member| {
+        member.as_str().is_none()
+            || !packages
+                .iter()
+                .find(|package| package["id"] == *member)
+                .and_then(|package| package["features"].as_object())
+                .is_some_and(|features| features.is_empty())
+    })
 }
 
 impl Project {
+    /// Read product manifests and locked Cargo metadata without changing the lockfile.
+    /// Reuse that metadata for output paths and feature gates; propagate I/O, parsing,
+    /// missing identity and helper errors before running the requested command.
     fn load() -> Result<Self> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .ok_or("missing project root")?
             .to_path_buf();
-        let manifest: toml::Value =
-            toml::from_str(&std::fs::read_to_string(root.join("Cargo.toml"))?)?;
-        let family: toml::Value =
-            toml::from_str(&std::fs::read_to_string(root.join("family.toml"))?)?;
+        let manifest: toml::Value = toml::from_str(&fs::read_to_string(root.join("Cargo.toml"))?)?;
+        let family: toml::Value = toml::from_str(&fs::read_to_string(root.join("family.toml"))?)?;
         let name = manifest["package"]["name"]
             .as_str()
             .ok_or("package name missing")?
@@ -200,7 +241,7 @@ impl Project {
             .as_str()
             .ok_or("workspace version missing")?
             .to_owned();
-        let metadata: serde_json::Value = serde_json::from_slice(&capture(
+        let metadata: Value = serde_json::from_slice(&capture(
             &root,
             "cargo",
             &["metadata", "--locked", "--no-deps", "--format-version", "1"],
@@ -211,25 +252,23 @@ impl Project {
                 .as_str()
                 .ok_or("target_directory missing")?,
         );
+        let has_features = workspace_has_features(&metadata);
         Ok(Self {
             root,
             name,
             version,
             target_dir,
+            has_features,
             manifest,
             family,
         })
     }
-
-    /// Path of the product binary for one profile.
-    fn binary(&self, release_build: bool) -> PathBuf {
+    pub(crate) fn binary(&self, release: bool) -> PathBuf {
         self.target_dir
-            .join(if release_build { "release" } else { "debug" })
+            .join(if release { "release" } else { "debug" })
             .join(&self.name)
     }
-
-    /// Build the product binary under the frozen gate.
-    fn build(&self, release_build: bool) -> Result<()> {
+    fn build(&self, release: bool) -> Result<()> {
         let mut args = vec![
             "build",
             "--frozen",
@@ -238,64 +277,38 @@ impl Project {
             "--bin",
             &self.name,
         ];
-        if release_build {
+        if release {
             args.push("--release");
         }
         run(&self.root, "cargo", &args)
     }
-
-    /// Build one immutable bundle for the current commit. Requires a clean
-    /// committed tree so the manifest's source identity is real.
-    fn package(&self) -> Result<PathBuf> {
-        self.standard()?;
-        if !text(&self.root, "git", &["status", "--porcelain"])?.is_empty() {
-            return Err("commit product changes before packaging".into());
-        }
-        let commit = text(&self.root, "git", &["rev-parse", "HEAD"])?;
-        let target = text(&self.root, "rustc", &["-vV"])?
-            .lines()
-            .find_map(|s| s.strip_prefix("host: "))
-            .ok_or("host target missing")?
-            .to_owned();
-        let state_schema = state_schema_for(&self.family)?;
-        self.build(true)?;
-        let output = self
-            .root
-            .join("dist")
-            .join(format!("{}-{}-{}", self.name, self.version, target));
-        if output.exists() {
-            return Err(format!(
-                "bundle directory already exists; remove {} before repackaging",
-                output.display()
-            )
-            .into());
-        }
-        std::fs::create_dir_all(output.parent().ok_or("package parent absent")?)?;
-        let manifest = Manifest {
-            schema_version: 1,
-            profile: "single-binary-v1".into(),
-            product: self.name.clone(),
-            version: self.version.clone(),
-            source_commit: commit,
-            target: target.clone(),
-            binary: format!("{}-{target}", self.name),
-            size: 1,
-            sha256: "0".repeat(64),
-            state_schema,
-            run_id: std::env::var("GITHUB_RUN_ID")
-                .ok()
-                .and_then(|s| s.parse().ok()),
-            run_attempt: std::env::var("GITHUB_RUN_ATTEMPT")
-                .ok()
-                .and_then(|s| s.parse().ok()),
-        };
-        family_delivery::package(&self.binary(true), &output, manifest)?;
-        println!("{}", output.display());
-        Ok(output)
+    fn catalog(&self) -> Result<Value> {
+        self.build(false)?;
+        let binary = self.binary(false);
+        Ok(serde_json::from_slice(&capture(
+            &self.root,
+            binary.to_str().ok_or("non-UTF8 binary path")?,
+            &["contract", "export"],
+            10,
+        )?)?)
     }
-
-    /// Structural family checks: identity, honest profile, pins and required
-    /// files. Proves structure only, never semantics or security.
+    fn contract(&self, update: bool) -> Result<()> {
+        let catalog = self.catalog()?;
+        let path = self.root.join("schemas/tools.json");
+        check_destination(&self.root, Path::new("schemas/tools.json"))?;
+        if update {
+            fs::write(
+                path,
+                format!("{}\n", serde_json::to_string_pretty(&catalog)?),
+            )?;
+        } else {
+            let snapshot: Value = serde_json::from_slice(&fs::read(path)?)?;
+            if catalog != snapshot {
+                return Err("contract drift: review cargo xtask contract update".into());
+            }
+        }
+        Ok(())
+    }
     fn standard(&self) -> Result<()> {
         let w = &self.manifest["workspace"];
         if w["resolver"].as_str() != Some("3")
@@ -306,139 +319,45 @@ impl Project {
             return Err("Rust workspace invariant failed".into());
         }
         if self.family["product"].as_str() != Some(self.name.as_str())
-            || self.family["repository"].as_str() != Some("DKotsyuba/agent-tasks")
             || self.family["standard_version"].as_str() != Some("1.0.0-rc.2")
             || self.family["response_profile"].as_str() != Some("rust-minijinja-v1")
         {
             return Err("family identity/standard mismatch".into());
         }
-        // This product is an explicit resident + external-state adaptation.
-        // `external` must never be relabelled `none` to satisfy a scaffold.
-        if self.family["profiles"]["process"].as_str() != Some("resident")
-            || self.family["profiles"]["state"].as_str() != Some("external")
-            || self.family["profiles"]["transports"]
-                .as_array()
-                .is_none_or(|t| t.iter().filter_map(|v| v.as_str()).all(|s| s != "stdio"))
-        {
-            return Err("family process/state profile mismatch".into());
-        }
-        let toolchain: toml::Value = toml::from_str(&std::fs::read_to_string(
-            self.root.join("rust-toolchain.toml"),
-        )?)?;
+        let toolchain: toml::Value =
+            toml::from_str(&fs::read_to_string(self.root.join("rust-toolchain.toml"))?)?;
         if toolchain["toolchain"]["channel"].as_str() != w["package"]["rust-version"].as_str() {
-            return Err("pinned toolchain must equal the declared rust-version".into());
+            return Err("candidate compiler baseline mismatch".into());
         }
         for file in [
             "Cargo.lock",
             "AGENTS.md",
-            "CLAUDE.md",
             "SECURITY.md",
             "CHANGELOG.md",
             "deny.toml",
-            "family.toml",
-            "install.sh",
-            "scripts/wait-release.sh",
-            ".github/workflows/ci.yml",
-            ".github/workflows/release.yml",
             "schemas/tools.json",
-            "schemas/linear.graphql",
-            "docs/architecture.md",
             "docs/MCP_RESPONSE_STANDARD.md",
-            "docs/FAMILY_CONTRACT.md",
-            "docs/TEMPLATE_PROVENANCE.md",
-            "docs/releasing.md",
-            "registration/agent-tasks.json",
-            ".family/manifest.json",
-            ".family/origin.json",
         ] {
             if !self.root.join(file).is_file() {
                 return Err(format!("required file absent: {file}").into());
             }
         }
-        for directory in ["src", "xtask", "crates", "scripts"] {
-            let base = self.root.join(directory);
-            if !base.is_dir() {
-                continue;
-            }
-            for entry in walk(&base)? {
+        for directory in ["src", "xtask", "crates"] {
+            for path in files(&self.root.join(directory))?.keys() {
                 if matches!(
-                    entry.extension().and_then(|s| s.to_str()),
-                    Some("py" | "js" | "mjs" | "ts" | "rb")
+                    path.extension().and_then(|s| s.to_str()),
+                    Some("py" | "js" | "ts" | "rb")
                 ) {
-                    return Err(
-                        format!("non-Rust tooling source remains: {}", entry.display()).into(),
-                    );
+                    return Err("non-Rust tooling source".into());
                 }
             }
         }
         println!("standard: structural checks passed (not a semantic or security certificate)");
         Ok(())
     }
-
-    /// Verify the authoritative schema file structurally, then run the Rust
-    /// contract tests that compare it with the embedded catalogue, the
-    /// gateway dispatch vocabulary and real-binary MCP discovery, including
-    /// raw HTTP/stdio revision metadata, calls and bounded EOF handling.
-    fn contract(&self) -> Result<()> {
-        let path = self.root.join("schemas/tools.json");
-        let tools: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-        let Some(tools) = tools.as_array() else {
-            return Err("schemas/tools.json must be an array of tools".into());
-        };
-        let mut names: Vec<&str> = Vec::new();
-        for tool in tools {
-            let name = tool["name"].as_str().ok_or("tool entry without a name")?;
-            if name.is_empty()
-                || !name.as_bytes()[0].is_ascii_lowercase()
-                || !name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-            {
-                return Err(format!("tool name violates the family pattern: {name}").into());
-            }
-            if !tool["description"].is_string()
-                || tool["inputSchema"]["type"] != "object"
-                || !tool["inputSchema"]["additionalProperties"].is_boolean()
-            {
-                return Err(format!("incomplete discovery contract: {name}").into());
-            }
-            for hint in [
-                "readOnlyHint",
-                "destructiveHint",
-                "idempotentHint",
-                "openWorldHint",
-            ] {
-                if !tool["annotations"][hint].is_boolean() {
-                    return Err(format!("missing truthful annotation {hint}: {name}").into());
-                }
-            }
-            names.push(name);
-        }
-        if names.len()
-            != names
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-        {
-            return Err("duplicate tool names in the catalogue".into());
-        }
-        println!("contract: {} tools structurally valid", names.len());
-        run(
-            &self.root,
-            "cargo",
-            &[
-                "test",
-                "--frozen",
-                "--package",
-                &self.name,
-                "--test",
-                "contract",
-                "--test",
-                "protocol",
-            ],
-        )
-    }
-
+    /// Run structural, formatting, Clippy, test, rustdoc and catalog gates in order.
+    /// Always check all features; also check defaults unless metadata proves every
+    /// workspace member has no features. Stop on the first failed gate without fixing it.
     fn check(&self) -> Result<()> {
         self.standard()?;
         run(&self.root, "cargo", &["fmt", "--all", "--check"])?;
@@ -465,7 +384,9 @@ impl Project {
             vec!["test", "--frozen", "--workspace"],
             vec!["test", "--frozen", "--workspace", "--all-features"],
         ] {
-            run(&self.root, "cargo", &args)?;
+            if self.has_features || args.contains(&"--all-features") {
+                run(&self.root, "cargo", &args)?;
+            }
         }
         if !helper(&self.root, "cargo")
             .args([
@@ -481,57 +402,242 @@ impl Project {
         {
             return Err("rustdoc failed".into());
         }
-        self.contract()
+        self.contract(false)
+    }
+    fn add_tool(&self, name: &str, effect: &str, response: &str, idempotent: bool) -> Result<()> {
+        if !tool_name_valid(name) {
+            return Err("invalid tool name".into());
+        }
+        if !["read", "write", "external-write"].contains(&effect)
+            || !["entity", "page", "ack"].contains(&response)
+        {
+            return Err("unsupported tool effect/response profile".into());
+        }
+        check_destination(&self.root, Path::new("src/tools/mod.rs"))?;
+        let registry_path = self.root.join("src/tools/mod.rs");
+        let mut registry = fs::read_to_string(&registry_path)?;
+        if self
+            .catalog()?
+            .as_array()
+            .ok_or("catalog not array")?
+            .iter()
+            .any(|t| t["name"] == name)
+        {
+            return Err("tool already exists".into());
+        }
+        let source = include_str!("../templates/tool.rs.txt")
+            .replace("@@TOOL@@", name)
+            .replace("@@EFFECT@@", effect)
+            .replace(
+                "@@READ_ONLY@@",
+                if effect == "read" { "true" } else { "false" },
+            )
+            .replace(
+                "@@DESTRUCTIVE@@",
+                if effect == "read" { "false" } else { "true" },
+            )
+            .replace("@@IDEMPOTENT@@", if idempotent { "true" } else { "false" })
+            .replace(
+                "@@OPEN_WORLD@@",
+                if effect == "external-write" {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
+        // Prefix Rust module names, so an MCP name such as `match` is not a Rust keyword.
+        let module = format!("tool_{name}");
+        let edits = [
+            (
+                "// xtask:modules",
+                format!("#[path = \"{name}.rs\"]\nmod {module};"),
+            ),
+            ("// xtask:definitions", format!("{module}::definition(),")),
+            (
+                "// xtask:templates",
+                format!("(\"{name}\", {module}::TEMPLATE),"),
+            ),
+            (
+                "// xtask:readiness",
+                format!("(\"{name}\", {module}::IMPLEMENTED),"),
+            ),
+            (
+                "// xtask:routes",
+                format!("\"{name}\" => Some({module}::call(args, _templates).await),"),
+            ),
+        ];
+        for (marker, line) in edits {
+            if registry.matches(marker).count() != 1 {
+                return Err("registry marker missing or duplicated".into());
+            }
+            registry = registry.replace(marker, &format!("{line}\n        {marker}"));
+        }
+        let additions = [
+            (format!("src/tools/{name}.rs"), source),
+            (
+                format!("assets/mcp/tools/{name}.txt.j2"),
+                "ERROR {{ code }}: {{ message }}\n".to_owned(),
+            ),
+            (
+                format!("tests/fixtures/{name}.txt"),
+                format!(
+                    "ERROR not_implemented: {name} has no implementation. No effect was performed.\n"
+                ),
+            ),
+            (
+                format!("docs/tools/{name}.md"),
+                format!(
+                    "# {name}\n\nEffect: {effect}. Intended response: {response}.\n\nStatus: not implemented. Define arguments, DTO, outcome, view and recovery policy before setting IMPLEMENTED=true. No effects or success are fabricated by this skeleton.\n"
+                ),
+            ),
+        ];
+        for (path, _) in &additions {
+            check_destination(&self.root, Path::new(path))?;
+            if fs::symlink_metadata(self.root.join(path)).is_ok() {
+                return Err("generated path already exists".into());
+            }
+        }
+        for (path, contents) in additions {
+            let path = self.root.join(path);
+            fs::create_dir_all(path.parent().ok_or("missing parent")?)?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            std::io::Write::write_all(&mut file, contents.as_bytes())?;
+        }
+        fs::write(registry_path, registry)?;
+        run(&self.root, "cargo", &["fmt", "--all"])?;
+        self.contract(true)?;
+        run(
+            &self.root,
+            "cargo",
+            &["test", "--frozen", "--package", &self.name],
+        )?;
+        println!(
+            "tool generated and registered; release remains blocked until IMPLEMENTED and its evidence are reviewed"
+        );
+        Ok(())
+    }
+    pub(crate) fn package(&self) -> Result<PathBuf> {
+        self.standard()?;
+        if !text(&self.root, "git", &["status", "--porcelain"])?.is_empty() {
+            return Err("commit product changes before packaging".into());
+        }
+        let commit = text(&self.root, "git", &["rev-parse", "HEAD"])?;
+        let target = text(&self.root, "rustc", &["-vV"])?
+            .lines()
+            .find_map(|s| s.strip_prefix("host: "))
+            .ok_or("host target missing")?
+            .to_owned();
+        let state_schema = match self.family["profiles"]["state"].as_str() {
+            Some("local") => family_delivery::CURRENT_STATE_SCHEMA,
+            Some("none") => 0,
+            other => {
+                return Err(format!("unsupported state profile for packaging: {other:?}").into());
+            }
+        };
+        self.build(true)?;
+        let output = self
+            .root
+            .join("dist")
+            .join(format!("{}-{}-{}", self.name, self.version, target));
+        fs::create_dir_all(output.parent().ok_or("package parent absent")?)?;
+        let manifest = Manifest {
+            schema_version: 1,
+            profile: "single-binary-v1".into(),
+            product: self.name.clone(),
+            version: self.version.clone(),
+            source_commit: commit,
+            target: target.clone(),
+            binary: format!("{}-{target}", self.name),
+            size: 1,
+            sha256: "0".repeat(64),
+            state_schema,
+            run_id: std::env::var("GITHUB_RUN_ID")
+                .ok()
+                .and_then(|s| s.parse().ok()),
+            run_attempt: std::env::var("GITHUB_RUN_ATTEMPT")
+                .ok()
+                .and_then(|s| s.parse().ok()),
+        };
+        family_delivery::package(&self.binary(true), &output, manifest)?;
+        println!("{}", output.display());
+        Ok(output)
     }
 }
-
-/// Recursively list real files under one directory, refusing links.
-fn walk(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let kind = entry.file_type()?;
-        if kind.is_symlink() {
-            return Err("managed trees must not contain symlinks".into());
+pub(crate) fn files(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
         }
-        if kind.is_dir() {
-            out.extend(walk(&path)?);
-        } else if kind.is_file() {
-            out.push(path);
-        } else {
-            return Err("special managed file".into());
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                return Err("managed trees must not contain symlinks".into());
+            }
+            if entry.file_name() == "target" || entry.file_name() == ".git" {
+                continue;
+            }
+            if kind.is_dir() {
+                walk(base, &path, out)?;
+            } else if kind.is_file() {
+                if entry.metadata()?.len() > 4 * 1024 * 1024 {
+                    return Err("managed file too large".into());
+                }
+                out.insert(path.strip_prefix(base)?.to_owned(), fs::read(path)?);
+            } else {
+                return Err("special managed file".into());
+            }
         }
+        Ok(())
     }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out)?;
     Ok(out)
 }
-
-/// Load product metadata and execute the selected CLI task. Helper/setup failures
-/// propagate to the CLI exit status; mutation is limited to explicit package/release commands.
 fn main_result() -> Result<()> {
+    let command = Cli::parse().command;
     let project = Project::load()?;
-    match Cli::parse().command {
+    match command {
         Task::Prepare => run(&project.root, "cargo", &["fetch", "--locked"]),
         Task::Check => project.check(),
-        Task::Standard { command: _ } => project.standard(),
-        Task::Contract { command: _ } => project.contract(),
+        Task::Standard {
+            command: Standard::Check,
+        } => project.standard(),
+        Task::Contract { command } => project.contract(matches!(command, Contract::Update)),
+        Task::AddTool {
+            name,
+            effect,
+            response,
+            idempotent,
+        } => project.add_tool(&name, &effect, &response, idempotent),
         Task::Test { suite } => match suite.as_str() {
-            "contract" => project.contract(),
+            "presentation" => run(
+                &project.root,
+                "cargo",
+                &["test", "--frozen", "-p", "mcp-presentation"],
+            ),
+            "delivery" => run(
+                &project.root,
+                "cargo",
+                &["test", "--frozen", "-p", "family-delivery"],
+            ),
             "protocol" => run(
                 &project.root,
                 "cargo",
                 &[
                     "test",
                     "--frozen",
-                    "--package",
+                    "-p",
                     &project.name,
-                    "--test",
-                    "transport",
                     "--test",
                     "protocol",
                 ],
             ),
-            other => Err(format!("unknown test suite: {other}").into()),
+            _ => Err("unknown test suite".into()),
         },
         Task::Package { command: None } => project.package().map(|_| ()),
         Task::Package {
@@ -544,9 +650,9 @@ fn main_result() -> Result<()> {
             Ok(())
         }
         Task::Release { command } => release::execute(&project, command),
+        Task::Template { command } => upgrade::execute(&project, command),
     }
 }
-
 fn main() -> ExitCode {
     match main_result() {
         Ok(()) => ExitCode::SUCCESS,
@@ -556,16 +662,61 @@ fn main() -> ExitCode {
         }
     }
 }
-
+/// Regression checks for developer-tool input and feature-gate boundaries.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "Test assertions")]
 mod tests {
+    use super::*;
+
+    /// Skip duplicate gates only when every workspace member is provably featureless.
     #[test]
-    fn scaffold_state_profile_is_external_not_none() {
-        let family: toml::Value = toml::from_str(include_str!("../../family.toml")).unwrap();
-        // The delivery manifest's state_schema=0 means no LOCAL business state.
-        // The family profile itself must stay honestly `external`.
-        assert_eq!(family["profiles"]["process"].as_str(), Some("resident"));
-        assert_eq!(family["profiles"]["state"].as_str(), Some("external"));
+    fn workspace_feature_gates_are_conservative() {
+        let mut metadata = json!({
+            "workspace_members": ["application", "xtask"],
+            "packages": [
+                {"id": "application", "features": {}},
+                {"id": "xtask", "features": {}},
+                {"id": "dependency", "features": {"default": ["serde"]}}
+            ]
+        });
+        assert!(!workspace_has_features(&metadata));
+        for features in [
+            json!({"default": []}),
+            json!({"optional_dep": ["dep:optional_dep"]}),
+        ] {
+            metadata["packages"][1]["features"] = features;
+            assert!(workspace_has_features(&metadata));
+        }
+        metadata["packages"][1]["features"] = Value::Null;
+        assert!(workspace_has_features(&metadata));
+        metadata["packages"][1]["features"] = json!({});
+        metadata["workspace_members"] = json!(["missing-member"]);
+        assert!(workspace_has_features(&metadata));
+        metadata["workspace_members"] = json!([]);
+        assert!(workspace_has_features(&metadata));
+        assert!(workspace_has_features(&json!({})));
+    }
+
+    #[test]
+    fn tool_identifiers() {
+        for name in ["list_items", "match", "self"] {
+            assert!(tool_name_valid(name));
+        }
+        for name in ["", "../../x", "X", "1x", "x;bad"] {
+            assert!(!tool_name_valid(name));
+        }
+    }
+    #[test]
+    fn unsafe_relative_paths_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(check_destination(dir.path(), Path::new("../escape")).is_err());
+        assert!(check_destination(dir.path(), Path::new("/absolute")).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn linked_destination_parent_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("missing", dir.path().join("src")).unwrap();
+        assert!(check_destination(dir.path(), Path::new("src/tools/x.rs")).is_err());
     }
 }

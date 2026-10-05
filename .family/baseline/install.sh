@@ -3,10 +3,10 @@
 set +x
 set -euo pipefail
 umask 077
-PRODUCT='agent-tasks-linear'
-REPO='DKotsyuba/Agent-Tasks-Linear'
+PRODUCT='agent-tasks'
+REPO='DKotsyuba/agent-tasks'
 version=''
-home=${AGENT_TASKS_LINEAR__HOME:-"$HOME/.$PRODUCT"}
+home=${AGENT_TASKS_HOME:-"$HOME/.$PRODUCT"}
 bin_dir="$HOME/.local/bin"
 while (($#)); do
   case "$1" in

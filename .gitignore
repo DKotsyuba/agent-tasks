@@ -1,9 +1,7 @@
 /target/
-/.local/
-*.local.toml
+/dist/
+/.initializing
+*.rs.bk
+.DS_Store
 .env
 .env.*
-/dist/
-
-# Local codegraph index, intentionally untracked
-/.codegraph/
