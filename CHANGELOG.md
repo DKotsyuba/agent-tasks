@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.9.1
+
+### Fixed
+
+- Give the multi-step real-assembly SDK scenario a bounded host-speed budget suitable for unoptimized CI binaries. Per-call checks, mutation controls, real AB/BC/ABC assembly and all business assertions remain unchanged.
+- Retain the immutable 0.9.0 tag after its source-check timeout; this patch publishes the same Epic core behavior with the corrected verification budget.
+
 ## 0.9.0
 
 ### Added

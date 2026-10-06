@@ -1165,9 +1165,10 @@ async fn record_core_integration(
 }
 
 /// Ready AB integrates while C is unfinished; pairwise edge coverage never fabricates ABC business proof.
+/// Its many RPCs and native fixture builds need a bounded host-speed budget, not a product latency gate.
 #[tokio::test]
 async fn epic_core_connected_ab_before_c_and_exact_business_coverage_stdio() {
-    tokio::time::timeout(Duration::from_secs(180),async {
+    tokio::time::timeout(Duration::from_secs(600),async {
         let (temp,_root,_config,client)=fixture().await;
         let criterion="ABC business composition";
         core_change(&client,"plan_work",None,json!({"op":"create_epic","title":"Incremental ABC Epic","outcome":"Exact business composition verified","criteria":[criterion]}),false).await;

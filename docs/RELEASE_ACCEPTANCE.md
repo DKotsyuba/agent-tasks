@@ -4,6 +4,12 @@
 
 Native target: aarch64-apple-darwin on macOS arm64. Independent host: MCP Inspector CLI 2.7.0, running with Node 24.4.0. Qualification is limited to that named target/client; it does not certify Linux/Windows, Codex/Claude, arbitrary filesystems or power-loss durability.
 
+## Patch 0.9.1 — source checks on 2026-10-06
+
+Version 0.9.1 changes only the connected multi-step SDK scenario's whole-test budget from 180 to 600 seconds. All real candidate assemblies, meaningful mutation controls, negative business-coverage checks and stale assertions remain; application behavior and request/read limits are unchanged. The release check had exhausted the previous cumulative debug/host budget rather than failed a business assertion. The targeted scenario passed against the native debug binary in 110.48 seconds and the exact optimized 0.9.0 CI payload in 18.80 seconds.
+
+Fresh MCP Inspector 2.7.0/Node 24.4.0 calls identified the native source debug binary as 0.9.1, retained ten modern tools and read the existing isolated core Module's current readiness. Strict portability remained zero errors and 66 warnings across nine schema-bearing tools. This retains the named macOS arm64 client scope; it is source-level evidence, not new payload-byte or owner-installation qualification.
+
 ## Epic core 0.9.0 — source debug checks on 2026-10-06
 
 The independently exercised native source debug binary identified itself as agent-tasks 0.9.0. These checks qualify the named native source/client interaction; they do not establish packaged-byte verification or owner installation.
