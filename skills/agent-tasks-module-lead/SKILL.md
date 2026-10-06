@@ -14,7 +14,7 @@ requiring the orchestrator to repeat it in a launch prompt.
 
 agent-tasks preserves intent, current results, check reports, blockers,
 handoffs and independent Module reviews. Project metadata and each Module's
-embedded Tasks use machine-managed YAML; responses are compact English text.
+embedded Tasks and Atomics use machine-managed YAML; responses are compact English text.
 Use the alias on every business call, keep tracked content English, and let
 MCP generate IDs, UTC dates and activity. Do not edit generated fields manually.
 
@@ -24,15 +24,14 @@ ordinary work, and does not verify artifact strings. Follow the assigned
 repository's implementation, testing and Git instructions. Keep useful technical
 Markdown alongside the project code without duplicating it into task narration.
 
-The current model is **Project → Module → Task**. There are no Epic/Atomic
-operations, Markdown/document search or document-writing tools. Tiny fixes may
+The model is **Project → Epic or standalone Module/Atomic; Epic → Module/Atomic; Module → Task/Atomic**. Your Module remains one file. Its Tasks and Atomics have no individual review. Markdown/document search and document-writing tools remain unavailable. Tiny fixes may
 need no tracked record; do not manufacture tracking work outside your assignment.
 
 ## Enter and choose the next action
 
-1. Call `get_context(project=<alias>, ref=<Module>)` for the outcome, lead,
+1. Call `get_context(project=<alias>, ref=<Module>)` for the outcome, parent intent/criteria, lead,
    derived phase, blockers/handoff, remaining acceptance conditions and Version.
-2. Read `get_context` with `view="tasks"` for the actual Task list. Summary is
+2. Read `get_context` with `view="tasks"` for the actual child work list. Summary is
    not a complete Task list. Read a Task's `results` or `checks` when needed;
    Module results show previews. Use `view="review"` for correction findings.
 3. Continue the next meaningful Task or Module outcome in the assigned checkout.
@@ -43,8 +42,8 @@ need no tracked record; do not manufacture tracking work outside your assignment
 | What happened | MCP action |
 |---|---|
 | Implemented a meaningful result | `record_work op=result`; summary, actual checks, useful artifacts and remaining gaps/follow-ups |
-| Finished a Task | Same call with its Task ref and explicit `state="done"`; omitted state preserves its old state |
-| Need a plan correction | Agreed `plan_work op=edit_task/add_task/edit_module` with the owning Module Version |
+| Finished a Task or Module Atomic | Same call with its Task/Atomic ref and explicit `state="done"`; omitted state preserves its old state |
+| Need a plan correction | Agreed `plan_work op=edit_task/add_task/edit_atomic/add_atomic/edit_module` with the owning Module Version |
 | Cannot proceed | Module `record_work op=blocker` with problem, needed_action and known resolver |
 | Stopping or transferring work | Module `record_work op=handoff` with stopping_point and next_action |
 | Obstacle or handoff resolved | `clear_blocker` / `clear_handoff` with a reason |
@@ -99,7 +98,7 @@ recorded evidence, so a duplicate assignment/report is unnecessary.
 
 Do not review your own implementation or invent a reviewer identity. The
 independent reviewer uses `review_module` for the whole Module; there is no
-Task review and no manual Module status setter. An accepted current review
+individual Task/Atomic review and no manual Module status setter. An accepted current review
 directly yields the accepted phase. There is no hidden PR/merge gate; follow
 the actual repository's integration requirements and planned checks separately.
 
@@ -107,11 +106,11 @@ For changes_requested, read the retained review, correct the named findings,
 update current evidence and return the same Module for another review. Reopen a
 Task with a reason if its completion is no longer true. Semantic changes make
 old approval historical; a handoff alone does not. Module cancellation cannot
-cascade through open Tasks; ask the orchestrator to resolve the remaining scope.
+cascade through open Tasks or Module Atomics; ask the orchestrator to resolve the remaining scope.
 
 ## Stay within the returned versions
 
-All Task/Module writes use the **owning Module Version**, including planning,
+All Task/Module/embedded Atomic writes use the **owning Module Version**, including planning,
 reports, blocker/handoff and review. Task writes share one file, so a helper's
 write can stale yours. Serialize writes within your Module; use helpers for
 bounded implementation work without competing tracker writes.
@@ -126,3 +125,13 @@ partial or uncertain outcomes, inspect context/results/log/review before retryin
 Do not replay a mutation just because its prose could not be rendered. Normal
 work writes remain uncommitted; any Git action belongs to the repository's
 authorized workflow.
+
+## Parent context and Module Atomics
+
+Read returned Epic title/outcome/criteria as assignment background. Required checks are explicit on their owner; parent check labels do not silently add per-Task/Module requirements. If the parent changes the intended assignment, coordinate the actual Module plan with the orchestrator.
+
+Use `add_atomic(module, title, outcome, required_checks?, executor?, version)` for an independently trackable outcome within the Module. Its reference is `M-001/A-001`; `edit_atomic(ref, ...)` partially edits its plan. `record_work result` uses that reference and the whole Module Version. Supply actual summary/checks/artifacts/gaps and state=done when complete. Whole-Module review covers this work; do not invent an Atomic reviewer or duplicate its result into the Module report.
+
+Standalone `A-001` and Epic `E-001` records are outside your assigned Module. Their allocation, membership and whole-Epic coordination belong to the orchestrator unless explicitly assigned. A Project/Epic integration Atomic can reference your Module as a participant; semantic changes or a new Module review may invalidate its recorded verification and the Epic approval. Tell the orchestrator when the changed interface requires renewed integration evidence, without manufacturing a commit for verification alone.
+
+Canceled Epic parents block Module/child writes. Parent cancellation never cascades. Recover current conditions and coordinate explicit parent reopen before continuing. Preserve stale-acceptance and partial-coverage facts in reports; unknown work is not zero.

@@ -1,8 +1,8 @@
 # Minimal core — technical implementation plan
 
-Status: minimal core implemented; release preparation is qualified for macOS arm64 and MCP Inspector CLI 2.7.0 as recorded in RELEASE_ACCEPTANCE.md. The [full structured roadmap](architecture-proposal.md) is preserved; [architecture.md](architecture.md) describes actual contracts. Project content is English; the orchestrator may translate complete status for the owner.
+Status: historical minimal-core plan, implemented and subsequently extended by [Epic/Atomic support](epic-atomic-implementation-plan.md); release preparation is qualified for macOS arm64 and MCP Inspector CLI 2.7.0 as recorded in RELEASE_ACCEPTANCE.md. The [full structured roadmap](architecture-proposal.md) is preserved; [architecture.md](architecture.md) describes actual contracts. Project content is English; the orchestrator may translate complete status for the owner.
 
-The implemented MVP is a file-backed work tracker inside the Rust binary: Project manifest, standalone Modules with Tasks, six business tools and diagnostic `get_status`. Broader roadmap behavior remains deferred.
+The original implemented MVP was a file-backed work tracker inside the Rust binary: Project manifest, standalone Modules with Tasks, six business tools and diagnostic `get_status`. Broader roadmap behavior remains deferred.
 
 ## 1. Scope and module boundaries
 
@@ -10,7 +10,7 @@ Keep the pinned Rust toolchain, rmcp, strict embedded MiniJinja, stdio, and one 
 
 Include configuration aliases, explicit initialization, Module/Task planning, current results, blockers, handoff, independent Module review, lexical work search, and one-call status. Reads create nothing. Microfixes and tiny projects may use no tracker.
 
-Preserve the broader roadmap, but defer Epics, Atomics, knowledge/document writers, Markdown retrieval, checkpoints, automatic Git, caches, semantic search, compaction, and live-agent queries. The documents explicitly describe proposed rather than implemented behavior: [product-direction.md](../docs/product-direction.md#L3), [architecture-proposal.md](../docs/architecture-proposal.md#L3).
+At this original implementation stage Epics and Atomics were deferred; they are now covered by [Epic/Atomic support](epic-atomic-implementation-plan.md). Preserve the broader roadmap and defer knowledge/document writers, Markdown retrieval, checkpoints, automatic Git, caches, semantic search, compaction, and live-agent queries. The documents explicitly describe proposed rather than implemented behavior: [product-direction.md](../docs/product-direction.md#L3), [architecture-proposal.md](../docs/architecture-proposal.md#L3).
 
 Use ordinary app modules:
 

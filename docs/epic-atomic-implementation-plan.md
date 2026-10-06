@@ -20,3 +20,12 @@ Implemented the complete hierarchy and nine new focused unit regressions. Agent 
 Observed checks: `cargo test --frozen -p agent-tasks core_epic_atomic` passed the initial seven new cases; `cargo test --frozen -p agent-tasks core_` passed 25 tests after the renderer recovery case; the ninth new partial-publication case passed independently. Directory-sync fault injection proves E/A allocator publication retains reservation gaps, owner publication retains visible reports, and stale-token replay refuses. Export update and contract check passed. Root coordinates the final full gate and coherent source/docs/tests commit.
 
 Limits: check/artifact/actor content remains reported evidence; no source/Git/runtime inspection or identity authentication is added. Integration freshness conservatively includes every participant Module review generation. Publication is one owner file per write; creation/attachment remains two explicit operations, without an invented cross-file transaction. Unknown dependencies retain healthy owner context and permit explicit detachment; acceptance and child writes refuse unknown ownership. Expanded records/new allocator writes require this implementation to read new fields; binary rollback is not data downgrade.
+
+## Local verification — 2026-10-06
+
+Source implementation: `87f805f`; real stdio regression commit: `509fd39`.
+
+- `cargo xtask check` passed: structural checks, formatter, workspace Clippy with warnings denied, 88 tests, rustdoc and frozen product build. The test groups were 28 product unit, 5 work stdio, 5 transport protocol, 9 delivery, 26 presentation and 15 xtask tests.
+- Explicit `cargo xtask contract update` followed by `cargo xtask contract check` passed; the exported ten-tool catalog matches the source.
+- Disposable documentation roots exercised all Atomic owners, Epic membership/review, Atomic-only Modules, stale dependency/write/read snapshots, cancellation/reopening, partial publication, degraded rendering and cold restart. A literal review produced by the actual 0.8.0 binary retains its approval basis/history through reads, a handoff write and restart.
+- Existing real/demo documentation, installed binaries and host configuration were not mutated. No push, release or installation occurred. These local checks do not extend the recorded release/host qualification or certify power-loss durability.

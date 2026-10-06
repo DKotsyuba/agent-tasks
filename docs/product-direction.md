@@ -1,17 +1,15 @@
 # Portable project tasks and knowledge — draft
 
-This document records the proposed product direction. The repository currently
-contains the standard MCP starter only. None of the storage, workflow, search,
-Git automation or documentation maintenance described below is implemented.
+This document records the proposed product direction. The repository implements the portable file-backed work core, lexical work search, one-call status and Epic/Atomic support. Git automation and knowledge/documentation maintenance below remain proposals; [architecture.md](architecture.md) defines actual behavior.
 Names and file layouts in this document are proposals, not an exported API.
 The more detailed [architecture proposal](architecture-proposal.md) models
 agent entry, work, status, retrieval and documentation maintenance. Its defaults
 and API examples remain proposals for discussion, not accepted implementation.
 
 The [minimal-core implementation plan](minimal-core-implementation-plan.md) is
-the current technical implementation target. The broader design below remains
+the historical first implementation target; [Epic/Atomic support](epic-atomic-implementation-plan.md) extends that core. The broader design below remains
 the roadmap for incremental additions demonstrated useful by agent experience.
-Technical planning has not started source implementation.
+Implemented behavior and broader proposed behavior must be distinguished using the current architecture, source and exported tool contracts.
 
 ## Product purpose
 
