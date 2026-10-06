@@ -1,5 +1,7 @@
 # Unified portable workflow
 
+Status: historical managed-1 baseline. [Epic core workflow](epic-core-plan.md) and its [technical implementation plan](epic-core-implementation-plan.md) supersede the lead/start/delivery/full-roster assumptions below for core-active records. The retained verification section describes that earlier baseline.
+
 Extend the existing guarded YAML evidence engine, purpose-based MCP tools and strict compact renderer. Keep one file per Module, including Tasks and Atomics. New records opt into `workflow` revision 1 with managed=true; legacy declarations use managed=false until explicit begin. Absence preserves pre-existing behavior and semantic approval digests. Reads never migrate. Explicit `record_work begin` opts a legacy owner into the new rules; existing approval remains historical only after that explicit semantic change. IDs, root allocator revision 2, no-clobber reservations, backup-before-normalization, root locks, closing reserve and disclosed partial outcomes remain.
 
 ## Data and ownership

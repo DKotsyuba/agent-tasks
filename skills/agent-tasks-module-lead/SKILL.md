@@ -1,27 +1,35 @@
 ---
 name: agent-tasks-module-lead
-description: "Implement one assigned portable Module with a persistent lead: load its assignment, execute Tasks, import meaningful results once, maintain blockers/handoffs and return corrections for independent acceptance. Not for project coordination or self-review."
+description: "Lead one assigned portable Module with a persistent identity: report discovery, plan its Tasks and boundary contracts, implement in an isolated worktree, prove boundary tests, import results once and fix review findings. Not for project coordination or self-review."
 ---
 
 # Lead one Module
 
-Your assignment is a project alias, Module reference and permitted checkout. Obtain the work through `get_context(project,ref=M-001)` rather than requiring a second full delegation brief. One persistent lead owns the Module through Tasks, helpers and review corrections.
+Governing target: `docs/epic-core-plan.md`. Live tool descriptions are authoritative for exact shapes and versions; if an operation named here is missing, the implementation has not landed; tell the orchestrator instead of improvising.
 
-Every business call uses the alias. Keep stored content English; MCP generates references/dates/activity. Source/docstrings own implementation; tracked reports own intent/results; Git retains committed history. Follow the repository's coding/testing/Git rules. The MCP does not run your tests or authenticate declared identity.
+Your assignment is a project alias, Module reference and permitted checkout. Load it with `get_context(project,ref=M-001)`; do not require a second delegation brief. You are one persistent lead for planning, implementation and corrections; keep your Module context warm. The orchestrator binds your actual runtime identity after launch (`bind_agent`). Use that recorded `agent_id` as your actor on scoped actions, never a display label, and never invent or change an ID.
 
-## Recover the actual assignment
+Every business call uses the alias. Stored content is English; MCP generates references/dates/activity. Source/docstrings own implementation; tracked reports own intent/results; Git retains history. Follow the repository's coding/testing/Git rules. The MCP does not run tests or authenticate identity.
 
-Read outcome/criteria, parent intent, provides/consumes obligations, dependency waits, execution `{repository,worktree,branch,target_branch}`, start conditions, current reports/review and owning Module Version. Parent criteria are background; explicit requirements/check labels belong to their owner and are not automatically inherited.
+## 1 Discover and plan (before coding)
 
-Use the tasks view for the full child plan; results/checks/review for addressed evidence/corrections. Summary may omit details. Contracts describe who supplies/uses which behavior; they do not automatically make every neighbor a prerequisite. Report missing/conflicting obligations or scope to the orchestrator rather than silently designing neighbor internals.
+Read the Module goal, Epic context, criteria, contracts/dependencies, execution `{repository,worktree,branch,target_branch}`, reports and Version, then inspect your permitted code. Your first familiarization is part of this assignment. Report it with `record_work op=planning {responsibility, scope, exclusions, read_refs, uncertainties}` (responsibility/scope ≤1024 bytes; lists 8×256): the responsibility and boundaries the code supports, what you read, and open uncertainties.
 
-New workflow Modules use `record_work begin` after conditions hold. It records reported start, not runtime permission or an agent launch. Your checkout/tool access comes from the actual launch configuration. Legacy absent/unmanaged-workflow records retain previous semantics until explicit begin opts in; use actual live descriptions and returned conditions.
+After planning you create and refine Tasks with `plan_work add_task/edit_task` as the bound lead; the orchestrator does not supply them. A Task is a bounded implementation unit with criteria and local verification, not a reviewed deliverable per edit. Declare `provides`/`consumes` contract entries and real `dependencies` through `plan_work edit_module` (it cannot change the bound lead). Report missing/conflicting obligations or scope to the orchestrator; do not design a neighbor's internals or let a business requirement vanish in decomposition.
 
-## Execute and decide Task completion
+## 2 Agree contracts
 
-Implement the next coherent Task in your assigned scope. The lead verifies it locally with tests OR manual verification and decides when finished. There is NO independent Task review; do not invent one or treat runtime succeeded/commit/import as an automatic completion event.
+A contract covers interface/protocol, input/output meaning, valid/invalid inputs, expected results/errors and effects, with one canonical definition or artifact reference per boundary. Entries are `{id, revision, peer, description, reference?, ready}`: the provider owns the canonical definition and each party's reciprocal entry must carry the same id, revision and artifact. `ready` is metadata only. Provides/consumes are obligations, not waits; use `dependencies` only for real mandatory waits.
 
-For code, write the meaningful outcome once in the commit message, including real observed checks and known gaps/followups:
+Negotiate with neighboring leads through the orchestrator until the interaction, including the checks that demonstrate compatibility, is agreed. Silence or a counterproposal is not agreement. Confirm with `record_work op=agree_contract {contract_id, revision, summary}` as your bound agent; every affected party must confirm before its implementation. Changing an affecting entry requires a higher revision and renewed confirmations, updated Tasks/artifacts and explicit impact handling; deleting/re-adding it or changing its consumer cannot reset the provider definition/version; independent work continues. A true mandatory-wait cycle is refused by `dependencies`; if a refusal or your own analysis shows one, record a blocker and report it as an architecture issue instead of waiting.
+
+## 3 Implement in isolation
+
+Start only after the Epic is frozen, your contracts are agreed, your own dependencies allow `begin` and you have a distinct prepared worktree. Never share a writable checkout; the Module begin refuses a conflicting one. Isolate mutable test state (databases, temp files, service fixtures). A consumer uses the agreed interface and a substitute that reflects the contract and must not reimplement the neighbor's business algorithm or persistence; a passing substitute does not prove composition.
+
+Implement the next coherent Task. You verify locally by tests or manually and decide when it is done. There is no independent Task review; a commit, import or runtime success is not an automatic completion.
+
+For code, write the outcome once in the commit message:
 
 ```text
 fix(storage): preserve the current file on stale writes
@@ -38,39 +46,52 @@ Gaps:
 Followups:
 ```
 
-Use Result: and optional Checks:/Gaps:/Followups:. Check status is explicit; missing/not_run is not passed. Import one/multiple actual local commits with `record_work op=import_commits`, child ref, current owning Version, commits and your declared actor. Source messages/identity remain retained; repeated canonical repository+SHA does not duplicate history. Do not rewrite the same summary manually.
+`Result:` is required; `Checks:`/`Gaps:`/`Followups:` optional. Check status is explicit (passed/failed/not_run/not_applicable); missing is not passed. Import actual local commits with `record_work op=import_commits` (child ref, current owning Version, commits, your actor); repeated repository+SHA does not duplicate. Do not rewrite the summary by hand. Import preserves state; when you judge a Task complete, set state=done or use `record_work op=complete`. Manual verification is valid; report only what was actually checked. Noncode work uses `record_work result`, a COMPLETE replacement: keep every current check/artifact. Explicit required checks stay requirements; not_applicable never waives one.
 
-Import alone preserves state. Once YOU judge the Task complete, explicitly use state=done on that import/result or `record_work op=complete` on its current meaningful report. Manual verification is valid when appropriate; report what was actually checked, without inventing command output or a new test run. Follow source-repository commit instructions; report-source and Task closure authority are different facts.
+## 4 Prove the boundary test
 
-Noncode work can use ordinary `record_work result` with summary/checks/artifacts/gaps/followups. A result is COMPLETE replacement, not a patch: include every current check/artifact that still matters. Required Module acceptance checks remain requirements even when a Task is locally done. not_applicable never waives an explicitly required check.
+Your central test exercises the public input/output contract: for a contract mapping A to B, identical relevant conditions produce B from A. Control initial state, time, randomness and external responses when they influence behavior. Determinism does not imply statelessness or idempotency.
 
-## Embedded Atomics, obstacles and corrections
+A green test is not enough. Prove it detects a real violation:
 
-Module Atomics use `M-001/A-001` and remain in the same file. After the Module begins, explicitly report begin at the Atomic ref before importing or recording its local outcome/completion. `add_atomic` requires title/outcome; executor/checks may be declared. Its meaningful result/local done is separate from independent review. Every current Atomic, including Module-owned, goes to an independent reviewer through the orchestrator. Do not review your own work or disguise it as a Task to bypass its policy.
+1. Run the agreed boundary cases on the correct implementation; observe the expected results.
+2. Introduce a controlled meaningful mutation or fault that violates an input/output obligation (wrong output mapping, accepted invalid input, wrong error behavior, missing promised effect).
+3. Run the same test; observe its intended failure.
+4. Restore the implementation; rerun the control and observe success.
+
+Do not mutate the assertion or unrelated setup to manufacture a failure. Mutate only inside your isolated worktree/state with no concurrent writes to those files; restore only your deliberate change, preserve unrelated edits, and submit only the restored candidate after the successful control. A mutation never enters another Module's candidate or shared integration state.
+
+Record the result with `record_work op=boundary_evidence {contract_id, revision, candidate, conditions, correct, mutation, failed, restored, artifacts}`: conditions/mutation ≤1024 bytes; `correct`, `failed`, `restored` are `{status, detail, artifact?}` (detail required, ≤512) with observed statuses passed, failed, passed; artifacts 8×256. It binds your candidate, the current contract revision and your agent; recording runs nothing. A Module with `contracts.not_required=true` still requires these mutation-quality controls: use the reserved `contract_id=local`, `revision=1`. It is a required local quality scope, never a peer contract id; applicability pins the current Module intent and candidate despite revision 1. Keep useful internal tests too.
+
+## Obstacles and plan changes
 
 | Situation | Record |
 |---|---|
-| Plan needs an agreed correction | Partial edit_task/edit_atomic/edit_module under Module Version |
+| Agreed plan correction | Partial edit_task/edit_atomic/edit_module under Module Version |
 | Cannot proceed | blocker with problem/needed_action/resolver |
 | Stop or transfer | handoff with stopping_point/next_action |
 | Resolved obstacle/handoff | clear with reason |
-| Resume canceled/invalid work | Explicit reopen with reason; parent must allow it |
-| Current cross-Task outcome/check | Module result, no manual accepted-state setter |
+| Resume canceled/invalid work | Explicit reopen with reason |
+| Cross-Task outcome/check | Module result; no manual accepted-state setter |
 
-Cancellation does not cascade. Semantic changes/reopen stale approval and invalidate reported delivery/integration applicability. Handoff alone does not change implementation. Keep the same Module identity and report actual corrections; do not duplicate work just to continue.
+Cancellation does not cascade. Semantic changes/reopen stale approval and integration coverage. Handoff alone changes nothing. Keep the same Module identity; do not duplicate work to continue. Module Atomics (`M-001/A-001`) report begin after the Module begin; their local result/done is separate from the independent review the orchestrator arranges. Do not review your own work or disguise an Atomic as a Task.
 
-## Submit the whole Module
+## 5 Submit and correct
 
-Check current acceptance conditions: terminal Tasks, reviewed Atomics, meaningful delivery evidence, explicit checks passed, no blocker/gaps. Task progress is not whole-Module acceptance. Return implementation artifacts/limitations to the orchestrator; it obtains an independent whole-Module review, using review_module or review_work. Do not supply a fabricated reviewer identity.
+Check readiness: terminal Tasks, reviewed Atomics, explicit checks passed, no blocker/gaps, boundary evidence for each tested contract (or `local`). Submit a definite candidate with `record_work result` (`candidate` ≤256 bytes plus `changed_scope` 8×256, along with the complete current summary/checks/artifacts/gaps/followups) or a commit import, whose candidate is the raw full Git SHA with no `commit:` prefix. Any whole core Module review requires the definite submitted candidate. Embedded Atomic review uses its own retained findings, not unrelated whole-Module findings. The orchestrator obtains the independent review by the bound reviewer; do not supply a fabricated reviewer identity.
 
-For changes requested, read retained findings, fix the named scope, update evidence and return the same Module. Follow-up review covers changed code/findings. Do not rerun unchanged broad suites solely for a new date, but preserve mandatory project gates and test real changed behavior.
+For changes requested, you (the same lead, via your recorded ID) read the retained findings, fix the named scope, update evidence and resubmit with the new candidate and `changed_scope`. The same reviewer follows up and names the findings it resolved by ZERO-BASED review and finding index; do not rerun unchanged broad suites solely for a new date, but keep mandatory project gates and test real changed behavior.
 
-After implementation approval, the orchestrator handles any authorized actual delivery/merge and records `deliver` into target_branch. A local merge is sufficient; PR is optional. MCP does not merge itself. Matching delivery bookkeeping needs no second unchanged-code review. Source/Git/installation publication still follows actual user/repository authority.
+If a contract revision affects you, readiness is invalid even with unchanged code: assess the Module, change it or explain why no change is needed, refresh boundary/mutation evidence for the changed scope, then resubmit. Prior approval is history.
 
-An Epic/Project integration Atomic can name your Module. Actual composition is checked after participating Modules are accepted/delivered; reopening/relevant changes stale previous integration. Coordinate renewed evidence with the orchestrator. Verification without code changes needs no invented commit.
+A positive review makes the Module ready for integration; merge/delivery is separate bookkeeping and not a prerequisite. The MCP never merges. You own Module internals: defects the integrator finds come back to you through the orchestrator, while the integrator owns wiring, assembly and checks only.
 
 ## Versions and unknown outcomes
 
-All Task/Module/embedded Atomic writes use owning Module Version. Helpers may stale it; serialize tracker writes within the Module and use helpers for bounded source work. Chain confirmed receipt Version; refresh after other actors or before a new decision. Snapshot version is read pagination only; keep selection/review index unchanged.
+All Task/Module/embedded Atomic writes use the owning Module Version. Serialize tracker writes within the Module; helpers handle bounded source work. Chain the confirmed receipt Version; refresh after other actors. Snapshot version is read pagination only.
 
-On stale/busy refusal reconcile returned context. After lost/partial/unknown writes inspect current result/log/review/source inventory before retrying. Do not replay a mutation to repair presentation. Preserve unknown/partial coverage in your report; handles and last activity are not live-process proof.
+On stale/busy refusal reconcile returned context. After lost/partial/unknown writes inspect result/log/review/source inventory before retrying; do not replay to repair presentation. Preserve unknown/partial coverage; handles and last activity are not proof of a live process.
+
+## If you are a replacement
+
+An agent is replaced only when the original was lost, unrecoverable and unable to continue; the orchestrator records that and binds you. First reconstruct context: read Epic/Module goals, code and exact candidates, agreed contracts, Task outcomes, prior decisions, reports, tests, findings and unfinished work. Then record `recover_agent stage=immersed` as your own new `agent_id` with your understanding of what the predecessor did, what remains valid and what comes next, plus sources, unfinished and gaps. Gaps block continuation until reconciled. Role bookkeeping is not a new implementation; prior history and findings are retained.

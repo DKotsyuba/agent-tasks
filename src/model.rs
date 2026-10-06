@@ -265,6 +265,12 @@ pub struct Report {
     pub reported_at: String,
     /// Declared author, preserved when a reviewer updates only checks.
     pub actor: Option<String>,
+    /// Definite submitted/restored candidate; absent preserves old reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<String>,
+    /// Eight explicit changed-scope references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_scope: Vec<String>,
 }
 
 /// A dated cancellation fact retained across explicit reopen.
@@ -392,6 +398,21 @@ pub struct Review {
     pub reviewer: Option<String>,
     /// At most eight changes to canonical checks with original snapshots.
     pub check_updates: Vec<CheckUpdate>,
+    /// Exact candidate reviewed; historical records may lack it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<String>,
+    /// Affecting canonical revisions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub contracts: BTreeMap<String, u64>,
+    /// Explicit follow-up scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_scope: Vec<String>,
+    /// Prior findings independently resolved here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_findings: Vec<FindingResolution>,
+    /// Explicit new-core provenance; candidate absence never silently makes a new finding legacy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub core_policy: bool,
 }
 
 /// Generated concise activity; not a second human-authored development diary.
@@ -454,6 +475,12 @@ pub struct Contract {
     pub reference: Option<String>,
     /// Reported readiness of this required interface; no certificate engine is inferred.
     pub ready: bool,
+    /// Canonical boundary identity; absence preserves old entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Positive exact canonical revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
 }
 
 /// A Module explicitly declares provided/consumed obligations or that none are required.
@@ -537,6 +564,9 @@ pub struct Workflow {
     pub environment: Option<String>,
     /// Integration Atomic's scenarios, at most eight 256-byte entries.
     pub scenarios: Vec<String>,
+    /// New Epic-core policy; None preserves existing workflow semantics/digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core: Option<CoreWorkflow>,
 }
 impl Workflow {
     /// Build a new inactive revision-1 workflow with no guessed preparation or delivery.
@@ -553,12 +583,17 @@ impl Workflow {
             delivery: None,
             environment: None,
             scenarios: Vec::new(),
+            core: None,
         }
     }
     /// Acceptance-related intent excludes dates and delivery bookkeeping.
     pub fn basis(&self) -> serde_json::Value {
-        serde_json::json!({"managed":self.managed,"active":self.active,"frozen_modules":self.frozen_modules,"execution":self.execution,
-            "contracts":self.contracts,"dependencies":self.dependencies,"environment":self.environment,"scenarios":self.scenarios})
+        let mut value = serde_json::json!({"managed":self.managed,"active":self.active,"frozen_modules":self.frozen_modules,"execution":self.execution,
+            "contracts":self.contracts,"dependencies":self.dependencies,"environment":self.environment,"scenarios":self.scenarios});
+        if let Some(core) = &self.core {
+            value["core"] = core.basis();
+        }
+        value
     }
 }
 
@@ -595,6 +630,267 @@ pub struct ImportedCommit {
     pub commit: crate::git_reports::ObservedCommit,
     /// Canonical owner/child references using this source, without duplicate Module-journal entries.
     pub targets: Vec<String>,
+}
+
+/// Durable participant role; runtime execution remains external.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole {
+    /// Persistent Module discovery/implementation owner.
+    Lead,
+    /// Persistent independent reviewer.
+    Reviewer,
+    /// Integration assembly/check owner.
+    Integrator,
+}
+/// Actual observed launch identity and supported contact references.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentIdentity {
+    /// Configured harness name, at most 64 bytes.
+    pub harness: String,
+    /// Actual launch-receipt ID, at most 256 bytes; not a display label.
+    pub agent_id: String,
+    /// Supported messaging address, at most 256 bytes.
+    pub communication_ref: String,
+    /// Optional supported resume address.
+    pub resume_ref: Option<String>,
+    /// Observed launch reference for uncertain outcome inspection.
+    pub launch_ref: String,
+}
+/// Explicit observed loss and inability to recover, not temporary unavailability.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentLoss {
+    /// Loss reason, at most 512 bytes.
+    pub reason: String,
+    /// Both loss and inability to continue/resume, at most 1024 bytes.
+    pub observation: String,
+    /// Generated UTC time.
+    pub at: String,
+}
+/// Replacement understanding; unresolved gaps prevent scoped continuation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Immersion {
+    /// Reconstructed prior work/continuation, at most 1024 bytes.
+    pub understanding: String,
+    /// Relevant sources/candidates/contracts, eight 256-byte references.
+    pub sources: Vec<String>,
+    /// Concrete unfinished work, eight 256-byte entries.
+    pub unfinished: Vec<String>,
+    /// Unresolved context gaps, eight entries; nonempty blocks use.
+    pub gaps: Vec<String>,
+    /// Actual replacement ID.
+    pub actor: String,
+    /// Generated UTC time.
+    pub at: String,
+}
+/// One current or historical participant tenure.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTerm {
+    /// Observed identity.
+    pub identity: AgentIdentity,
+    /// Irrecoverable loss, absent while assigned.
+    pub loss: Option<AgentLoss>,
+    /// Replacement must complete a new immersion.
+    pub needs_immersion: bool,
+    /// Last immersion report and gaps.
+    pub immersion: Option<Immersion>,
+}
+/// Current role and unpruned predecessor history.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentBinding {
+    /// Role in this owner.
+    pub role: AgentRole,
+    /// Current tenure.
+    pub current: AgentTerm,
+    /// Prior tenures, bounded by file capacity rather than eviction.
+    pub history: Vec<AgentTerm>,
+}
+/// Lead's code-supported decomposition, separate from execution/results.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Planning {
+    /// System responsibility, at most 1024 bytes.
+    pub responsibility: String,
+    /// Inclusion/read boundary, at most 1024 bytes.
+    pub scope: String,
+    /// Eight explicit 256-byte exclusions.
+    pub exclusions: Vec<String>,
+    /// Eight actual code/material references.
+    pub read_refs: Vec<String>,
+    /// Advisory uncertainties; necessary gaps use blockers/contracts.
+    pub uncertainties: Vec<String>,
+    /// Plan-intent digest excluding this report/results.
+    pub basis: String,
+    /// Actual lead ID.
+    pub actor: String,
+    /// Generated UTC time.
+    pub at: String,
+}
+/// Exact canonical confirmation by one participating actual lead.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Agreement {
+    /// Canonical boundary ID.
+    pub contract_id: String,
+    /// Exact positive revision.
+    pub revision: u64,
+    /// Practical agreement, at most 1024 bytes.
+    pub summary: String,
+    /// Related-contract semantic snapshot; not an attestation certificate.
+    pub snapshot: String,
+    /// Actual bound lead.
+    pub actor: String,
+    /// Generated UTC time.
+    pub at: String,
+}
+/// Meaningful reported test observation; MCP does not execute it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BoundaryObservation {
+    /// Actual control status.
+    pub status: CheckStatus,
+    /// Result/failure conditions, at most 512 bytes.
+    pub detail: String,
+    /// Optional primary output.
+    pub artifact: Option<String>,
+}
+/// Exact restored candidate/revision-bound mutation control.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BoundaryEvidence {
+    /// Canonical contract ID, or reserved local scope.
+    pub contract_id: String,
+    /// Exact positive tested revision.
+    pub revision: u64,
+    /// Restored candidate reference.
+    pub candidate: String,
+    /// Exact meaningful local goal/criteria/execution intent tested; absent older evidence is not current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_basis: Option<String>,
+    /// Controlled state/time/randomness/external responses.
+    pub conditions: String,
+    /// Correct implementation pass observation.
+    pub correct: BoundaryObservation,
+    /// Deliberate behavior violation, never an assertion edit.
+    pub mutation: String,
+    /// Intended mutant test failure.
+    pub failed: BoundaryObservation,
+    /// Restored implementation control pass.
+    pub restored: BoundaryObservation,
+    /// Eight primary evidence references.
+    pub artifacts: Vec<String>,
+    /// Declared isolated Module checkout.
+    pub worktree: String,
+    /// Actual reporting lead.
+    pub actor: String,
+    /// Generated UTC time.
+    pub at: String,
+}
+/// Existing criterion and explicit affected composition scope.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionScope {
+    /// Zero-based Epic criteria index.
+    pub index: usize,
+    /// Exact current criterion text.
+    pub text: String,
+    /// At most 32 affected canonical Modules.
+    pub modules: Vec<String>,
+}
+/// Actual business verification; pair-edge union never substitutes for E2E evidence.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CriterionVerification {
+    /// Exact criterion and affected set.
+    pub scope: CriterionScope,
+    /// Actual composition candidate.
+    pub candidate: String,
+    /// Actual environment.
+    pub environment: String,
+    /// Actual scenarios.
+    pub scenarios: Vec<String>,
+    /// Business outcome.
+    pub summary: String,
+    /// Reported passed check observations.
+    pub checks: Vec<Check>,
+    /// Primary artifacts.
+    pub artifacts: Vec<String>,
+    /// Optional ONE accepted integration covering the affected set.
+    pub integration_ref: Option<String>,
+    /// Captured current candidate/contract coverage key.
+    pub basis: String,
+    /// Declared actor.
+    pub actor: Option<String>,
+    /// Generated UTC time.
+    pub at: String,
+}
+/// Stable retained finding address and independent resolution.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FindingResolution {
+    /// Retained review index.
+    pub review_index: usize,
+    /// Finding index in the immutable review.
+    pub finding_index: usize,
+    /// Verified fix/disproof, at most 512 bytes.
+    pub summary: String,
+}
+/// Optional lead-first coordination; absence preserves managed-1/unmanaged historical behavior.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CoreWorkflow {
+    /// Three current role slots with retained histories; contact/loss data is not implementation drift.
+    pub bindings: Vec<AgentBinding>,
+    /// Current discovery/decomposition report.
+    pub planning: Option<Planning>,
+    /// Retained exact canonical confirmations.
+    pub agreements: Vec<Agreement>,
+    /// Retained provider/consumer definitions before removal/change; revision identity is never recycled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contract_history: Vec<Contracts>,
+    /// Retained candidate/revision controls.
+    pub boundary_evidence: Vec<BoundaryEvidence>,
+    /// Eight explicit business criterion scopes.
+    pub criterion_scopes: Vec<CriterionScope>,
+    /// Retained current/historical business verification.
+    pub criterion_verifications: Vec<CriterionVerification>,
+    /// Candidate/reopen generation; unrelated contact bookkeeping does not increment it.
+    pub implementation_epoch: u64,
+}
+impl CoreWorkflow {
+    /// Read current role without runtime polling.
+    pub fn binding(&self, role: AgentRole) -> Option<&AgentBinding> {
+        self.bindings.iter().find(|b| b.role == role)
+    }
+    /// Require the usable actual assigned ID; lost/unimmersed replacements refuse.
+    pub fn actor(&self, role: AgentRole, actor: &Option<String>) -> Result<(), String> {
+        let b = self
+            .binding(role)
+            .ok_or("Bind the observed runtime agent ID first.")?;
+        if b.current.loss.is_some()
+            || b.current.needs_immersion
+            || b.current
+                .immersion
+                .as_ref()
+                .is_some_and(|i| !i.gaps.is_empty())
+        {
+            return Err("Assigned role is lost or immersion has unresolved gaps.".into());
+        }
+        if actor.as_deref() != Some(b.current.identity.agent_id.as_str()) {
+            return Err("Use current actual bound agent_id as actor.".into());
+        }
+        Ok(())
+    }
+    /// Acceptance-related intent excludes runtime/recovery/observation dates.
+    pub fn basis(&self) -> serde_json::Value {
+        serde_json::json!({"planning":self.planning.as_ref().map(|p|(&p.responsibility,&p.scope,&p.exclusions,&p.read_refs)),
+            "criterion_scopes":self.criterion_scopes,"implementation_epoch":self.implementation_epoch})
+    }
 }
 
 /// Shared guarded evidence record: M owns embedded Tasks/Atomics, E owns references, A owns its result.
@@ -716,7 +1012,9 @@ fn report(value: &Option<Report>) -> Result<(), String> {
         strings(&r.gaps, 256, false)?;
         strings(&r.followups, 256, false)?;
         strings(&r.artifacts, 256, false)?;
-        optional(&r.actor, 128)?;
+        optional(&r.candidate, 256)?;
+        strings(&r.changed_scope, 256, false)?;
+        optional(&r.actor, 256)?;
         dates(&[&r.reported_at])?;
     }
     Ok(())
@@ -731,7 +1029,7 @@ fn checks(values: &[Check]) -> Result<(), String> {
     )?;
     for c in values {
         optional(&c.detail, 256)?;
-        optional(&c.actor, 128)?;
+        optional(&c.actor, 256)?;
         dates(&[&c.reported_at])?;
     }
     Ok(())
@@ -789,7 +1087,7 @@ impl Module {
             return Err("Completed Atomic has no result.".into());
         }
         for (id, basis) in &self.participant_basis {
-            if !self.participants.contains(id)
+            if (!self.participants.contains(id) && !(id == "core" && self.core().is_some()))
                 || basis.len() != 64
                 || !basis.bytes().all(|c| c.is_ascii_hexdigit())
             {
@@ -915,6 +1213,9 @@ impl Module {
                 }
             }
         }
+        if let Some(core) = self.core() {
+            core_fields(self, core)?;
+        }
         text(&self.title, 256)?;
         text(&self.outcome, 1024)?;
         strings(&self.required_checks, 64, true)?;
@@ -1007,7 +1308,7 @@ impl Module {
             self.target(&reason.target)?;
             text(&reason.action, 64)?;
             text(&reason.reason, 512)?;
-            optional(&reason.actor, 128)?;
+            optional(&reason.actor, 256)?;
             dates(&[&reason.at])?;
         }
         let mut last = 0;
@@ -1020,12 +1321,12 @@ impl Module {
             self.target(&l.target)?;
             text(&l.action, 64)?;
             optional(&l.note, 256)?;
-            optional(&l.actor, 128)?;
+            optional(&l.actor, 256)?;
             dates(&[&l.at])?;
         }
         for r in &self.reviews {
             text(&r.summary, 1024)?;
-            optional(&r.reviewer, 128)?;
+            optional(&r.reviewer, 256)?;
             dates(&[&r.at])?;
             if r.basis.len() != 64
                 || !r.basis.bytes().all(|c| c.is_ascii_hexdigit())
@@ -1081,6 +1382,40 @@ impl Module {
                 .map(|i| Some(self.tasks.len() + i))
                 .ok_or("Unknown Atomic.".into())
         }
+    }
+
+    /// Whether this owner explicitly uses lead-first Epic coordination.
+    pub fn core(&self) -> Option<&CoreWorkflow> {
+        self.workflow.as_ref().and_then(|w| w.core.as_ref())
+    }
+    /// Actual core lead identity, or legacy display identity only when no core policy is active.
+    /// Loss/immersion affects usability separately and never fabricates or deletes an observed ID.
+    pub fn lead_identity(&self) -> Option<&str> {
+        if let Some(core) = self.core() {
+            return core
+                .binding(AgentRole::Lead)
+                .map(|b| b.current.identity.agent_id.as_str());
+        }
+        self.lead.as_ref().map(|l| l.name.as_str())
+    }
+    /// Mutable coordination after explicit adoption/new creation.
+    pub fn core_mut(&mut self) -> Result<&mut CoreWorkflow, String> {
+        self.workflow
+            .as_mut()
+            .and_then(|w| w.core.as_mut())
+            .ok_or("Explicitly adopt_core first.".into())
+    }
+    /// Discovery intent excludes its expected Task/contract/dependency outputs and all execution results.
+    /// Significant goal/criteria/execution changes deliberately require renewed familiarization.
+    pub fn plan_basis(&self) -> Result<String, String> {
+        let value = serde_json::json!({"title":self.title,"outcome":self.outcome,"criteria":self.criteria,"checks":self.required_checks,
+            "execution":self.workflow.as_ref().and_then(|w|w.execution.as_ref())});
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&value).map_err(|_| "Cannot encode planning basis.")?
+            )
+        ))
     }
 
     /// Iterate embedded Tasks then Atomics without loading any other record.
@@ -1220,7 +1555,7 @@ impl Module {
             missing.push("Complete the local Atomic outcome before review.".into());
         }
         if self.modern() && self.id.starts_with("M-") {
-            if self.lead.is_none()
+            if self.lead_identity().is_none()
                 || self.criteria.is_empty()
                 || self
                     .workflow
@@ -1234,7 +1569,9 @@ impl Module {
                 .workflow
                 .as_ref()
                 .and_then(|w| w.contracts.as_ref())
-                .is_none_or(|c| c.provides.iter().chain(&c.consumes).any(|c| !c.ready))
+                .is_none_or(|c| {
+                    self.core().is_none() && c.provides.iter().chain(&c.consumes).any(|c| !c.ready)
+                })
             {
                 missing.push("Current required contracts must be declared and ready.".into());
             }
@@ -1306,7 +1643,11 @@ impl Module {
                 r.epoch == self.review_epoch && self.basis().is_ok_and(|b| b == r.basis);
             if applicable {
                 return if r.verdict == Verdict::Accepted {
-                    if self.id.starts_with("M-") && self.modern() && !self.delivered() {
+                    if self.id.starts_with("M-")
+                        && self.modern()
+                        && self.core().is_none()
+                        && !self.delivered()
+                    {
                         "reviewed; delivery pending"
                     } else {
                         "accepted"
@@ -1398,9 +1739,152 @@ impl Module {
     }
 }
 
-/// Acceptance-related report projection; no dates or actor labels participate.
+/// Validate all new coordination facts without rewriting legacy records or inventing historical state.
+fn core_fields(owner: &Module, core: &CoreWorkflow) -> Result<(), String> {
+    if core.contract_history.len() > 16 {
+        return Err("Retained contract history capacity exceeded.".into());
+    }
+    for declaration in &core.contract_history {
+        for entries in [&declaration.provides, &declaration.consumes] {
+            if entries.len() > 8 {
+                return Err("Retained contract count exceeded.".into());
+            }
+            for entry in entries {
+                number(&entry.peer, "M-")?;
+                text(&entry.description, 1024)?;
+                optional(&entry.reference, 256)?;
+                text(
+                    entry
+                        .id
+                        .as_deref()
+                        .ok_or("Missing retained contract identity.")?,
+                    64,
+                )?;
+                if entry.revision.is_none_or(|r| r == 0) {
+                    return Err("Invalid retained revision.".into());
+                }
+            }
+        }
+    }
+    if let Some(c) = owner.workflow.as_ref().and_then(|w| w.contracts.as_ref()) {
+        for e in c.provides.iter().chain(&c.consumes) {
+            if let Some(id) = &e.id {
+                text(id, 64)?;
+                if id == "local" {
+                    return Err("local is reserved for Module-local quality observations.".into());
+                }
+            }
+            if e.revision == Some(0) {
+                return Err("Canonical revision must be positive.".into());
+            }
+        }
+    }
+    if core.bindings.len() > 3 || core.criterion_scopes.len() > 8 {
+        return Err("Core role/criterion limit exceeded.".into());
+    }
+    let mut roles = Vec::new();
+    for b in &core.bindings {
+        if roles.contains(&b.role) {
+            return Err("Duplicate persistent role.".into());
+        }
+        roles.push(b.role);
+        for term in std::iter::once(&b.current).chain(&b.history) {
+            let i = &term.identity;
+            text(&i.harness, 64)?;
+            text(&i.agent_id, 256)?;
+            text(&i.communication_ref, 256)?;
+            optional(&i.resume_ref, 256)?;
+            text(&i.launch_ref, 256)?;
+            if let Some(loss) = &term.loss {
+                text(&loss.reason, 512)?;
+                text(&loss.observation, 1024)?;
+                dates(&[&loss.at])?;
+            }
+            if let Some(r) = &term.immersion {
+                text(&r.understanding, 1024)?;
+                strings(&r.sources, 256, false)?;
+                strings(&r.unfinished, 256, false)?;
+                strings(&r.gaps, 256, false)?;
+                text(&r.actor, 256)?;
+                dates(&[&r.at])?;
+            }
+        }
+    }
+    if let Some(p) = &core.planning {
+        text(&p.responsibility, 1024)?;
+        text(&p.scope, 1024)?;
+        strings(&p.exclusions, 256, false)?;
+        strings(&p.read_refs, 256, false)?;
+        strings(&p.uncertainties, 256, false)?;
+        digest(&p.basis)?;
+        text(&p.actor, 256)?;
+        dates(&[&p.at])?;
+    }
+    for a in &core.agreements {
+        text(&a.contract_id, 64)?;
+        if a.revision == 0 {
+            return Err("Contract revision must be positive.".into());
+        }
+        text(&a.summary, 1024)?;
+        digest(&a.snapshot)?;
+        text(&a.actor, 256)?;
+        dates(&[&a.at])?;
+    }
+    for e in &core.boundary_evidence {
+        text(&e.contract_id, 64)?;
+        if e.revision == 0 {
+            return Err("Tested revision must be positive.".into());
+        }
+        text(&e.candidate, 256)?;
+        text(&e.conditions, 1024)?;
+        text(&e.mutation, 1024)?;
+        text(&e.worktree, 1024)?;
+        text(&e.actor, 256)?;
+        dates(&[&e.at])?;
+        strings(&e.artifacts, 256, false)?;
+        for o in [&e.correct, &e.failed, &e.restored] {
+            text(&o.detail, 512)?;
+            optional(&o.artifact, 256)?;
+        }
+    }
+    for scope in &core.criterion_scopes {
+        text(&scope.text, 1024)?;
+        if owner.criteria.get(scope.index) != Some(&scope.text) {
+            return Err("Criterion index/text must match current Epic criteria.".into());
+        }
+        if scope.modules.len() > 32 {
+            return Err("Criterion Module set exceeds32.".into());
+        }
+        let mut seen = BTreeSet::new();
+        for id in &scope.modules {
+            number(id, "M-")?;
+            if !seen.insert(id) || !owner.modules.contains(id) {
+                return Err("Invalid/duplicate/outside-roster criterion Module.".into());
+            }
+        }
+    }
+    for v in &core.criterion_verifications {
+        text(&v.scope.text, 1024)?;
+        text(&v.candidate, 256)?;
+        text(&v.environment, 1024)?;
+        text(&v.summary, 1024)?;
+        strings(&v.scenarios, 256, true)?;
+        strings(&v.artifacts, 256, false)?;
+        optional(&v.integration_ref, 256)?;
+        checks(&v.checks)?;
+        digest(&v.basis)?;
+        optional(&v.actor, 256)?;
+        dates(&[&v.at])?;
+    }
+    Ok(())
+}
+
+/// Acceptance report projection keeps old digests exact when new candidate/scope fields are absent.
 fn report_basis(report: &Option<Report>) -> serde_json::Value {
-    report.as_ref().map(|r| serde_json::json!({"summary":r.summary,"gaps":r.gaps,"followups":r.followups,"artifacts":r.artifacts})).unwrap_or(serde_json::Value::Null)
+    report.as_ref().map(|r|{let mut v=serde_json::json!({"summary":r.summary,"gaps":r.gaps,"followups":r.followups,"artifacts":r.artifacts});
+        if r.candidate.is_some(){v["candidate"]=serde_json::json!(r.candidate);}
+        if !r.changed_scope.is_empty(){v["changed_scope"]=serde_json::json!(r.changed_scope);}
+        v}).unwrap_or(serde_json::Value::Null)
 }
 
 /// Acceptance-related check projection, deterministically ordered by label.
@@ -1425,7 +1909,7 @@ fn digest(value: &str) -> Result<(), String> {
 /// Validate one retained verdict's bounds, provenance and monotonic owner epoch.
 fn review_fields(r: &Review, epoch: u64) -> Result<(), String> {
     text(&r.summary, 1024)?;
-    optional(&r.reviewer, 128)?;
+    optional(&r.reviewer, 256)?;
     dates(&[&r.at])?;
     digest(&r.basis)?;
     if r.epoch > epoch || r.findings.len() > 8 || r.check_updates.len() > 8 {

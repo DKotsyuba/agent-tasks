@@ -685,6 +685,11 @@ impl Store {
     /// Compute the acceptance basis, extending Epic intent with current member evidence and generations.
     pub fn work_basis(&self, m: &Module) -> Result<String> {
         let own = m.basis().map_err(invalid)?;
+        if m.core().is_some() && m.id.starts_with("M-") {
+            return semantic_digest(
+                &serde_json::json!({"own":own,"contracts":self.contract_basis(m)?}),
+            );
+        }
         if !m.id.starts_with("E-") {
             return Ok(own);
         }
@@ -712,8 +717,9 @@ impl Store {
                     Ok(child) if child.value.state == model::ModuleState::Canceled => (),
                     Ok(child) => {
                         let phase = self.phase(&child.value);
-                        let expected = if id.starts_with("M-") || child.value.modern() || m.modern()
-                        {
+                        let expected = if child.value.core().is_some() && id.starts_with("M-") {
+                            "ready for integration"
+                        } else if id.starts_with("M-") || child.value.modern() || m.modern() {
                             "accepted"
                         } else {
                             "done"
@@ -727,7 +733,7 @@ impl Store {
                 }
             }
         }
-        if m.id.starts_with("E-") && m.modern() {
+        if m.id.starts_with("E-") && m.modern() && m.core().is_none() {
             let active = m
                 .modules
                 .iter()
@@ -758,6 +764,77 @@ impl Store {
             }
         }
 
+        if let Some(core) = m.core() {
+            if m.id.starts_with("M-") {
+                missing.extend(self.core_review_gaps(m));
+            }
+            if m.id.starts_with("E-") {
+                if m.workflow
+                    .as_ref()
+                    .is_none_or(|w| w.frozen_modules.is_none())
+                {
+                    missing.push("Freeze negotiated roster after lead agreement.".into());
+                }
+                for (index, text) in m.criteria.iter().enumerate() {
+                    let scope = core
+                        .criterion_scopes
+                        .iter()
+                        .find(|s| s.index == index && s.text == *text);
+                    match scope {
+                        None => missing.push(format!(
+                            "Criterion {index}: exact affected Module scope missing."
+                        )),
+                        Some(scope) => {
+                            if !core.criterion_verifications.iter().rev().any(|v| {
+                                v.scope == *scope
+                                    && self
+                                        .criterion_basis(scope, v.integration_ref.as_deref())
+                                        .is_ok_and(|b| b == v.basis)
+                                    && v.checks
+                                        .iter()
+                                        .all(|c| c.status == model::CheckStatus::Passed)
+                                    && !v.checks.is_empty()
+                            }) {
+                                missing.push(format!("Criterion {index}: CURRENT actual affected-set/E2E verification missing."));
+                            }
+                        }
+                    }
+                }
+                let mut boundaries = std::collections::BTreeSet::new();
+                for id in &m.modules {
+                    if let Ok(module) = self.module(id) {
+                        for cid in self.contract_ids(&module.value) {
+                            if let Ok(f) = self.contract_facts(&cid)
+                                && f.parties.iter().filter(|p| m.modules.contains(p)).count() >= 2
+                            {
+                                boundaries.insert(cid);
+                            }
+                        }
+                    }
+                }
+                for cid in boundaries {
+                    let covered = self.contract_facts(&cid).is_ok_and(|f| {
+                        f.parties
+                            .iter()
+                            .filter(|p| **p != f.provider && m.modules.contains(p))
+                            .all(|consumer| {
+                                m.atomic_members.iter().any(|id| {
+                                    self.module(id).is_ok_and(|a| {
+                                        a.value.participants.contains(&f.provider)
+                                            && a.value.participants.contains(consumer)
+                                            && self.phase(&a.value) == "accepted"
+                                    })
+                                })
+                            })
+                    });
+                    if !covered {
+                        missing.push(format!(
+                            "{cid}: current actual connected integration coverage missing."
+                        ));
+                    }
+                }
+            }
+        }
         if m.modern() {
             if let Err(e) = self.links(m) {
                 missing.push(format!("Requirements unknown/invalid: {}", e.message));
@@ -771,7 +848,18 @@ impl Store {
             }
         }
         if m.id.starts_with("A-") && !m.participants.is_empty() {
-            if m.modern() {
+            if m.core().is_some()
+                && m.result
+                    .as_ref()
+                    .and_then(|r| r.candidate.as_ref())
+                    .is_none()
+            {
+                missing.push(
+                    "Report the definite actual assembly candidate before integration acceptance."
+                        .into(),
+                );
+            }
+            if m.modern() && m.core().is_none() {
                 for id in &m.participants {
                     match self.module(id) {
                         Ok(participant)
@@ -787,10 +875,20 @@ impl Store {
                     }
                 }
             }
-            match self.participant_basis(&m.participants) {
+            if m.core().is_some() {
+                match self.coverage_basis(&m.participants) {
+                    Ok(b) if m.participant_basis.get("core") == Some(&b) => (),
+                    Ok(_) => {
+                        missing.push("Integration candidate/contract coverage is stale.".into())
+                    }
+                    Err(e) => missing.push(e.message),
+                }
+            } else {
+                match self.participant_basis(&m.participants) {
                 Ok(basis) if basis == m.participant_basis => (),
                 Ok(_) => missing.push("Integration evidence is stale; report a fresh result against current participants.".into()),
                 Err(e) => missing.push(format!("Integration participant unreadable: {}", e.message)),
+            }
             }
         }
         missing
@@ -800,6 +898,29 @@ impl Store {
     pub fn phase(&self, m: &Module) -> &'static str {
         if m.state == model::ModuleState::Canceled {
             return "canceled";
+        }
+        if m.id.starts_with("M-") && m.core().is_some() {
+            if let Some(r) = m.reviews.last() {
+                let current =
+                    r.epoch == m.review_epoch && self.work_basis(m).is_ok_and(|b| b == r.basis);
+                if current
+                    && r.verdict == model::Verdict::Accepted
+                    && self.core_review_gaps(m).is_empty()
+                {
+                    return "ready for integration";
+                }
+                if current && r.verdict == model::Verdict::ChangesRequested {
+                    return "changes requested";
+                }
+                if r.verdict == model::Verdict::Accepted {
+                    return "stale approval";
+                }
+            }
+            return if m.workflow.as_ref().is_some_and(|w| w.active) {
+                "working"
+            } else {
+                "planning"
+            };
         }
         if m.id.starts_with("A-") {
             if !m.modern() {
@@ -991,7 +1112,55 @@ impl Store {
         }
         if let Some(w) = &m.workflow {
             if m.id.starts_with("M-") {
-                if m.lead.is_none() {
+                if let Some(core) = m.core() {
+                    if let Err(e) = core.actor(
+                        model::AgentRole::Lead,
+                        &core
+                            .binding(model::AgentRole::Lead)
+                            .map(|b| b.current.identity.agent_id.clone()),
+                    ) {
+                        missing.push(e);
+                    }
+                    if !core
+                        .planning
+                        .as_ref()
+                        .is_some_and(|p| m.plan_basis().is_ok_and(|b| b == p.basis))
+                    {
+                        missing
+                            .push("Current bound lead discovery/planning missing or stale.".into());
+                    }
+                    missing.extend(self.agreement_gaps(m));
+                    if let Ok(Some(parent)) = self.parent(&m.id)
+                        && parent
+                            .workflow
+                            .as_ref()
+                            .is_none_or(|w| w.frozen_modules.is_none())
+                    {
+                        missing.push(
+                            "Freeze Epic after relevant lead agreement before coding.".into(),
+                        );
+                    }
+                    if let Some(execution) = &w.execution
+                        && let Ok(scan) = self.scan(None)
+                    {
+                        for peer in scan.modules.iter().map(|s| &s.value).filter(|p| {
+                            p.id != m.id
+                                && p.id.starts_with("M-")
+                                && p.core().is_some()
+                                && p.workflow.as_ref().is_some_and(|w| w.active)
+                        }) {
+                            if peer
+                                .workflow
+                                .as_ref()
+                                .and_then(|w| w.execution.as_ref())
+                                .is_some_and(|e| e.worktree == execution.worktree)
+                            {
+                                missing.push(format!("{} shares the writable Module checkout; isolate before implementation.",peer.id));
+                            }
+                        }
+                    }
+                }
+                if m.core().is_none() && m.lead.is_none() {
                     missing.push("Declare a known Module lead.".into());
                 }
                 if m.criteria.is_empty() {
@@ -1001,15 +1170,18 @@ impl Store {
                     missing
                         .push("Declare repository/worktree/branch/target_branch execution.".into());
                 }
-                match &w.contracts {
-                    None => {
-                        missing.push("Declare provides/consumes or explicit not_required.".into())
-                    }
-                    Some(c) => {
-                        for contract in c.provides.iter().chain(&c.consumes) {
-                            if !contract.ready {
-                                missing
-                                    .push(format!("Contract with {} is not ready.", contract.peer));
+                if m.core().is_none() {
+                    match &w.contracts {
+                        None => missing
+                            .push("Declare provides/consumes or explicit not_required.".into()),
+                        Some(c) => {
+                            for contract in c.provides.iter().chain(&c.consumes) {
+                                if !contract.ready {
+                                    missing.push(format!(
+                                        "Contract with {} is not ready.",
+                                        contract.peer
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1020,9 +1192,11 @@ impl Store {
                             let met = match dependency.condition {
                                 model::DependencyCondition::Accepted => {
                                     self.phase(&target.value) == "accepted"
+                                        || self.module_ready(&target.value)
                                 }
                                 model::DependencyCondition::Delivered => {
-                                    self.phase(&target.value) == "accepted"
+                                    (self.phase(&target.value) == "accepted"
+                                        || self.module_ready(&target.value))
                                         && target.value.delivered()
                                 }
                             };
@@ -1041,15 +1215,67 @@ impl Store {
                 }
             }
             if m.id.starts_with("A-") {
-                if m.lead.is_none() {
+                if let Some(core) = m.core().filter(|_| !m.participants.is_empty()) {
+                    if let Err(e) = core.actor(
+                        model::AgentRole::Integrator,
+                        &core
+                            .binding(model::AgentRole::Integrator)
+                            .map(|b| b.current.identity.agent_id.clone()),
+                    ) {
+                        missing.push(e);
+                    }
+                    if !m.participants.is_empty() {
+                        if !self.connected(&m.participants).unwrap_or(false) {
+                            missing.push("Integration needs >=2 connected ready Modules.".into());
+                        }
+                        if let Err(e) = self.coverage_basis(&m.participants) {
+                            missing.push(e.message);
+                        }
+                        if w.execution.is_none() {
+                            missing.push("Declare a separate actual integration checkout.".into());
+                        }
+                        if let Some(e) = &w.execution {
+                            for id in &m.participants {
+                                if self.module(id).is_ok_and(|p| {
+                                    p.value
+                                        .workflow
+                                        .as_ref()
+                                        .and_then(|w| w.execution.as_ref())
+                                        .is_some_and(|m| m.worktree == e.worktree)
+                                }) {
+                                    missing.push(format!(
+                                        "{id}: integration checkout must be distinct."
+                                    ));
+                                }
+                            }
+                        }
+                        if let (Some(environment), true) = (&w.environment, !w.scenarios.is_empty())
+                        {
+                            if let Ok(Some(existing)) = self.covered_integration(
+                                &m.participants,
+                                environment,
+                                &w.scenarios,
+                                Some(&m.id),
+                            ) {
+                                missing.push(format!("Current identical coverage already exists at {existing}; do not duplicate a job."));
+                            }
+                            match self.pending_integration(&m.participants,environment,&w.scenarios,Some(&m.id)){
+                                Ok(Some(existing))=>missing.push(format!("Equivalent active/pending integration claim {existing}; inspect its outcome before another dispatch.")),
+                                Err(e)=>missing.push(e.message),Ok(None)=>(),
+                            }
+                        }
+                    }
+                }
+                if (m.core().is_none() || m.participants.is_empty()) && m.lead.is_none() {
                     missing.push("Declare an Atomic executor.".into());
                 }
                 if !m.participants.is_empty() {
                     if w.environment.is_none() || w.scenarios.is_empty() {
                         missing.push("Declare real integration environment and scenarios.".into());
                     }
-                    for id in &m.participants {
-                        match self.module(id) {
+                    if m.core().is_none() {
+                        for id in &m.participants {
+                            match self.module(id) {
                             Ok(target)
                                 if self.phase(&target.value) == "accepted"
                                     && target.value.delivered() => {}
@@ -1058,6 +1284,7 @@ impl Store {
                             )),
                             Err(e) => missing
                                 .push(format!("{id}: unreadable participant ({})", e.message)),
+                        }
                         }
                     }
                 }
@@ -1644,4 +1871,499 @@ fn blocking_cycle(
     visiting.remove(id);
     done.insert(id.into());
     Ok(())
+}
+
+/// Canonical provider-owned boundary facts resolved from reciprocal Module obligations.
+pub struct ContractFacts {
+    /// Stable canonical ID.
+    pub id: String,
+    /// Exact positive canonical revision.
+    pub revision: u64,
+    /// Module owning the definition.
+    pub provider: String,
+    /// Participating Modules, including provider.
+    pub parties: Vec<String>,
+    /// Practical exact canonical/party semantic digest.
+    pub snapshot: String,
+    /// Explicit unresolved reciprocal/revision/artifact/confirmation gaps.
+    pub gaps: Vec<String>,
+}
+impl Store {
+    /// Resolve one canonical boundary without inferring a wait or treating ready=true as agreement.
+    pub fn contract_facts(&self, id: &str) -> Result<ContractFacts> {
+        model::text(id, 64).map_err(invalid)?;
+        let scan = self.scan(None)?;
+        if !scan.complete {
+            return Err(invalid(
+                "Contract scope has unreadable/incomplete Module facts.",
+            ));
+        }
+        let providers = scan
+            .modules
+            .iter()
+            .filter(|m| m.value.id.starts_with("M-"))
+            .flat_map(|m| {
+                m.value
+                    .workflow
+                    .iter()
+                    .flat_map(|w| w.contracts.iter())
+                    .flat_map(move |c| {
+                        c.provides
+                            .iter()
+                            .filter(move |e| e.id.as_deref() == Some(id))
+                            .map(move |e| (&m.value, e))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let provider_ids = providers
+            .iter()
+            .map(|(m, _)| m.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if provider_ids.len() != 1 {
+            return Err(invalid(format!(
+                "Contract {id}: requires one canonical provider; found {}.",
+                provider_ids.len()
+            )));
+        }
+        let (provider, first) = providers
+            .first()
+            .ok_or_else(|| invalid("Missing canonical provider."))?;
+        let revision = first
+            .revision
+            .filter(|n| *n > 0)
+            .ok_or_else(|| invalid("Canonical contract revision is missing."))?;
+        let mut parties = std::collections::BTreeSet::from([provider.id.clone()]);
+        let mut declarations = Vec::new();
+        let mut gaps = Vec::new();
+        for (m, e) in &providers {
+            if e.revision != Some(revision)
+                || e.reference != first.reference
+                || e.description != first.description
+            {
+                gaps.push(format!("{id}: canonical provider definitions disagree."));
+            }
+            parties.insert(e.peer.clone());
+            declarations.push(serde_json::json!({"module":m.id,"direction":"provides","peer":e.peer,"id":e.id,"revision":e.revision,"reference":e.reference,"description":e.description}));
+            match scan.modules.iter().find(|m|m.value.id==e.peer).and_then(|m|m.value.workflow.as_ref()).and_then(|w|w.contracts.as_ref()).and_then(|c|c.consumes.iter().find(|v|v.peer==provider.id&&v.id.as_deref()==Some(id))) {
+                Some(c) if c.revision==Some(revision)&&c.reference==first.reference=>declarations.push(serde_json::json!({"module":e.peer,"direction":"consumes","peer":c.peer,"id":c.id,"revision":c.revision,"reference":c.reference,"description":c.description})),
+                _=>gaps.push(format!("{}: confirm reciprocal consumes {id} revision {revision} and canonical artifact.",e.peer)),
+            }
+        }
+        for consumer in &scan.modules {
+            if let Some(c) = consumer
+                .value
+                .workflow
+                .as_ref()
+                .and_then(|w| w.contracts.as_ref())
+            {
+                for e in c.consumes.iter().filter(|e| e.id.as_deref() == Some(id)) {
+                    if e.peer != provider.id
+                        || !providers.iter().any(|(_, p)| p.peer == consumer.value.id)
+                    {
+                        gaps.push(format!(
+                            "{}: unpaired or foreign consumes {id}.",
+                            consumer.value.id
+                        ));
+                    }
+                }
+            }
+        }
+        declarations.sort_by_key(|v| v.to_string());
+        let snapshot = semantic_digest(
+            &serde_json::json!({"id":id,"revision":revision,"provider":provider.id,"declarations":declarations}),
+        )?;
+        Ok(ContractFacts {
+            id: id.into(),
+            revision,
+            provider: provider.id.clone(),
+            parties: parties.into_iter().collect(),
+            snapshot,
+            gaps,
+        })
+    }
+    /// Relevant canonical facts, returning named failures rather than guessing external readiness.
+    pub fn contract_ids(&self, m: &Module) -> Vec<String> {
+        m.workflow
+            .iter()
+            .flat_map(|w| w.contracts.iter())
+            .flat_map(|c| c.provides.iter().chain(&c.consumes))
+            .filter_map(|e| e.id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+    /// Check all exact affected-party confirmations; old lead history remains an agreed Module fact.
+    pub fn agreement_gaps(&self, m: &Module) -> Vec<String> {
+        let mut gaps = Vec::new();
+        if m.core().is_some()
+            && m.workflow
+                .as_ref()
+                .and_then(|w| w.contracts.as_ref())
+                .is_none_or(|c| !c.not_required && c.provides.is_empty() && c.consumes.is_empty())
+        {
+            gaps.push("Explicitly declare contracts or not_required=true; unknown obligations cannot be treated as none.".into());
+        }
+        if m.workflow
+            .as_ref()
+            .and_then(|w| w.contracts.as_ref())
+            .is_some_and(|c| {
+                c.provides
+                    .iter()
+                    .chain(&c.consumes)
+                    .any(|e| e.id.is_none() || e.revision.is_none_or(|r| r == 0))
+            })
+        {
+            gaps.push(
+                "Declare canonical id and positive revision for every affecting boundary.".into(),
+            );
+        }
+        for id in self.contract_ids(m) {
+            match self.contract_facts(&id) {
+                Err(e) => gaps.push(e.message),
+                Ok(f) => {
+                    gaps.extend(f.gaps);
+                    for party in &f.parties {
+                        match self.module(party) {
+                            Ok(p) => {
+                                let agreed = p.value.core().is_some_and(|c| {
+                                    c.agreements.iter().rev().any(|a| {
+                                        a.contract_id == id
+                                            && a.revision == f.revision
+                                            && a.snapshot == f.snapshot
+                                    })
+                                });
+                                if !agreed {
+                                    gaps.push(format!("{party}: actual lead agreement missing for {id} revision {}.",f.revision));
+                                }
+                            }
+                            Err(e) => {
+                                gaps.push(format!("{party}: agreement unknown ({})", e.message))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        gaps
+    }
+    /// Snapshot only affecting canonical obligations, excluding unrelated peer metadata.
+    pub fn contract_basis(&self, m: &Module) -> Result<serde_json::Value> {
+        let mut values = Vec::new();
+        for id in self.contract_ids(m) {
+            let f = self.contract_facts(&id)?;
+            values.push(serde_json::json!({"id":f.id,"revision":f.revision,"snapshot":f.snapshot}));
+        }
+        Ok(serde_json::json!(values))
+    }
+    /// Current exact accepted candidate-set/related-contract coverage, excluding role/contact/delivery bookkeeping.
+    pub fn coverage_basis(&self, participants: &[String]) -> Result<String> {
+        let mut modules = Vec::new();
+        let mut contracts = std::collections::BTreeSet::new();
+        for id in participants {
+            let m = self.module(id)?.value;
+            if !self.module_ready(&m) {
+                return Err(invalid(format!(
+                    "{id}: current positive candidate review is not ready."
+                )));
+            }
+            let candidate = m
+                .result
+                .as_ref()
+                .and_then(|r| r.candidate.as_ref())
+                .ok_or_else(|| invalid(format!("{id}: definite candidate missing.")))?;
+            modules.push(serde_json::json!({"id":id,"candidate":candidate,"implementation_epoch":m.core().map(|c|c.implementation_epoch)}));
+            for cid in self.contract_ids(&m) {
+                let f = self.contract_facts(&cid)?;
+                if f.parties
+                    .iter()
+                    .filter(|p| participants.contains(p))
+                    .count()
+                    >= 2
+                {
+                    contracts.insert(cid);
+                }
+            }
+        }
+        modules.sort_by_key(|v| v.to_string());
+        let mut boundaries = Vec::new();
+        for id in contracts {
+            let f = self.contract_facts(&id)?;
+            boundaries
+                .push(serde_json::json!({"id":id,"revision":f.revision,"snapshot":f.snapshot}));
+        }
+        semantic_digest(&serde_json::json!({"modules":modules,"contracts":boundaries}))
+    }
+    /// Current intrinsic Module review readiness; final target-branch delivery is independent in core mode.
+    pub fn module_ready(&self, m: &Module) -> bool {
+        if m.state == model::ModuleState::Canceled {
+            return false;
+        }
+        if m.core().is_none() {
+            return self.phase(m) == "accepted";
+        }
+        m.reviews.last().is_some_and(|r| {
+            r.verdict == model::Verdict::Accepted
+                && r.epoch == m.review_epoch
+                && self.work_basis(m).is_ok_and(|b| b == r.basis)
+        }) && self.core_review_gaps(m).is_empty()
+    }
+    /// Candidate/planning/agreement/control facts required for a core Module positive review.
+    pub fn core_review_gaps(&self, m: &Module) -> Vec<String> {
+        let mut missing = Vec::new();
+        let Some(core) = m.core() else {
+            return missing;
+        };
+        if !m.id.starts_with("M-") {
+            return missing;
+        }
+        let candidate = m.result.as_ref().and_then(|r| r.candidate.as_ref());
+        if candidate.is_none() {
+            missing.push("Report the definite restored Module candidate.".into());
+        }
+        if !core
+            .planning
+            .as_ref()
+            .is_some_and(|p| m.plan_basis().is_ok_and(|b| b == p.basis))
+        {
+            missing.push("Current bound lead discovery/planning is missing or stale.".into());
+        }
+        missing.extend(self.agreement_gaps(m));
+        let ids = self.contract_ids(m);
+        let scopes = if ids.is_empty() {
+            vec!["local".to_owned()]
+        } else {
+            ids
+        };
+        for id in scopes {
+            let revision = if id == "local" {
+                1
+            } else {
+                match self.contract_facts(&id) {
+                    Ok(f) => f.revision,
+                    Err(e) => {
+                        missing.push(e.message);
+                        continue;
+                    }
+                }
+            };
+            let intent_basis = m.plan_basis().ok();
+            let valid = core.boundary_evidence.iter().rev().any(|e| {
+                e.contract_id == id
+                    && e.revision == revision
+                    && e.intent_basis.as_ref() == intent_basis.as_ref()
+                    && Some(&e.candidate) == candidate
+                    && e.correct.status == model::CheckStatus::Passed
+                    && e.failed.status == model::CheckStatus::Failed
+                    && e.restored.status == model::CheckStatus::Passed
+                    && m.workflow
+                        .as_ref()
+                        .and_then(|w| w.execution.as_ref())
+                        .is_some_and(|w| w.worktree == e.worktree)
+            });
+            if !valid {
+                missing.push(format!(
+                    "{id}: current correct-pass/mutant-fail/restored-pass observations missing."
+                ));
+            }
+        }
+        missing
+    }
+    /// Current connected ready components of at least two; unrelated unfinished Modules create no barrier.
+    pub fn ready_sets(&self, epic: Option<&Module>) -> Result<Vec<Vec<String>>> {
+        let scan = self.scan(None)?;
+        if !scan.complete {
+            return Err(invalid(
+                "Ready-set scope has unreadable/partial work; inspect named coverage.",
+            ));
+        }
+        let eligible = scan
+            .modules
+            .iter()
+            .filter(|m| {
+                m.value.id.starts_with("M-")
+                    && epic.is_none_or(|e| e.modules.contains(&m.value.id))
+                    && self.module_ready(&m.value)
+            })
+            .map(|m| m.value.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut graph = BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+        for id in &eligible {
+            graph.insert(id.clone(), std::collections::BTreeSet::new());
+            let m = self.module(id)?.value;
+            for cid in self.contract_ids(&m) {
+                let f = self.contract_facts(&cid)?;
+                for peer in f.parties.iter().filter(|p| {
+                    *p != id && eligible.contains(*p) && (f.provider == *id || f.provider == **p)
+                }) {
+                    graph.entry(id.clone()).or_default().insert(peer.clone());
+                }
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut sets = Vec::new();
+        for id in &eligible {
+            if seen.contains(id) {
+                continue;
+            }
+            let mut stack = vec![id.clone()];
+            let mut component = Vec::new();
+            while let Some(n) = stack.pop() {
+                if !seen.insert(n.clone()) {
+                    continue;
+                }
+                component.push(n.clone());
+                stack.extend(graph.get(&n).into_iter().flatten().cloned());
+            }
+            component.sort();
+            if component.len() >= 2 {
+                sets.push(component);
+            }
+        }
+        Ok(sets)
+    }
+    /// Test connectivity of an explicit ready subset; a job may assemble AB before later ABC.
+    pub fn connected(&self, participants: &[String]) -> Result<bool> {
+        if participants.len() < 2 {
+            return Ok(false);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack = vec![participants[0].clone()];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let m = self.module(&id)?.value;
+            for cid in self.contract_ids(&m) {
+                let f = self.contract_facts(&cid)?;
+                stack.extend(
+                    f.parties
+                        .iter()
+                        .filter(|p| {
+                            participants.contains(p)
+                                && !seen.contains(*p)
+                                && (f.provider == id || f.provider == ***p)
+                        })
+                        .cloned(),
+                );
+            }
+        }
+        Ok(seen.len() == participants.len())
+    }
+    /// Existing accepted integration matching unchanged candidate/contract/scenario/environment inputs.
+    pub fn covered_integration(
+        &self,
+        participants: &[String],
+        environment: &str,
+        scenarios: &[String],
+        exclude: Option<&str>,
+    ) -> Result<Option<String>> {
+        let basis = self.coverage_basis(participants)?;
+        let scan = self.scan(None)?;
+        if !scan.complete {
+            return Err(invalid("Integration inventory is partial."));
+        }
+        for s in scan.modules {
+            let a = s.value;
+            if exclude == Some(a.id.as_str()) || !a.id.starts_with("A-") || a.core().is_none() {
+                continue;
+            }
+            let same = a
+                .participants
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                == participants
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+            if same
+                && a.workflow.as_ref().is_some_and(|w| {
+                    w.environment.as_deref() == Some(environment) && w.scenarios == scenarios
+                })
+                && a.participant_basis.get("core") == Some(&basis)
+                && self.phase(&a) == "accepted"
+            {
+                return Ok(Some(a.id));
+            }
+        }
+        Ok(None)
+    }
+    /// Pending current-key assembly claims are not verified coverage; inspect them before another dispatch.
+    /// Root locking serializes begin claims; canceled or changed-input claims do not block a fresh key.
+    pub fn pending_integration(
+        &self,
+        participants: &[String],
+        environment: &str,
+        scenarios: &[String],
+        exclude: Option<&str>,
+    ) -> Result<Option<String>> {
+        let key = self.coverage_basis(participants)?;
+        let scan = self.scan(None)?;
+        if !scan.complete {
+            return Err(invalid(
+                "Pending integration inventory is partial; inspect before dispatch.",
+            ));
+        }
+        for s in scan.modules {
+            let a = s.value;
+            if exclude == Some(a.id.as_str())
+                || !a.id.starts_with("A-")
+                || a.state != model::ModuleState::Open
+                || a.core().is_none()
+            {
+                continue;
+            }
+            let same = a
+                .participants
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                == participants
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+            if same
+                && a.workflow.as_ref().is_some_and(|w| {
+                    w.active
+                        && w.environment.as_deref() == Some(environment)
+                        && w.scenarios == scenarios
+                })
+                && a.participant_basis.get("core") == Some(&key)
+            {
+                return Ok(Some(a.id));
+            }
+        }
+        Ok(None)
+    }
+    /// Exact current business verification applicability; AB+BC is never inferred as an ABC E2E report.
+    pub fn criterion_basis(
+        &self,
+        scope: &model::CriterionScope,
+        integration: Option<&str>,
+    ) -> Result<String> {
+        let coverage = self.coverage_basis(&scope.modules)?;
+        let related = if let Some(id) = integration {
+            let a = self.module(id)?.value;
+            if self.phase(&a) != "accepted"
+                || !scope.modules.iter().all(|m| a.participants.contains(m))
+            {
+                return Err(invalid(
+                    "Criterion needs ONE current accepted composition covering its affected set.",
+                ));
+            }
+            Some(
+                serde_json::json!({"ref":id,"basis":a.basis().map_err(invalid)?,"coverage":a.participant_basis}),
+            )
+        } else {
+            None
+        };
+        semantic_digest(
+            &serde_json::json!({"scope":scope,"coverage":coverage,"integration":related}),
+        )
+    }
+}
+/// Encode one local semantic applicability digest; no certificate or external observation is manufactured.
+fn semantic_digest(value: &serde_json::Value) -> Result<String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(value).map_err(|_| invalid("Cannot encode semantic coverage."))?
+        )
+    ))
 }

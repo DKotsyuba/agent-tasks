@@ -35,43 +35,62 @@ Precedence: --config, AGENT_TASKS_CONFIG, then $HOME/.agent-tasks/config.toml. E
 | get_status | Identity and declared qualification |
 | register_project | Explicit documentation creation, local Git bootstrap and alias registration |
 | get_project_list | Discover aliases and intent without paths |
-| get_context | Assignment, parent context, contracts/dependencies, execution, conditions, evidence and versions |
+| get_context | Assignment, parent context, contracts/dependencies, execution, conditions, evidence, versions and the integration view |
 | project_status | One complete tracked overview, with separate data/detail coverage |
 | search | Bounded lexical work search and exact references |
-| plan_work | Create/edit work, execution, contracts, dependencies and Epic membership |
-| record_work | Begin, current results, local completion, delivery, Git import, blockers/handoffs, cancel/reopen |
-| review_work | Independent whole-Epic/Module/Atomic verdict, including embedded Atomics |
+| plan_work | Create/edit work, execution, contracts, dependencies, criterion scopes, Epic membership and roster freeze |
+| record_work | Begin, adopt_core, agent bind/recovery, lead planning, contract agreement, results/candidates, boundary evidence, criterion verification, completion, delivery, Git import, blockers/handoffs, cancel/reopen |
+| review_work | Independent whole-Epic/Module/Atomic verdict with changed-scope follow-up, including embedded Atomics |
 | review_module | Compatible Module-only review entrypoint |
 
 Live descriptions are mini documentation. Inputs are closed. Plan omission preserves; optional null/list clearing is explicit. A result replaces the complete current summary/checks/artifacts/gaps/followups, so include the current evidence to retain. Snapshot version is read continuation only.
 
 ## Plan responsibilities and contracts
 
-Epic owns the business outcome and criteria. Module owns a coherent responsibility, its own criteria, declared lead and execution `{repository, worktree, branch, target_branch}`. Contracts record who provides/consumes what; they are separate from actual blocking dependencies.
+The core workflow below is implemented for core-active records. The final full gate and release qualification are the repository owner's; see [architecture](docs/architecture.md) for the implemented rules and [plan](docs/epic-core-plan.md) for the governing target.
+
+Epic owns the business outcome, criteria and declared `criterion_scopes=[{index,text,modules}]` (at most 8; ZERO-BASED index and text match the current criteria, Modules within the roster). Module owns a coherent responsibility, its own criteria, a bound lead and execution `{repository, worktree, branch, target_branch}`. Contracts record who provides/consumes what; they are separate from actual blocking dependencies.
 
 ```text
 contracts={not_required:false,
-  provides:[{peer:"M-002",description:"Supply guarded record operations",
+  provides:[{id:"store-records",revision:1,peer:"M-002",
+             description:"Supply guarded record operations",
              reference:"docs/storage-interface.md",ready:true}],
   consumes:[]}
 dependencies=[{ref:"M-003",condition:"accepted",reason:"Requires the migrated store"}]
 ```
 
-A contract entry names a Module peer, behavior and an optional canonical reference; its readiness is a declared fact. Use not_required=true with empty lists when no contracts apply. One entry per peer/direction can describe a bundle of boundary obligations. Reciprocal provides/consumes links are allowed and do not automatically serialize implementation. Dependencies explicitly wait for accepted Epic/Module work, or delivered Module work; each needs a reason. Invalid/dangling/duplicate/self/impossible cyclic waits refuse. This is a trusted work protocol, not a certificate or automated code-verification platform.
+A core entry has a stable id and positive revision; the provider owns the canonical definition and reciprocal entries on all party Modules must match id/revision/artifact. Each participating lead confirms the exact revision with `record_work agree_contract {contract_id, revision, summary}`; `ready` is metadata and does not replace confirmation. An affecting change needs a higher revision and renewed confirmation, and invalidates the peers' review/readiness even when their code is unchanged. Use not_required=true with empty lists when no contracts apply. Dependencies are the only real waits (accepted Epic/Module, or delivered Module); each needs a reason, and invalid/dangling/duplicate/self/cyclic waits refuse. A wait cycle is an architecture problem to report and resolve before the affected work. This is a trusted work protocol, not a certificate or automated code-verification platform.
 
 ## Start, complete and accept
 
-New records opt into the full workflow. Plan first, then report `record_work op=begin`; this records a start and checks conditions without launching an agent.
+New records have the core workflow active. Existing managed-1 and unmanaged records keep prior behavior and digests until an explicit `record_work op=adopt_core`, which makes earlier approval historical and invents no IDs, planning, agreement, candidates or verification. `record_work op=begin` records a start and checks conditions without launching an agent.
 
-- First Epic begin freezes its Module roster permanently, including through reopen. Atomics remain addable. Create later Modules standalone under Project; an explicit dependency can wait for a named Epic.
-- Module begin requires an assigned lead, declared execution and criteria, necessary ready contracts, satisfied dependencies and an active parent Epic when owned.
-- Task completion is the Module lead's explicit decision after tests or manual verification. No separate Task review exists, and a commit/test result never closes it automatically.
-- Atomic result/state=done is local completion. Every new Atomic requires independent review, including `M-001/A-001`; Module acceptance waits for its owned Atomics' current approval.
-- Module acceptance requires current whole-Module review and reported delivery/merge into its declared target branch. Local merge counts; a hosting PR is optional. Delivery after review does not demand a second unchanged-code review.
-- Integration Atomic under Project/Epic names participating Modules, environment and scenarios. Begin waits for accepted/delivered participants. Record actual joint checks, then obtain independent Atomic review. No-code verification needs no invented commit.
-- Epic final acceptance requires the frozen scope's accepted/delivered Modules, current reviewed Atomics, own meaningful result and explicit required checks.
+1. The orchestrator creates the Epic and provisional Modules (no invented Tasks) and begins the Epic for planning.
+2. It launches each lead, then `record_work op=bind_agent {role, harness, agent_id, communication_ref, resume_ref?, launch_ref}` with the actual runtime receipt. Reviewers bind on the Module; integrators and reviewers on an integration Atomic. Scoped actions use the recorded `agent_id` as actor. The Epic has no binding slots: its begin/result/freeze/`verify_criterion`/review are orchestrator-attributed.
+3. The bound lead reports `record_work op=planning {responsibility, scope, exclusions, read_refs, uncertainties}`, then plans Tasks with plan_work add_task/edit_task and declares contracts and dependencies.
+4. Leads confirm contracts; `plan_work freeze_epic` checks lead discovery/agreement/criterion scopes, distinct prepared checkouts and mandatory-wait cycles, then freezes the roster before coding. It does not require acyclic waits to be satisfied: a provider can begin so its consumer waits for acceptance.
+5. Module begin enforces its own dependencies, a frozen parent, a ready lead, current planning/agreement and a separate worktree; active core Modules cannot share a writable checkout.
+6. Task completion is the lead's explicit decision after tests or manual verification. No Task review exists, and a commit/test result never closes it.
+7. The lead submits a definite candidate (`result` with `candidate` and `changed_scope`, or a commit import, whose candidate is the raw full Git SHA without a `commit:` prefix) and `record_work op=boundary_evidence {contract_id, revision, candidate, conditions, correct, mutation, failed, restored, artifacts}` where correct/failed/restored are `{status,detail,artifact?}` observing passed/failed/passed. Recording runs nothing. A Module with `contracts.not_required=true` still needs the same mutation controls under the reserved `contract_id="local"`, `revision=1`; this is a required local quality scope, not a peer contract id, and applicability pins the current Module intent and candidate.
+8. The bound reviewer's positive `review_work` makes the Module ready for integration; no merge or delivery is required. Follow-ups use `changed_scope` and `resolved_findings=[{review_index,finding_index,summary}]` (ZERO-BASED indexes) with the same lead and reviewer. Delivery stays separate bookkeeping (`record_work op=deliver`).
+9. `get_context view=integration` derives ready connected components of at least two Modules and their candidate/contract coverage. An integration Atomic needs a bound integrator and a distinct checkout; equivalent current coverage refuses a duplicate job, and changed affecting inputs stale it.
+10. `record_work op=verify_criterion` on the Epic `{index (ZERO-BASED), text, modules, candidate, environment, scenarios, summary, checks, artifacts, integration_ref?}` pins actual business/E2E evidence for each declared criterion. A supplied `integration_ref` must be one current accepted composition covering the full Module set; A+B plus B+C is not proof of A+B+C.
+11. Epic acceptance needs current-reviewed Modules, covered boundaries and current verification of every declared criterion; it needs no all-roster-per-job barrier.
 
-Required checks remain owner-declared; parent intent/criteria are useful background, not implicitly inherited labels. not_applicable never waives an explicit requirement. Gaps block acceptance; followups are outside the current scope. Semantic edits/reopen stale approvals and invalidate delivery/integration applicability; handoff and bookkeeping do not establish implementation changes. Cancel/reopen require reasons, canceled work is excluded from remaining scope, and cancellation never cascades through unfinished children. Identities are declared, not authenticated; known self-review refuses.
+```text
+# Module with contracts={not_required:true}: local quality scope
+record_work(op="boundary_evidence", ref="M-004", contract_id="local", revision=1,
+  candidate="<raw full Git SHA>", conditions="fixed clock; empty store",
+  correct={status:"passed", detail:"expected output observed"},
+  mutation="Return the unsorted list",
+  failed={status:"failed", detail:"ordering case failed as intended"},
+  restored={status:"passed", detail:"control rerun passed after restore"})
+```
+
+Replacement of a bound agent is allowed only when it is lost, unrecoverable AND cannot continue: `recover_agent stage=lost` records it, the new agent is bound, and `recover_agent stage=immersed` (by the new `agent_id`, with understanding, sources, unfinished, gaps) must precede continuation. Atomic result/state=done is local completion; every new Atomic needs independent review, including `M-001/A-001`.
+
+Required checks remain owner-declared; parent intent/criteria are useful background, not implicitly inherited labels. not_applicable never waives an explicit requirement. Gaps block acceptance; followups are outside the current scope. Semantic edits/reopen stale approvals and applicable coverage; handoff and bookkeeping do not establish implementation changes. Cancel/reopen require reasons, canceled work is excluded from remaining scope, and cancellation never cascades through unfinished children. Bindings are reported observations, not authentication; known self-review refuses.
 
 ## Record a code result once
 
@@ -132,7 +151,7 @@ register_project explicitly creates and commits bootstrap documentation before a
 
 ## Roles and verification
 
-Canonical [orchestrator](skills/agent-tasks-orchestrator/SKILL.md) and [Module lead](skills/agent-tasks-module-lead/SKILL.md) skills describe the implemented workflow. Update those files through the repository; installed symlinks share their content.
+Canonical [orchestrator](skills/agent-tasks-orchestrator/SKILL.md) and [Module lead](skills/agent-tasks-module-lead/SKILL.md) skills describe the chosen Epic core workflow API; its operations are confirmed by tests before they are claimed as implemented. Update those files through the repository; installed symlinks share their content.
 
 ```bash
 cargo xtask check
@@ -141,7 +160,7 @@ cargo xtask contract update
 cargo xtask contract check
 ```
 
-The [architecture](docs/architecture.md) is implemented truth. The [unified implementation plan](docs/unified-workflow-implementation-plan.md) records schema and compatibility choices. Rust registry definitions own the contract; schemas/tools.json is its reviewed export. Tests use disposable documentation/Git roots, including real stdio and cold restart.
+The [Epic core workflow plan](docs/epic-core-plan.md) is the governing product target; [architecture](docs/architecture.md) describes implemented behavior. The [unified implementation plan](docs/unified-workflow-implementation-plan.md) records schema and compatibility choices. Rust registry definitions own the contract; schemas/tools.json is its reviewed export. Tests use disposable documentation/Git roots, including real stdio and cold restart.
 
 ## Delivery
 

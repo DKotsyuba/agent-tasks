@@ -28,6 +28,8 @@ struct Fixture {
     identity: Renderer,
     /// Existing core regressions explicitly exercise pre-workflow records; modern suites opt in.
     modern: bool,
+    /// True only for lead-first coordination tests; old suites explicitly retain absent-core fixtures.
+    core: bool,
 }
 impl Fixture {
     /// Build aliases alpha/same for the same root without creating that root.
@@ -52,6 +54,7 @@ impl Fixture {
             templates: Templates::new(&super::templates()).unwrap(),
             identity: Renderer::new().unwrap(),
             modern: false,
+            core: false,
         }
     }
     /// Create a modern workflow fixture without grandfathering generated records.
@@ -60,11 +63,24 @@ impl Fixture {
         f.modern = true;
         f
     }
+    /// Exercise new records without stripping lead-first coordination defaults.
+    fn epic_core() -> Self {
+        let mut f = Self::modern();
+        f.core = true;
+        f
+    }
 
     /// Execute the real route; legacy fixtures strip only new optional policy from disposable generated records.
     /// This preserves c936 regression semantics while modern tests exercise the full current production lifecycle.
-    async fn call(&self, name: &str, args: Value, error: bool) -> String {
+    async fn call(&self, name: &str, mut args: Value, error: bool) -> String {
         let request = args.clone();
+        let old_tasks = if !self.core && name == "plan_work" && args["op"] == "create_module" {
+            let tasks = args["tasks"].as_array().cloned().unwrap_or_default();
+            args["tasks"] = json!([]);
+            tasks
+        } else {
+            Vec::new()
+        };
         let reply = super::call(name, args, &self.identity, &self.templates, &self.config)
             .await
             .unwrap();
@@ -72,7 +88,7 @@ impl Fixture {
         let wire = serde_json::to_value(reply).unwrap();
         assert_eq!(wire["content"].as_array().unwrap().len(), 1);
         let mut text = wire["content"][0]["text"].as_str().unwrap().to_owned();
-        if !self.modern
+        if !self.core
             && !error
             && name == "plan_work"
             && request["op"].as_str().is_some_and(|op| {
@@ -94,9 +110,40 @@ impl Fixture {
                 .unwrap();
             let before = self.store().module(target).unwrap();
             let mut old = before.value;
-            old.workflow = None;
-            for a in &mut old.atomics {
-                a.atomic_workflow = None;
+            if !self.modern {
+                old.workflow = None;
+            } else if let Some(w) = &mut old.workflow {
+                w.core = None;
+            }
+            for (i, input) in old_tasks.into_iter().enumerate() {
+                old.tasks.push(Task {
+                    id: format!("T-{:03}", i + 1),
+                    title: input["title"].as_str().unwrap().into(),
+                    criterion: serde_json::from_value(
+                        input.get("criterion").cloned().unwrap_or(Value::Null),
+                    )
+                    .unwrap(),
+                    executor: None,
+                    atomic_workflow: None,
+                    started_at: None,
+                    required_checks: serde_json::from_value(
+                        input.get("required_checks").cloned().unwrap_or(json!([])),
+                    )
+                    .unwrap(),
+                    state: TaskState::Open,
+                    result: None,
+                    checks: Vec::new(),
+                    cancellation: None,
+                    cancellation_history: Vec::new(),
+                    created_at: old.created_at.clone(),
+                    updated_at: old.created_at.clone(),
+                });
+            }
+            old.next_task = Some(old.tasks.len() as u64 + 1);
+            if !self.modern {
+                for a in &mut old.atomics {
+                    a.atomic_workflow = None;
+                }
             }
             let path = work_path(&old.id).unwrap();
             let bytes = store::encode(&old).unwrap();
@@ -1365,6 +1412,11 @@ async fn core_store_capacity_log_tail_and_post_write_presentation() {
         at: store::now(),
         reviewer: None,
         check_updates: vec![],
+        candidate: None,
+        contracts: std::collections::BTreeMap::new(),
+        changed_scope: Vec::new(),
+        resolved_findings: Vec::new(),
+        core_policy: false,
     };
     while store::encode(&large).unwrap().len() < store::RECORD_CAP - store::CLOSING_RESERVE {
         large.reviews.push(review.clone());
@@ -1894,6 +1946,504 @@ fn core_epic_atomic_closed_shapes() {
     assert!(!input_shape::<input::ReviewWorkArgs>(
         json!({"project":"alpha","ref":"E-001","version":"a".repeat(64),"verdict":"accepted","summary":"Review","unknown":true})
     ));
+}
+
+/// New coordination actions expose exact closed input shapes without untyped mutation fields.
+#[test]
+fn core_epic_work_operation_shapes() {
+    let observation = json!({"status":"passed","detail":"Observed actual output"});
+    for mut args in [
+        json!({"op":"adopt_core"}),
+        json!({"op":"bind_agent","role":"lead","harness":"fixture","agent_id":"observed-id","communication_ref":"fixture:contact","launch_ref":"fixture:launch"}),
+        json!({"op":"recover_agent","role":"reviewer","stage":"lost","lost":true,"unrecoverable":true,"reason":"Lost","observation":"Cannot resume"}),
+        json!({"op":"planning","responsibility":"Own mapping","scope":"Fixture code"}),
+        json!({"op":"agree_contract","contract_id":"mapping","revision":1,"summary":"Exact obligations"}),
+        json!({"op":"boundary_evidence","contract_id":"local","revision":1,"candidate":"artifact:restored","conditions":"Same input","correct":observation,"mutation":"Wrong output","failed":{"status":"failed","detail":"Same assertion fails"},"restored":observation}),
+        json!({"op":"verify_criterion","index":0,"text":"Actual outcome","modules":["M-001","M-002"],"candidate":"artifact:composition","environment":"Fixture","scenarios":["Joined output"],"summary":"Observed output","checks":[{"label":"joined","status":"passed"}]}),
+    ] {
+        args["project"] = json!("alpha");
+        args["ref"] = json!("M-001");
+        args["version"] = json!("a".repeat(64));
+        assert!(
+            input::mutation::<input::Work>(args.clone(), true).is_ok(),
+            "{args}"
+        );
+        args["unknown"] = json!(true);
+        assert!(input::mutation::<input::Work>(args, true).is_err());
+    }
+    let args =
+        json!({"project":"alpha","version":"a".repeat(64),"op":"freeze_epic","epic":"E-001"});
+    assert!(input::mutation::<input::Plan>(args, false).is_ok());
+}
+
+/// Epic orchestration reports do not invent a Module or integration agent binding.
+#[tokio::test]
+async fn core_epic_orchestrator_actor_policy() {
+    let f = Fixture::epic_core();
+    f.init().await;
+    let e=core_create_kind(&f,"create_epic",json!({"title":"Core business scope","outcome":"Actual business outcome","criteria":["Observable criterion"]})).await;
+    f.record(
+        &e,
+        json!({"op":"begin","actor":"fixture-orchestrator"}),
+        false,
+    )
+    .await;
+    f.record(&e,json!({"op":"result","summary":"Orchestrator business report","actor":"fixture-orchestrator"}),false).await;
+    assert!(
+        f.store()
+            .module(&e)
+            .unwrap()
+            .value
+            .core()
+            .unwrap()
+            .bindings
+            .is_empty()
+    );
+}
+
+/// Create one new-core Module with real isolated fixture directories and no invented initial Tasks.
+async fn epic_fixture_module(f: &Fixture, label: &str) -> String {
+    let checkout = f.directory.path().join(label);
+    fs::create_dir(&checkout).unwrap();
+    core_create_kind(f,"create_module",json!({"title":label,"outcome":"Public mapping is correct","criteria":["Input A produces B"],"contracts":{"not_required":true},
+        "execution":{"repository":checkout,"worktree":checkout,"branch":"feature","target_branch":"main"}})).await
+}
+/// Store synthetic test receipt data explicitly; it is not claimed to be a launched runtime.
+async fn epic_fixture_bind(f: &Fixture, m: &str, role: &str, id: &str) {
+    f.record(m,json!({"op":"bind_agent","role":role,"harness":"fixture","agent_id":id,"communication_ref":format!("fixture:{id}"),"launch_ref":format!("synthetic-receipt:{id}")}),false).await;
+}
+/// Record discovery before its expected Task/contract output, using the actual fixture binding ID.
+async fn epic_fixture_planning(f: &Fixture, m: &str, id: &str) {
+    f.record(m,json!({"op":"planning","responsibility":"Own the public mapping","scope":"Isolated fixture implementation","read_refs":["fixture:source"],"actor":id}),false).await;
+}
+/// Report the three control observations; actual mutation execution is covered separately by SDK fixtures.
+async fn epic_fixture_control(
+    f: &Fixture,
+    m: &str,
+    id: &str,
+    contract: &str,
+    revision: u64,
+    candidate: &str,
+) {
+    f.record(m,json!({"op":"boundary_evidence","contract_id":contract,"revision":revision,"candidate":candidate,"conditions":"Fixed input/state/time/randomness",
+        "correct":{"status":"passed","detail":"Correct mapping returns the expected B"},"mutation":"Return wrong output for valid A",
+        "failed":{"status":"failed","detail":"Same contract assertion detects wrong B"},"restored":{"status":"passed","detail":"Restored implementation returns expected B"},"actor":id}),false).await;
+}
+/// Review a definite candidate using the persistent actual fixture reviewer.
+async fn epic_fixture_review(
+    f: &Fixture,
+    m: &str,
+    id: &str,
+    mut args: Value,
+    error: bool,
+) -> String {
+    args["project"] = json!("alpha");
+    args["ref"] = json!(m);
+    args["version"] = json!(f.version(m).await);
+    args["actor"] = json!(id);
+    f.call("review_work", args, error).await
+}
+
+/// Persistent loss/replacement needs a new immersion and cannot erase valid predecessor quality facts.
+#[tokio::test]
+async fn core_epic_persistent_identity_and_immersion() {
+    let f = Fixture::epic_core();
+    f.init().await;
+    let m = epic_fixture_module(&f, "identity").await;
+    f.plan(
+        &m,
+        json!({"op":"add_task","module":m,"title":"No guessed lead","actor":"label"}),
+        true,
+    )
+    .await;
+    epic_fixture_bind(&f, &m, "lead", "observed-lead-1").await;
+    epic_fixture_planning(&f, &m, "observed-lead-1").await;
+    let version = f.version(&m).await;
+    epic_fixture_bind(&f, &m, "lead", "observed-lead-1").await;
+    assert_eq!(f.version(&m).await, version);
+    f.record(&m,json!({"op":"bind_agent","role":"lead","harness":"fixture","agent_id":"other","communication_ref":"fixture:other","launch_ref":"synthetic:other"}),true).await;
+    f.plan(&m, json!({"op":"edit_module","module":m,"lead":null}), true)
+        .await;
+    f.record(&m,json!({"op":"recover_agent","role":"lead","stage":"lost","lost":true,"unrecoverable":false,"reason":"Temporary timeout","observation":"Session still resumable"}),true).await;
+    f.record(&m,json!({"op":"recover_agent","role":"lead","stage":"lost","lost":true,"unrecoverable":true,"reason":"Session irrecoverably lost","observation":"Observed loss and resume failure"}),false).await;
+    epic_fixture_bind(&f, &m, "lead", "observed-lead-2").await;
+    f.record(&m,json!({"op":"planning","responsibility":"Cannot proceed yet","scope":"fixture","actor":"observed-lead-2"}),true).await;
+    f.record(&m,json!({"op":"recover_agent","role":"lead","stage":"immersed","understanding":"Reconstructed goals/results and remaining work","sources":[m],"gaps":["Missing candidate context"],"actor":"observed-lead-2"}),false).await;
+    f.plan(
+        &m,
+        json!({"op":"add_task","module":m,"title":"Blocked context","actor":"observed-lead-2"}),
+        true,
+    )
+    .await;
+    f.record(&m,json!({"op":"recover_agent","role":"lead","stage":"immersed","understanding":"Reconstructed complete valid predecessor context","sources":[m],"actor":"observed-lead-2"}),false).await;
+    f.plan(&m,json!({"op":"add_task","module":m,"title":"Lead-discovered Task","actor":"observed-lead-2"}),false).await;
+    assert!(
+        f.store()
+            .module(&m)
+            .unwrap()
+            .value
+            .core()
+            .unwrap()
+            .planning
+            .as_ref()
+            .is_some_and(|p| f.store().module(&m).unwrap().value.plan_basis().unwrap() == p.basis)
+    );
+    let c = f.store().module(&m).unwrap().value;
+    let b = c.core().unwrap().binding(AgentRole::Lead).unwrap();
+    assert_eq!(b.history.len(), 1);
+    assert_eq!(b.current.identity.agent_id, "observed-lead-2");
+}
+
+/// Candidate-local quality detects violations, permits review before delivery, and retains zero-based findings.
+#[tokio::test]
+async fn core_epic_candidate_quality_and_retained_findings() {
+    let f = Fixture::epic_core();
+    f.init().await;
+    let m = epic_fixture_module(&f, "quality").await;
+    epic_fixture_bind(&f, &m, "lead", "lead-quality").await;
+    epic_fixture_planning(&f, &m, "lead-quality").await;
+    f.record(&m, json!({"op":"begin","actor":"lead-quality"}), false)
+        .await;
+    epic_fixture_bind(&f, &m, "reviewer", "review-quality").await;
+    epic_fixture_review(&f,&m,"review-quality",json!({"verdict":"changes_requested","summary":"No submission yet","findings":[{"text":"Must not store a pre-submission review","must_fix":true}]}),true).await;
+    assert!(f.store().module(&m).unwrap().value.reviews.is_empty());
+    f.record(&m,json!({"op":"result","summary":"Definite restored result","candidate":"artifact:first","actor":"lead-quality"}),false).await;
+    epic_fixture_bind(&f, &m, "reviewer", "review-quality").await;
+    epic_fixture_review(
+        &f,
+        &m,
+        "review-quality",
+        json!({"verdict":"accepted","summary":"No quality controls yet"}),
+        true,
+    )
+    .await;
+    epic_fixture_control(&f, &m, "lead-quality", "local", 1, "artifact:first").await;
+    epic_fixture_review(&f,&m,"review-quality",json!({"verdict":"changes_requested","summary":"Named boundary correction","findings":[{"text":"Wrong error behavior","must_fix":true}]}),false).await;
+    f.record(&m,json!({"op":"result","summary":"Corrected restored result","candidate":"artifact:second","changed_scope":["error mapping"],"actor":"lead-quality"}),false).await;
+    epic_fixture_control(&f, &m, "lead-quality", "local", 1, "artifact:second").await;
+    epic_fixture_review(&f,&m,"review-quality",json!({"verdict":"accepted","summary":"Cannot forget previous finding","changed_scope":["error mapping"]}),true).await;
+    epic_fixture_review(&f,&m,"review-quality",json!({"verdict":"accepted","summary":"Corrected scope independently checked","changed_scope":["error mapping"],"resolved_findings":[{"review_index":0,"finding_index":0,"summary":"Same failing error case now passes after restore"}]}),false).await;
+    assert_eq!(
+        f.store().phase(&f.store().module(&m).unwrap().value),
+        "ready for integration"
+    );
+    assert!(
+        f.store()
+            .module(&m)
+            .unwrap()
+            .value
+            .workflow
+            .as_ref()
+            .unwrap()
+            .delivery
+            .is_none()
+    );
+    let basis = f
+        .store()
+        .work_basis(&f.store().module(&m).unwrap().value)
+        .unwrap();
+    f.record(&m,json!({"op":"recover_agent","role":"reviewer","stage":"lost","lost":true,"unrecoverable":true,"reason":"Irrecoverable reviewer loss","observation":"No recoverable resume state"}),false).await;
+    epic_fixture_bind(&f, &m, "reviewer", "review-replacement").await;
+    assert_eq!(
+        f.store()
+            .work_basis(&f.store().module(&m).unwrap().value)
+            .unwrap(),
+        basis,
+        "Identity bookkeeping alone does not erase verified candidate"
+    );
+    f.plan(
+        &m,
+        json!({"op":"edit_module","module":m,"criteria":["Changed meaningful mapping obligation"]}),
+        false,
+    )
+    .await;
+    f.record(&m,json!({"op":"planning","responsibility":"Changed goal","scope":"fixture","actor":"lead-quality"}),false).await;
+    assert!(
+        f.store()
+            .core_review_gaps(&f.store().module(&m).unwrap().value)
+            .iter()
+            .any(|s| s.contains("observations")),
+        "local revision1 cannot reuse controls against changed criteria"
+    );
+}
+
+/// Reciprocal canonical revisions need every lead confirmation; expected discovery outputs do not stale planning.
+#[tokio::test]
+async fn core_epic_contract_coordination_and_peer_staleness() {
+    let f = Fixture::epic_core();
+    f.init().await;
+    let a = epic_fixture_module(&f, "provider").await;
+    let b = epic_fixture_module(&f, "consumer").await;
+    for (m, id) in [(&a, "lead-a"), (&b, "lead-b")] {
+        epic_fixture_bind(&f, m, "lead", id).await;
+        epic_fixture_planning(&f, m, id).await;
+    }
+    f.plan(&a,json!({"op":"edit_module","module":a,"contracts":{"not_required":false,"provides":[{"peer":b,"id":"mapping","revision":1,"description":"Maps A to B","reference":"contract:mapping","ready":true}]}}),false).await;
+    f.plan(&b,json!({"op":"edit_module","module":b,"contracts":{"not_required":false,"consumes":[{"peer":a,"id":"mapping","revision":1,"description":"Consumes B from A","reference":"contract:mapping","ready":false}]}}),false).await;
+    f.record(&a, json!({"op":"begin","actor":"lead-a"}), true)
+        .await;
+    f.record(&a,json!({"op":"agree_contract","contract_id":"mapping","revision":1,"summary":"Exact current canonical mapping agreed","actor":"lead-a"}),false).await;
+    f.record(&a, json!({"op":"begin","actor":"lead-a"}), true)
+        .await;
+    f.record(&b,json!({"op":"agree_contract","contract_id":"mapping","revision":1,"summary":"Reciprocal obligations agreed","actor":"lead-b"}),false).await;
+    for (m, lead, reviewer, candidate) in [
+        (&a, "lead-a", "review-a", "artifact:a"),
+        (&b, "lead-b", "review-b", "artifact:b"),
+    ] {
+        f.record(m, json!({"op":"begin","actor":lead}), false).await;
+        f.record(m,json!({"op":"result","summary":"Actual restored mapping","candidate":candidate,"actor":lead}),false).await;
+        epic_fixture_control(&f, m, lead, "mapping", 1, candidate).await;
+        epic_fixture_bind(&f, m, "reviewer", reviewer).await;
+        epic_fixture_review(
+            &f,
+            m,
+            reviewer,
+            json!({"verdict":"accepted","summary":"Whole candidate and controls checked"}),
+            false,
+        )
+        .await;
+    }
+    assert_eq!(
+        f.store().ready_sets(None).unwrap(),
+        vec![vec![a.clone(), b.clone()]]
+    );
+    let assembly_dir = f.directory.path().join("assembly");
+    fs::create_dir(&assembly_dir).unwrap();
+    let integration=core_create_kind(&f,"create_atomic",json!({"title":"Exact assembly","outcome":"Verify actual joined behavior","participants":[a,b],"environment":"isolated fixture","scenarios":["provider output to consumer input"],"execution":{"repository":assembly_dir,"worktree":assembly_dir,"branch":"assembly","target_branch":"main"}})).await;
+    epic_fixture_bind(&f, &integration, "integrator", "integrator-actual").await;
+    epic_fixture_bind(&f, &integration, "reviewer", "assembly-reviewer").await;
+    f.record(
+        &integration,
+        json!({"op":"begin","actor":"integrator-actual"}),
+        false,
+    )
+    .await;
+    assert!(
+        f.store()
+            .module(&integration)
+            .unwrap()
+            .value
+            .participant_basis
+            .contains_key("core"),
+        "Begin captures exact pending input key before any result"
+    );
+    let duplicate_dir = f.directory.path().join("duplicate-assembly");
+    fs::create_dir(&duplicate_dir).unwrap();
+    let duplicate=core_create_kind(&f,"create_atomic",json!({"title":"Pending duplicate","outcome":"Same claimed work","participants":[a,b],"environment":"isolated fixture","scenarios":["provider output to consumer input"],"execution":{"repository":duplicate_dir,"worktree":duplicate_dir,"branch":"assembly","target_branch":"main"}})).await;
+    epic_fixture_bind(&f, &duplicate, "integrator", "duplicate-integrator").await;
+    f.record(
+        &duplicate,
+        json!({"op":"begin","actor":"duplicate-integrator"}),
+        true,
+    )
+    .await;
+    f.record(
+        &integration,
+        json!({"op":"cancel","reason":"Explicitly release pending assembly"}),
+        false,
+    )
+    .await;
+    f.record(
+        &duplicate,
+        json!({"op":"begin","actor":"duplicate-integrator"}),
+        false,
+    )
+    .await;
+    f.record(
+        &duplicate,
+        json!({"op":"cancel","reason":"Release fixture duplicate"}),
+        false,
+    )
+    .await;
+    f.record(
+        &integration,
+        json!({"op":"reopen","reason":"Resume original exact assembly"}),
+        false,
+    )
+    .await;
+    f.record(
+        &integration,
+        json!({"op":"begin","actor":"integrator-actual"}),
+        false,
+    )
+    .await;
+    f.record(&integration,json!({"op":"result","summary":"Passed assertions but no concrete assembly","state":"done","actor":"integrator-actual"}),false).await;
+    epic_fixture_review(
+        &f,
+        &integration,
+        "assembly-reviewer",
+        json!({"verdict":"accepted","summary":"Cannot accept absent assembly candidate"}),
+        true,
+    )
+    .await;
+    f.record(&integration,json!({"op":"result","summary":"Concrete restored assembly observed","candidate":"artifact:exact-joined-candidate","state":"done","actor":"integrator-actual"}),false).await;
+    epic_fixture_review(
+        &f,
+        &integration,
+        "assembly-reviewer",
+        json!({"verdict":"accepted","summary":"Exact assembly candidate independently checked"}),
+        false,
+    )
+    .await;
+    f.plan(&b,json!({"op":"edit_module","module":b,"dependencies":[{"ref":a,"condition":"delivered","reason":"A real target delivery prerequisite"}]}),false).await;
+    f.record(&b, json!({"op":"begin","actor":"lead-b"}), true)
+        .await;
+    let reviews = f.store().module(&a).unwrap().value.reviews.len();
+    f.record(&a,json!({"op":"deliver","target_branch":"main","summary":"Orchestrator reported the reviewed candidate in target","actor":"fixture-orchestrator"}),false).await;
+    assert!(f.store().module(&a).unwrap().value.delivered());
+    assert_eq!(
+        f.store().module(&a).unwrap().value.reviews.len(),
+        reviews,
+        "Bookkeeping needs no repeated quality review"
+    );
+    f.record(&b, json!({"op":"begin","actor":"lead-b"}), false)
+        .await;
+    f.plan(&b,json!({"op":"edit_module","module":b,"contracts":{"not_required":false,"consumes":[{"peer":a,"id":"mapping","revision":2,"description":"Changed error obligation","reference":"contract:mapping","ready":true}]}}),false).await;
+    assert!(
+        !f.store().module_ready(&f.store().module(&a).unwrap().value),
+        "Affecting peer facts stale review despite unchanged own candidate"
+    );
+    f.record(&b, json!({"op":"begin","actor":"lead-b"}), true)
+        .await;
+    f.plan(&a,json!({"op":"edit_module","module":a,"contracts":{"not_required":false,"provides":[{"peer":b,"id":"local","revision":1,"description":"Cannot collide with local controls","ready":true}]}}),true).await;
+    f.plan(
+        &b,
+        json!({"op":"edit_module","module":b,"contracts":{"not_required":true}}),
+        false,
+    )
+    .await;
+    f.plan(&b,json!({"op":"edit_module","module":b,"contracts":{"not_required":false,"consumes":[{"peer":a,"id":"mapping","revision":1,"description":"Consumes B from A","reference":"contract:mapping","ready":false}]}}),true).await;
+    f.plan(&b,json!({"op":"edit_module","module":b,"contracts":{"not_required":false,"consumes":[{"peer":a,"id":"mapping","revision":2,"description":"Reused revision with different obligation","reference":"contract:mapping","ready":false}]}}),true).await;
+    assert_eq!(
+        f.store()
+            .module(&b)
+            .unwrap()
+            .value
+            .core()
+            .unwrap()
+            .contract_history
+            .len(),
+        2
+    );
+}
+
+/// Canonical provider definitions survive consumer changes and provider transfers; only higher revisions change them.
+#[tokio::test]
+async fn core_epic_provider_definition_survives_consumer_change() {
+    let f = Fixture::epic_core();
+    f.init().await;
+    let provider = epic_fixture_module(&f, "canonical-provider").await;
+    let first = epic_fixture_module(&f, "original-consumer").await;
+    let next = epic_fixture_module(&f, "next-consumer").await;
+    for (m, id) in [
+        (&provider, "provider-lead"),
+        (&first, "first-lead"),
+        (&next, "next-lead"),
+    ] {
+        epic_fixture_bind(&f, m, "lead", id).await;
+        epic_fixture_planning(&f, m, id).await;
+    }
+    f.plan(&provider,json!({"op":"edit_module","module":provider,"contracts":{"not_required":false,"provides":[{"id":"canonical-x","revision":2,"peer":first,"description":"Canonical output definition","reference":"artifact:definition-v2","ready":true}]}}),false).await;
+    f.plan(&first,json!({"op":"edit_module","module":first,"contracts":{"not_required":false,"consumes":[{"id":"canonical-x","revision":2,"peer":provider,"description":"First consumer-specific obligation","reference":"artifact:definition-v2","ready":true}]}}),false).await;
+    for (m, id) in [(&provider, "provider-lead"), (&first, "first-lead")] {
+        f.record(m,json!({"op":"agree_contract","contract_id":"canonical-x","revision":2,"summary":"Exact current canonical boundary agreed","actor":id}),false).await;
+    }
+    f.plan(
+        &provider,
+        json!({"op":"edit_module","module":provider,"contracts":{"not_required":true}}),
+        false,
+    )
+    .await;
+    let removed = f.store().module(&provider).unwrap().bytes;
+    f.plan(&provider,json!({"op":"edit_module","module":provider,"contracts":{"not_required":false,"provides":[{"id":"canonical-x","revision":2,"peer":next,"description":"Changed canonical output","reference":"artifact:definition-v2","ready":true}]}}),true).await;
+    f.plan(&provider,json!({"op":"edit_module","module":provider,"contracts":{"not_required":false,"provides":[{"id":"canonical-x","revision":2,"peer":next,"description":"Canonical output definition","reference":"artifact:different-definition","ready":true}]}}),true).await;
+    assert_eq!(f.store().module(&provider).unwrap().bytes, removed);
+    f.plan(&provider,json!({"op":"edit_module","module":provider,"contracts":{"not_required":false,"provides":[{"id":"canonical-x","revision":2,"peer":next,"description":"Canonical output definition","reference":"artifact:definition-v2","ready":true}]}}),false).await;
+    f.plan(&next,json!({"op":"edit_module","module":next,"contracts":{"not_required":false,"consumes":[{"id":"canonical-x","revision":2,"peer":provider,"description":"Different consumer-specific obligation","reference":"artifact:definition-v2","ready":true}]}}),false).await;
+    f.plan(
+        &provider,
+        json!({"op":"edit_module","module":provider,"contracts":{"not_required":true}}),
+        false,
+    )
+    .await;
+    f.plan(&next,json!({"op":"edit_module","module":next,"contracts":{"not_required":false,"provides":[{"id":"canonical-x","revision":2,"peer":first,"description":"Changed after provider transfer","reference":"artifact:definition-v2","ready":true}]}}),true).await;
+    f.plan(&next,json!({"op":"edit_module","module":next,"contracts":{"not_required":false,"provides":[{"id":"canonical-x","revision":2,"peer":first,"description":"Canonical output definition","reference":"artifact:definition-v2","ready":true}]}}),false).await;
+    f.plan(&next,json!({"op":"edit_module","module":next,"contracts":{"not_required":false,"provides":[{"id":"canonical-x","revision":3,"peer":first,"description":"Changed after provider transfer","reference":"artifact:definition-v3","ready":true}]}}),false).await;
+}
+
+/// Unknown or empty contract declarations never imply zero obligations at core admission.
+#[tokio::test]
+async fn core_epic_explicit_contract_declaration() {
+    let f = Fixture::epic_core();
+    f.init().await;
+    let m = epic_fixture_module(&f, "declaration").await;
+    epic_fixture_bind(&f, &m, "lead", "declaration-lead").await;
+    epic_fixture_planning(&f, &m, "declaration-lead").await;
+    f.plan(
+        &m,
+        json!({"op":"edit_module","module":m,"contracts":null}),
+        false,
+    )
+    .await;
+    f.record(&m, json!({"op":"begin","actor":"declaration-lead"}), true)
+        .await;
+    assert!(
+        !f.store()
+            .agreement_gaps(&f.store().module(&m).unwrap().value)
+            .is_empty()
+    );
+    f.plan(
+        &m,
+        json!({"op":"edit_module","module":m,"contracts":{"not_required":false}}),
+        true,
+    )
+    .await;
+    let mut empty = f.store().module(&m).unwrap().value;
+    empty.workflow_mut().contracts = Some(Contracts {
+        not_required: false,
+        provides: Vec::new(),
+        consumes: Vec::new(),
+    });
+    assert!(!f.store().agreement_gaps(&empty).is_empty());
+    f.plan(
+        &m,
+        json!({"op":"edit_module","module":m,"contracts":{"not_required":true}}),
+        false,
+    )
+    .await;
+    f.record(&m, json!({"op":"begin","actor":"declaration-lead"}), false)
+        .await;
+}
+
+/// Embedded Atomic follow-up history is independent of unrelated whole-Module findings and candidate submission.
+#[tokio::test]
+async fn core_epic_atomic_target_review_history() {
+    let f = Fixture::epic_core();
+    f.init().await;
+    let m = epic_fixture_module(&f, "child-review").await;
+    epic_fixture_bind(&f, &m, "lead", "child-lead").await;
+    epic_fixture_planning(&f, &m, "child-lead").await;
+    epic_fixture_bind(&f, &m, "reviewer", "child-reviewer").await;
+    f.record(&m, json!({"op":"begin","actor":"child-lead"}), false)
+        .await;
+    f.plan(&m,json!({"op":"add_atomic","module":m,"title":"Independent child","outcome":"Observed child result"}),false).await;
+    let child = format!("{m}/A-001");
+    f.record(&child, json!({"op":"begin","actor":"child-lead"}), false)
+        .await;
+    f.record(&child,json!({"op":"result","summary":"Own definite child outcome","state":"done","actor":"child-lead"}),false).await;
+    epic_fixture_review(&f,&child,"child-reviewer",json!({"verdict":"changes_requested","summary":"Own child issue","findings":[{"text":"Child evidence gap","must_fix":true}]}),false).await;
+    f.record(&m,json!({"op":"result","summary":"Whole candidate pending correction","candidate":"artifact:module","actor":"child-lead"}),false).await;
+    epic_fixture_review(&f,&m,"child-reviewer",json!({"verdict":"changes_requested","summary":"Unrelated Task correction","findings":[{"text":"Module-only Task gap","must_fix":true}]}),false).await;
+    epic_fixture_review(&f,&child,"child-reviewer",json!({"verdict":"accepted","summary":"Cannot forget child finding","changed_scope":["child evidence"]}),true).await;
+    epic_fixture_review(&f,&child,"child-reviewer",json!({"verdict":"accepted","summary":"Child independently corrected","changed_scope":["child evidence"],"resolved_findings":[{"review_index":0,"finding_index":0,"summary":"Verified child-specific evidence correction"}]}),false).await;
+    let value = f.store().module(&m).unwrap().value;
+    assert_eq!(value.atomics[0].atomic_phase(), "accepted");
+    assert_eq!(value.reviews[0].verdict, Verdict::ChangesRequested);
+    assert_eq!(
+        value.atomics[0].atomic_workflow.as_ref().unwrap().reviews[1].resolved_findings[0]
+            .review_index,
+        0
+    );
 }
 
 /// Degraded mutation rendering preserves exact Epic/Atomic targets, versions and real saved effects.

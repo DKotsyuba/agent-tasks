@@ -143,10 +143,14 @@ fn diagnostics(value: &mut Page, snapshot: &Snapshot<Module>) {
     }
 }
 
-/// Read one scope and construct human-oriented facts, conditions and next routes.
+/// Read a requested Project/Epic/Module/child view with snapshot-bound bounded pagination.
+/// Integration is Project/Epic-only; absent core preserves legacy facts and unknown prerequisites remain named.
 pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Result<String> {
     let store = config.resolve(&args.project)?;
     let _lock = store.lock(false, &mut Vec::new())?;
+    if matches!(args.view, View::Integration) {
+        return integration_context(&store, &args, templates);
+    }
     if args.reference.is_none() {
         if !matches!(args.view, View::Summary) || args.review_index.is_some() {
             return Err(Error::new(
@@ -250,6 +254,11 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
         .map(|p| store.module(&p.id).map(|s| s.version))
         .transpose()?
         .unwrap_or_default();
+    let core_scan = if m.core().is_some() {
+        Some(store.scan(None)?)
+    } else {
+        None
+    };
     let background = format!(
         "{}:{}:{}",
         parent_version,
@@ -259,6 +268,9 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             .map(|p| p.version.as_str())
             .unwrap_or_default()
     );
+    let background = core_scan.as_ref().map_or(background.clone(), |scan| {
+        format!("{background}:{}", scan.version)
+    });
     let read_version = scope_version(&selection, &snapshot.version, &background);
     continuation(
         args.start,
@@ -279,6 +291,16 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
     );
     value.snapshot_version = read_version;
     diagnostics(&mut value, &snapshot);
+    if let Some(scan) = &core_scan {
+        if !scan.complete {
+            value.coverage = "PARTIAL".into();
+        }
+        warnings(&mut value, &scan.warnings);
+        for issue in &scan.unreadable {
+            partial(&mut value, "peer scope", issue);
+        }
+    }
+    core_rows(&store, m, args.view, &mut value);
     let child = index.map(|i| m.child(i));
     let reviews = child
         .and_then(|a| a.atomic_workflow.as_ref().map(|w| &w.reviews))
@@ -328,7 +350,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             for (direction, items) in [("provides", &c.provides), ("consumes", &c.consumes)] {
                 for contract in items {
                     value.rows.push(format!(
-                        "{direction} {} [{}]: {}{}",
+                        "{direction} {} [{}]: {}{}{}",
                         contract.peer,
                         if contract.ready {
                             "ready (reported)"
@@ -340,7 +362,19 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                             .reference
                             .as_ref()
                             .map(|r| format!(" — {}", store::safe(r, 256)))
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
+                        if m.core().is_some() {
+                            format!(
+                                "; contract={} revision={}",
+                                contract.id.as_deref().unwrap_or("unknown"),
+                                contract
+                                    .revision
+                                    .map(|v| v.to_string())
+                                    .unwrap_or("unknown".into())
+                            )
+                        } else {
+                            String::new()
+                        }
                     ));
                 }
             }
@@ -455,6 +489,12 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
         ));
     }
     match args.view {
+        View::Integration => {
+            return Err(Error::new(
+                "invalid_arguments",
+                "Integration context requires Project or Epic scope.",
+            ));
+        }
         View::Summary => {
             value.lines.push(format!(
                 "{} phase: {}; Task counts: {} done, {} open, {} canceled.",
@@ -703,9 +743,17 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                         "historical/stale"
                     }
                 ));
-                for f in &r.findings {
+                if m.core().is_some() {
+                    review_rows(&mut value.rows, i, r);
+                }
+                for (finding_index, f) in r.findings.iter().enumerate() {
                     value.rows.push(format!(
-                        "Finding [{}]: {}",
+                        "Finding{} [{}]: {}",
+                        if m.core().is_some() {
+                            format!(" review_index={i} finding_index={finding_index}")
+                        } else {
+                            String::new()
+                        },
                         if f.must_fix { "must fix" } else { "advisory" },
                         store::safe(&f.text, 256)
                     ));
@@ -790,6 +838,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
     }
     if value.rows.is_empty() {
         let empty = match args.view {
+            View::Integration => "No ready connected sets or integration evidence in this scope.",
             View::Summary => "No additional acceptance conditions or review-detail rows.",
             View::Review if !m.reviews.is_empty() => {
                 "This review has no findings or check updates."
@@ -802,6 +851,819 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             View::Commits => "No retained imported commit observations in this scope.",
         };
         value.lines.push(empty.into());
+    }
+    render_page(value, args.start, args.limit, true, templates)
+}
+
+/// Record named missing/unknown facts as partial coverage, never as zero or success.
+fn partial(value: &mut Page, target: &str, reason: &str) {
+    value.coverage = "PARTIAL".into();
+    value
+        .rows
+        .push(format!("PARTIAL {target}: {}", store::safe(reason, 1024)));
+}
+
+/// Stable role label; this is a stored observation, not runtime polling.
+fn role_name(role: AgentRole) -> &'static str {
+    match role {
+        AgentRole::Lead => "lead",
+        AgentRole::Reviewer => "reviewer",
+        AgentRole::Integrator => "integrator",
+    }
+}
+
+/// Describe explicit recovery gates without inferring liveness from a retained ID.
+fn term_state(term: &AgentTerm) -> &'static str {
+    if term.loss.is_some() {
+        "irrecoverably lost"
+    } else if term.needs_immersion {
+        "immersion required"
+    } else if term.immersion.as_ref().is_some_and(|i| !i.gaps.is_empty()) {
+        "immersion gaps"
+    } else {
+        "assigned (reported)"
+    }
+}
+
+/// Project a term identity/contact before lengthy histories so all current actors remain discoverable.
+fn identity_rows(rows: &mut Vec<String>, role: AgentRole, label: &str, term: &AgentTerm) {
+    let id = &term.identity;
+    rows.push(format!(
+        "Binding {} {label}: harness={} agent_id={} — {}",
+        role_name(role),
+        store::safe(&id.harness, 64),
+        store::safe(&id.agent_id, 256),
+        term_state(term)
+    ));
+    rows.push(format!(
+        "{} {label} communication_ref={} resume_ref={} launch_ref={}",
+        role_name(role),
+        store::safe(&id.communication_ref, 256),
+        id.resume_ref
+            .as_deref()
+            .map(|r| store::safe(r, 256))
+            .unwrap_or("unknown".into()),
+        store::safe(&id.launch_ref, 256)
+    ));
+}
+
+/// Project one current/predecessor recovery report into pageable exact loss/immersion facts.
+fn term_rows(rows: &mut Vec<String>, role: AgentRole, label: &str, term: &AgentTerm) {
+    if let Some(loss) = &term.loss {
+        rows.push(format!(
+            "{} {label} irrecoverable loss at {}: {}",
+            role_name(role),
+            loss.at,
+            store::safe(&loss.reason, 512)
+        ));
+        rows.push(format!(
+            "Loss observation: {}",
+            store::safe(&loss.observation, 1024)
+        ));
+    }
+    if let Some(immersion) = &term.immersion {
+        rows.push(format!(
+            "{} {label} immersion by {} at {}: {}",
+            role_name(role),
+            store::safe(&immersion.actor, 256),
+            immersion.at,
+            store::safe(&immersion.understanding, 1024)
+        ));
+        for (label, items) in [
+            ("Immersion source", &immersion.sources),
+            ("Unfinished", &immersion.unfinished),
+            ("Immersion gap", &immersion.gaps),
+        ] {
+            for item in items {
+                rows.push(format!("{label}: {}", store::safe(item, 256)));
+            }
+        }
+    } else if term.needs_immersion {
+        rows.push("PARTIAL immersion: replacement understanding/sources/unfinished/gaps not recorded; continuation blocked.".into());
+    }
+}
+
+/// Expose exact candidate/revision and stable old-finding resolution addresses for a review.
+fn review_rows(rows: &mut Vec<String>, index: usize, review: &Review) {
+    rows.push(format!(
+        "Review {index} candidate: {}",
+        review
+            .candidate
+            .as_deref()
+            .map(|v| store::safe(v, 256))
+            .unwrap_or("unknown".into())
+    ));
+    for (id, revision) in &review.contracts {
+        rows.push(format!(
+            "Review {index} affecting contract {id} revision={revision}"
+        ));
+    }
+    for scope in &review.changed_scope {
+        rows.push(format!(
+            "Review {index} changed scope: {}",
+            store::safe(scope, 256)
+        ));
+    }
+    for resolution in &review.resolved_findings {
+        rows.push(format!(
+            "Review {index} resolved review_index={} finding_index={}: {}",
+            resolution.review_index,
+            resolution.finding_index,
+            store::safe(&resolution.summary, 512)
+        ));
+    }
+}
+
+/// Expand current scoped business requirements and retained applicability-bound actual observations.
+fn criterion_rows(store: &Store, m: &Module, value: &mut Page) {
+    let Some(core) = m.core() else {
+        return;
+    };
+    for (index, criterion) in m.criteria.iter().enumerate() {
+        let scope = core
+            .criterion_scopes
+            .iter()
+            .find(|s| s.index == index && s.text == *criterion);
+        if let Some(scope) = scope {
+            let current = core.criterion_verifications.iter().rev().find(|v| {
+                v.scope == *scope
+                    && v.checks.iter().all(|c| c.status == CheckStatus::Passed)
+                    && store
+                        .criterion_basis(scope, v.integration_ref.as_deref())
+                        .is_ok_and(|b| b == v.basis)
+            });
+            value.rows.push(format!(
+                "Business criterion {index} [{}] Modules {}: {}",
+                if current.is_some() {
+                    "current verified"
+                } else {
+                    "verification needed"
+                },
+                scope.modules.join(", "),
+                store::safe(criterion, 1024)
+            ));
+        } else {
+            partial(
+                value,
+                &format!("business criterion {index}"),
+                "Affected Module scope not declared for current criterion.",
+            );
+        }
+    }
+    for (index, verification) in core.criterion_verifications.iter().enumerate() {
+        let state = if !core.criterion_scopes.contains(&verification.scope)
+            || verification
+                .checks
+                .iter()
+                .any(|c| c.status != CheckStatus::Passed)
+        {
+            "historical/stale"
+        } else {
+            match store
+                .criterion_basis(&verification.scope, verification.integration_ref.as_deref())
+            {
+                Ok(b) if b == verification.basis => "current",
+                Ok(_) => "historical/stale",
+                Err(e) => {
+                    partial(
+                        value,
+                        &format!("criterion verification {index} applicability"),
+                        &e.message,
+                    );
+                    "unknown"
+                }
+            }
+        };
+        value.rows.push(format!("Business verification {index} criterion={} [{state}] Modules {} candidate={} key={} integration_ref={}",verification.scope.index,verification.scope.modules.join(", "),store::safe(&verification.candidate,256),verification.basis,verification.integration_ref.as_deref().unwrap_or("none; explicit Epic E2E report")));
+        value.rows.push(format!(
+            "Business environment: {}",
+            store::safe(&verification.environment, 1024)
+        ));
+        value.rows.push(format!(
+            "Business observation by {} at {}: {}",
+            verification
+                .actor
+                .as_deref()
+                .map(|a| store::safe(a, 256))
+                .unwrap_or("unknown".into()),
+            verification.at,
+            store::safe(&verification.summary, 1024)
+        ));
+        for scenario in &verification.scenarios {
+            value
+                .rows
+                .push(format!("Business scenario: {}", store::safe(scenario, 256)));
+        }
+        check_rows(
+            &mut value.rows,
+            &format!("business verification {index}"),
+            &[],
+            &verification.checks,
+        );
+        for artifact in &verification.artifacts {
+            value
+                .rows
+                .push(format!("Business artifact: {}", store::safe(artifact, 256)));
+        }
+    }
+}
+
+/// Add core facts to allowed detail views only; absent core preserves legacy projections exactly.
+fn core_rows(store: &Store, m: &Module, view: View, value: &mut Page) {
+    let Some(core) = m.core() else {
+        return;
+    };
+    if matches!(view, View::Summary) {
+        value.rows.push(format!("Epic core owner {}: implementation_epoch={}; Module current-review readiness={}; delivery is separate bookkeeping.",m.id,core.implementation_epoch,if m.id.starts_with("M-"){if store.module_ready(m){"ready for integration"}else{"not ready"}}else{"not applicable"}));
+        let required = if m.id.starts_with("M-") {
+            vec![AgentRole::Lead, AgentRole::Reviewer]
+        } else if !m.participants.is_empty() {
+            vec![AgentRole::Integrator, AgentRole::Reviewer]
+        } else {
+            Vec::new()
+        };
+        for role in required {
+            if core.binding(role).is_none() {
+                partial(
+                    value,
+                    &format!("{} binding", role_name(role)),
+                    "Actual observed runtime identity/contact not bound.",
+                );
+            }
+        }
+        for binding in &core.bindings {
+            identity_rows(&mut value.rows, binding.role, "current", &binding.current);
+        }
+        for binding in &core.bindings {
+            term_rows(&mut value.rows, binding.role, "current", &binding.current);
+            if binding.current.loss.is_some()
+                || binding.current.needs_immersion
+                || binding
+                    .current
+                    .immersion
+                    .as_ref()
+                    .is_some_and(|i| !i.gaps.is_empty())
+            {
+                value.coverage = "PARTIAL".into();
+            }
+        }
+        for binding in &core.bindings {
+            for (index, term) in binding.history.iter().enumerate() {
+                value.rows.push(format!(
+                    "Retained predecessor {index} role={} agent_id={} harness={}",
+                    role_name(binding.role),
+                    store::safe(&term.identity.agent_id, 256),
+                    store::safe(&term.identity.harness, 64)
+                ));
+            }
+        }
+        if let Some(plan) = &core.planning {
+            value.rows.push(format!(
+                "Lead planning [{}] by {} at {}: responsibility {}",
+                if m.plan_basis().is_ok_and(|b| b == plan.basis) {
+                    "current"
+                } else {
+                    "stale"
+                },
+                store::safe(&plan.actor, 256),
+                plan.at,
+                store::safe(&plan.responsibility, 1024)
+            ));
+            value.rows.push(format!(
+                "Planning scope: {}",
+                store::safe(&plan.scope, 1024)
+            ));
+            for (label, items) in [
+                ("Planning exclusion", &plan.exclusions),
+                ("Planning read ref", &plan.read_refs),
+                ("Planning uncertainty", &plan.uncertainties),
+            ] {
+                for item in items {
+                    value
+                        .rows
+                        .push(format!("{label}: {}", store::safe(item, 256)));
+                }
+            }
+        } else if m.id.starts_with("M-") {
+            partial(
+                value,
+                "lead planning",
+                "Discovery/decomposition not reported; code assignment is not ready.",
+            );
+        }
+        for id in store.contract_ids(m) {
+            match store.contract_facts(&id) {
+                Ok(facts) => {
+                    value.rows.push(format!(
+                        "Canonical contract {} revision={} provider={} parties={} snapshot={}",
+                        facts.id,
+                        facts.revision,
+                        facts.provider,
+                        facts.parties.join(", "),
+                        facts.snapshot
+                    ));
+                    for gap in facts.gaps {
+                        partial(value, &format!("contract {id}"), &gap);
+                    }
+                }
+                Err(e) => partial(value, &format!("contract {id}"), &e.message),
+            }
+        }
+        for (index, agreement) in core.agreements.iter().enumerate() {
+            let state = match store.contract_facts(&agreement.contract_id) {
+                Ok(f) if f.revision == agreement.revision && f.snapshot == agreement.snapshot => {
+                    "current"
+                }
+                Ok(_) => "historical/stale",
+                Err(e) => {
+                    partial(value, &format!("agreement {index}"), &e.message);
+                    "unknown"
+                }
+            };
+            value.rows.push(format!(
+                "Agreement {index} contract={} revision={} [{state}] by {} at {}: {}",
+                agreement.contract_id,
+                agreement.revision,
+                store::safe(&agreement.actor, 256),
+                agreement.at,
+                store::safe(&agreement.summary, 1024)
+            ));
+        }
+        for gap in store.agreement_gaps(m) {
+            partial(value, "contract agreement", &gap);
+        }
+        if let Some(report) = &m.result {
+            if let Some(candidate) = &report.candidate {
+                value.rows.push(format!(
+                    "Current candidate: {}",
+                    store::safe(candidate, 256)
+                ));
+            } else if m.id.starts_with("M-") || !m.participants.is_empty() {
+                partial(
+                    value,
+                    "current candidate",
+                    "Definite commit/artifact not reported.",
+                );
+            }
+            for scope in &report.changed_scope {
+                value.rows.push(format!(
+                    "Current changed scope: {}",
+                    store::safe(scope, 256)
+                ));
+            }
+        }
+        if let Some(index) = m.reviews.len().checked_sub(1) {
+            review_rows(&mut value.rows, index, &m.reviews[index]);
+        }
+        for (review_index, review) in m.reviews.iter().enumerate() {
+            for (finding_index, finding) in review.findings.iter().enumerate() {
+                let resolved = m.reviews.iter().skip(review_index + 1).any(|r| {
+                    r.resolved_findings
+                        .iter()
+                        .any(|f| f.review_index == review_index && f.finding_index == finding_index)
+                });
+                value.rows.push(format!("Finding review_index={review_index} finding_index={finding_index} [{}; {}]: {}",if finding.must_fix { "must fix" } else { "advisory" },if resolved { "resolved in retained history" } else { "unresolved" },store::safe(&finding.text,256)));
+            }
+        }
+        for binding in &core.bindings {
+            for (index, term) in binding.history.iter().enumerate() {
+                let label = format!("predecessor {index}");
+                identity_rows(&mut value.rows, binding.role, &label, term);
+                term_rows(&mut value.rows, binding.role, &label, term);
+            }
+        }
+        if m.id.starts_with("E-") {
+            criterion_rows(store, m, value);
+        }
+        if !m.participants.is_empty() {
+            integration_candidate_rows(store, m, value);
+        }
+    }
+    if matches!(view, View::Summary | View::Checks) {
+        for (index, evidence) in core.boundary_evidence.iter().enumerate() {
+            let revision = if evidence.contract_id == "local" {
+                Some(1)
+            } else {
+                store
+                    .contract_facts(&evidence.contract_id)
+                    .ok()
+                    .map(|f| f.revision)
+            };
+            let state = if revision.is_none() {
+                "unknown"
+            } else if revision == Some(evidence.revision)
+                && m.result.as_ref().and_then(|r| r.candidate.as_ref()) == Some(&evidence.candidate)
+                && m.workflow
+                    .as_ref()
+                    .and_then(|w| w.execution.as_ref())
+                    .is_some_and(|e| e.worktree == evidence.worktree)
+            {
+                "current"
+            } else {
+                "historical/stale"
+            };
+            if state == "unknown" {
+                partial(
+                    value,
+                    &format!("boundary evidence {index}"),
+                    "Current canonical revision could not be resolved.",
+                );
+            }
+            value.rows.push(format!("Boundary evidence {index} [{state}] contract={} revision={} candidate={} by {} at {}",evidence.contract_id,evidence.revision,store::safe(&evidence.candidate,256),store::safe(&evidence.actor,256),evidence.at));
+            value.rows.push(format!(
+                "Boundary conditions: {}",
+                store::safe(&evidence.conditions, 1024)
+            ));
+            value.rows.push(format!(
+                "Boundary mutation: {}",
+                store::safe(&evidence.mutation, 1024)
+            ));
+            value.rows.push(format!(
+                "Boundary isolated checkout (reported): {}",
+                store::safe(&evidence.worktree, 1024)
+            ));
+            for (label, observation) in [
+                ("correct control", &evidence.correct),
+                ("mutant detection", &evidence.failed),
+                ("restored control", &evidence.restored),
+            ] {
+                value.rows.push(format!(
+                    "{label}: {} — {} — artifact {}",
+                    check_status(observation.status),
+                    store::safe(&observation.detail, 512),
+                    observation
+                        .artifact
+                        .as_deref()
+                        .map(|a| store::safe(a, 256))
+                        .unwrap_or("not reported".into())
+                ));
+            }
+            for artifact in &evidence.artifacts {
+                value
+                    .rows
+                    .push(format!("Boundary artifact: {}", store::safe(artifact, 256)));
+            }
+        }
+        for gap in store.core_review_gaps(m) {
+            partial(value, "review prerequisite", &gap);
+        }
+    }
+}
+
+/// Project exact integration participant candidates/contracts plus stored and current coverage keys.
+fn integration_candidate_rows(store: &Store, m: &Module, value: &mut Page) {
+    value.rows.push(format!(
+        "Integration {} captured candidate/contract key: {}",
+        m.id,
+        m.participant_basis
+            .get("core")
+            .map(String::as_str)
+            .unwrap_or("unknown")
+    ));
+    match store.coverage_basis(&m.participants) {
+        Ok(key) => value.rows.push(format!(
+            "Integration {} current candidate/contract key: {key} [{}]",
+            m.id,
+            if m.participant_basis.get("core") == Some(&key) {
+                "applicable inputs"
+            } else {
+                "stale/missing inputs"
+            }
+        )),
+        Err(e) => partial(
+            value,
+            &format!("integration {} current inputs", m.id),
+            &e.message,
+        ),
+    }
+    candidate_rows(store, &m.participants, value);
+}
+
+/// Expand a ready/integration composition into bounded exact Module candidate and boundary key rows.
+fn candidate_rows(store: &Store, participants: &[String], value: &mut Page) {
+    let mut contracts = std::collections::BTreeSet::new();
+    for id in participants {
+        match store.module(id) {
+            Ok(m) => {
+                value.rows.push(format!(
+                    "Participant {id} candidate={} phase={}",
+                    m.value
+                        .result
+                        .as_ref()
+                        .and_then(|r| r.candidate.as_deref())
+                        .map(|r| store::safe(r, 256))
+                        .unwrap_or("unknown".into()),
+                    store.phase(&m.value)
+                ));
+                contracts.extend(store.contract_ids(&m.value));
+            }
+            Err(e) => partial(value, &format!("participant {id}"), &e.message),
+        }
+    }
+    for id in contracts {
+        match store.contract_facts(&id) {
+            Ok(f)
+                if f.parties
+                    .iter()
+                    .filter(|p| participants.contains(p))
+                    .count()
+                    >= 2 =>
+            {
+                value.rows.push(format!(
+                    "Composition contract {} revision={} provider={} parties={} snapshot={}",
+                    f.id,
+                    f.revision,
+                    f.provider,
+                    f.parties.join(", "),
+                    f.snapshot
+                ))
+            }
+            Ok(_) => (),
+            Err(e) => partial(value, &format!("composition contract {id}"), &e.message),
+        }
+    }
+}
+
+/// Compact attention for status; full histories remain pageable through the Module reference.
+fn core_attention(store: &Store, m: &Module, value: &mut Page) {
+    let Some(core) = m.core() else {
+        return;
+    };
+    for binding in &core.bindings {
+        value.rows.push(format!("{} {} agent_id={} harness={} [{}]; predecessors={}; get_context ref={} for contacts/recovery.",m.id,role_name(binding.role),store::safe(&binding.current.identity.agent_id,256),store::safe(&binding.current.identity.harness,64),term_state(&binding.current),binding.history.len(),m.id));
+    }
+    if m.id.starts_with("M-") {
+        value.rows.push(format!(
+            "{} planning={}; candidate={}; ready for integration={}; contract attention={}",
+            m.id,
+            if core
+                .planning
+                .as_ref()
+                .is_some_and(|p| m.plan_basis().is_ok_and(|b| b == p.basis))
+            {
+                "current"
+            } else {
+                "missing/stale"
+            },
+            m.result
+                .as_ref()
+                .and_then(|r| r.candidate.as_deref())
+                .map(|r| store::safe(r, 256))
+                .unwrap_or("unknown".into()),
+            store.module_ready(m),
+            store.agreement_gaps(m).len()
+        ));
+        for id in store.contract_ids(m) {
+            match store.contract_facts(&id) {
+                Ok(f) => value.rows.push(format!(
+                    "{} contract {} revision={} provider={} parties={}",
+                    m.id,
+                    f.id,
+                    f.revision,
+                    f.provider,
+                    f.parties.join(", ")
+                )),
+                Err(e) => partial(value, &format!("{} contract {id}", m.id), &e.message),
+            }
+        }
+    }
+    if m.id.starts_with("E-") {
+        for (index, criterion) in m.criteria.iter().enumerate() {
+            let scope = core
+                .criterion_scopes
+                .iter()
+                .find(|s| s.index == index && s.text == *criterion);
+            let current = scope.is_some_and(|s| {
+                core.criterion_verifications.iter().any(|v| {
+                    v.scope == *s
+                        && v.checks.iter().all(|c| c.status == CheckStatus::Passed)
+                        && store
+                            .criterion_basis(s, v.integration_ref.as_deref())
+                            .is_ok_and(|b| b == v.basis)
+                })
+            });
+            value.rows.push(format!(
+                "{} business criterion {index}: {}; get_context ref={} view=integration.",
+                m.id,
+                if current {
+                    "current verified"
+                } else {
+                    "scope/verification needed"
+                },
+                m.id
+            ));
+        }
+    }
+    if !m.participants.is_empty() {
+        integration_candidate_rows(store, m, value);
+    }
+}
+
+/// Read Project/Epic ready components and incremental actual coverage with snapshot-bound pagination.
+/// Reject Module/child/review-index scopes; incomplete inventory preserves named unknown facts.
+fn integration_context(store: &Store, args: &ContextArgs, templates: &Templates) -> Result<String> {
+    if args.review_index.is_some() {
+        return Err(Error::new(
+            "invalid_arguments",
+            "review_index belongs only to view=review.",
+        ));
+    }
+    let epic = if let Some(reference) = args.reference.as_deref() {
+        if !reference.starts_with("E-") || reference.contains('/') {
+            return Err(Error::new(
+                "invalid_arguments",
+                "view=integration requires Project (omit ref) or an Epic reference.",
+            ));
+        }
+        Some(store.module(reference)?)
+    } else {
+        None
+    };
+    let project = store.project()?;
+    let scan = store.scan(None)?;
+    let version = epic
+        .as_ref()
+        .map(|e| e.version.clone())
+        .or_else(|| project.as_ref().map(|p| p.version.clone()))
+        .unwrap_or_else(|| store.version("project.yaml", None));
+    let snapshot = scope_version(
+        &format!("get_context:integration:{:?}", args.reference),
+        &version,
+        &scan.version,
+    );
+    continuation(args.start, args.limit, args.version.as_deref(), &snapshot)?;
+    let mut value = page(
+        format!(
+            "Integration context — {}",
+            args.reference.as_deref().unwrap_or("Project")
+        ),
+        version,
+    );
+    value.snapshot_version = snapshot;
+    value.coverage = if scan.complete { "complete" } else { "PARTIAL" }.into();
+    value.lines.push("Ready connected components require at least two current-reviewed Modules; unfinished unrelated Modules create no barrier. Environment/scenarios are declared per integration; edge coverage does not prove a business criterion.".into());
+    warnings(&mut value, &scan.warnings);
+    for issue in &scan.unreadable {
+        partial(&mut value, "integration inventory", issue);
+    }
+    let scope = epic.as_ref().map(|e| &e.value);
+    let integrations = scan
+        .modules
+        .iter()
+        .filter(|m| {
+            m.value.id.starts_with("A-")
+                && !m.value.participants.is_empty()
+                && scope
+                    .is_none_or(|e| m.value.participants.iter().all(|id| e.modules.contains(id)))
+        })
+        .map(|m| &m.value)
+        .collect::<Vec<_>>();
+    match store.ready_sets(scope) {
+        Ok(sets) => {
+            if sets.is_empty() {
+                value.rows.push("No ready connected set of at least two Modules in the complete readable scope.".into());
+            }
+            for (index, participants) in sets.iter().enumerate() {
+                value.rows.push(format!(
+                    "Ready connected set {index}: {}",
+                    participants.join(", ")
+                ));
+                match store.coverage_basis(participants) {
+                    Ok(key) => {
+                        let covered = integrations
+                            .iter()
+                            .filter(|a| {
+                                a.participants
+                                    .iter()
+                                    .collect::<std::collections::BTreeSet<_>>()
+                                    == participants
+                                        .iter()
+                                        .collect::<std::collections::BTreeSet<_>>()
+                                    && a.participant_basis.get("core") == Some(&key)
+                                    && store.phase(a) == "accepted"
+                            })
+                            .map(|a| a.id.as_str())
+                            .collect::<Vec<_>>();
+                        value.rows.push(format!("Set {index} candidate/contract key={key}; exact-composition coverage={}",if covered.is_empty(){"assembly needed; declare environment/scenarios".into()}else{format!("current accepted {} (declared environments/scenarios below)",covered.join(", "))}));
+                    }
+                    Err(e) => partial(&mut value, &format!("ready set {index} key"), &e.message),
+                }
+                candidate_rows(store, participants, &mut value);
+            }
+        }
+        Err(e) => partial(
+            &mut value,
+            "ready connected sets (count unknown)",
+            &e.message,
+        ),
+    }
+    for integration in &integrations {
+        value.rows.push(format!(
+            "Integration {} phase={} participants={}; candidate={}",
+            integration.id,
+            store.phase(integration),
+            integration.participants.join(", "),
+            integration
+                .result
+                .as_ref()
+                .and_then(|r| r.candidate.as_deref())
+                .map(|c| store::safe(c, 256))
+                .unwrap_or("unknown".into())
+        ));
+        integration_candidate_rows(store, integration, &mut value);
+        if let Some(workflow) = &integration.workflow {
+            value.rows.push(format!(
+                "Integration {} environment: {}",
+                integration.id,
+                workflow
+                    .environment
+                    .as_deref()
+                    .map(|e| store::safe(e, 1024))
+                    .unwrap_or("unknown".into())
+            ));
+            for scenario in &workflow.scenarios {
+                value.rows.push(format!(
+                    "Integration {} scenario: {}",
+                    integration.id,
+                    store::safe(scenario, 256)
+                ));
+            }
+            if let Some(environment) = &workflow.environment {
+                match store.covered_integration(
+                    &integration.participants,
+                    environment,
+                    &workflow.scenarios,
+                    None,
+                ) {
+                    Ok(Some(id)) => value.rows.push(format!(
+                        "Integration {} equivalent current accepted coverage: {id}",
+                        integration.id
+                    )),
+                    Ok(None) => value.rows.push(format!(
+                        "Integration {} coverage needed for declared environment/scenarios.",
+                        integration.id
+                    )),
+                    Err(e) => partial(
+                        &mut value,
+                        &format!("integration {} coverage", integration.id),
+                        &e.message,
+                    ),
+                }
+            }
+        }
+    }
+    let mut contracts = std::collections::BTreeSet::new();
+    for m in scan.modules.iter().filter(|m| {
+        m.value.id.starts_with("M-") && scope.is_none_or(|e| e.modules.contains(&m.value.id))
+    }) {
+        contracts.extend(store.contract_ids(&m.value));
+        if !store.module_ready(&m.value) {
+            value.rows.push(format!(
+                "{} not current-ready; phase={}; get_context ref={} for named prerequisites.",
+                m.value.id,
+                store.phase(&m.value),
+                m.value.id
+            ));
+        }
+    }
+    for id in contracts {
+        match store.contract_facts(&id) {
+            Ok(f) => {
+                for consumer in f.parties.iter().filter(|p| *p != &f.provider) {
+                    let covered = integrations
+                        .iter()
+                        .filter(|a| {
+                            a.participants.contains(&f.provider)
+                                && a.participants.contains(consumer)
+                                && store
+                                    .coverage_basis(&a.participants)
+                                    .is_ok_and(|b| a.participant_basis.get("core") == Some(&b))
+                                && store.phase(a) == "accepted"
+                        })
+                        .map(|a| a.id.as_str())
+                        .collect::<Vec<_>>();
+                    value.rows.push(format!("Boundary {} revision={} provider={} consumer={} snapshot={} current integration={}",f.id,f.revision,f.provider,consumer,f.snapshot,if !scan.complete { "unknown (partial inventory)".into() } else if covered.is_empty() { "needed".into() } else { covered.join(", ") }));
+                }
+                for gap in f.gaps {
+                    partial(&mut value, &format!("boundary {id}"), &gap);
+                }
+            }
+            Err(e) => partial(&mut value, &format!("boundary {id}"), &e.message),
+        }
+    }
+    if let Some(epic) = scope {
+        criterion_rows(store, epic, &mut value);
+    } else {
+        for epic in scan
+            .modules
+            .iter()
+            .filter(|m| m.value.id.starts_with("E-") && m.value.core().is_some())
+        {
+            value
+                .rows
+                .push(format!("Business coverage Epic {}", epic.value.id));
+            criterion_rows(store, &epic.value, &mut value);
+        }
     }
     render_page(value, args.start, args.limit, true, templates)
 }
@@ -820,8 +1682,38 @@ fn scope_version(selection: &str, version: &str, scan: &str) -> String {
 fn count(module: &Module, state: TaskState) -> usize {
     module.tasks.iter().filter(|t| t.state == state).count()
 }
-/// Present a reported lead and handle without an agent-liveness claim.
+/// Present a core lead/integrator or legacy display owner without runtime liveness claims.
+/// Epics have orchestration acceptance rather than participant identity slots.
 fn lead_line(m: &Module) -> String {
+    if let Some(core) = m.core() {
+        if m.id.starts_with("E-") {
+            return "Epic acceptance: orchestrator action; no runtime binding required.".into();
+        }
+        let role = if m.participants.is_empty() {
+            AgentRole::Lead
+        } else {
+            AgentRole::Integrator
+        };
+        if m.id.starts_with("M-") || !m.participants.is_empty() {
+            return core
+                .binding(role)
+                .map(|b| {
+                    format!(
+                        "{}: {} (harness {}; recovery {}; full contacts in core detail rows)",
+                        role_name(role),
+                        store::safe(&b.current.identity.agent_id, 256),
+                        store::safe(&b.current.identity.harness, 64),
+                        term_state(&b.current)
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}: unknown; bind observed runtime ID after launch",
+                        role_name(role)
+                    )
+                });
+        }
+    }
     m.lead
         .as_ref()
         .map(|l| {
@@ -847,11 +1739,7 @@ fn module_brief(store: &Store, m: &Module) -> String {
         let accepted = m
             .modules
             .iter()
-            .filter(|id| {
-                store
-                    .module(id)
-                    .is_ok_and(|c| store.phase(&c.value) == "accepted")
-            })
+            .filter(|id| store.module(id).is_ok_and(|c| store.module_ready(&c.value)))
             .count();
         let done = m
             .atomic_members
@@ -863,11 +1751,16 @@ fn module_brief(store: &Store, m: &Module) -> String {
             })
             .count();
         return format!(
-            "{} {} — {} — Modules {accepted}/{} accepted; Atomics {done}/{} done; {} — last reported: {}",
+            "{} {} — {} — Modules {accepted}/{} {}; Atomics {done}/{} done; {} — last reported: {}",
             m.id,
             store::safe(&m.title, 120),
             store.phase(m),
             m.modules.len(),
+            if m.core().is_some() {
+                "current-reviewed"
+            } else {
+                "accepted"
+            },
             m.atomic_members.len(),
             lead_line(m),
             m.updated_at
@@ -884,6 +1777,28 @@ fn module_brief(store: &Store, m: &Module) -> String {
             m.updated_at
         );
     }
+    let core_preview = if let Some(core) = m.core() {
+        format!(
+            "; planning {}; candidate {}; current-review ready for integration {}",
+            if core
+                .planning
+                .as_ref()
+                .is_some_and(|p| m.plan_basis().is_ok_and(|b| b == p.basis))
+            {
+                "current"
+            } else {
+                "missing/stale"
+            },
+            m.result
+                .as_ref()
+                .and_then(|r| r.candidate.as_deref())
+                .map(|c| store::safe(c, 256))
+                .unwrap_or("unknown".into()),
+            store.module_ready(m)
+        )
+    } else {
+        String::new()
+    };
     let obligations = m
         .workflow
         .as_ref()
@@ -895,7 +1810,22 @@ fn module_brief(store: &Store, m: &Module) -> String {
                     .map(|c| c
                         .provides
                         .iter()
-                        .map(|c| format!("{}: {}", c.peer, store::safe(&c.description, 80)))
+                        .map(|c| format!(
+                            "{}{}: {}",
+                            c.peer,
+                            if m.core().is_some() {
+                                format!(
+                                    " contract={} revision={}",
+                                    c.id.as_deref().unwrap_or("unknown"),
+                                    c.revision
+                                        .map(|v| v.to_string())
+                                        .unwrap_or("unknown".into())
+                                )
+                            } else {
+                                String::new()
+                            },
+                            store::safe(&c.description, 80)
+                        ))
                         .collect::<Vec<_>>()
                         .join("; "))
                     .unwrap_or_else(|| "unknown".into()),
@@ -904,7 +1834,22 @@ fn module_brief(store: &Store, m: &Module) -> String {
                     .map(|c| c
                         .consumes
                         .iter()
-                        .map(|c| format!("{}: {}", c.peer, store::safe(&c.description, 80)))
+                        .map(|c| format!(
+                            "{}{}: {}",
+                            c.peer,
+                            if m.core().is_some() {
+                                format!(
+                                    " contract={} revision={}",
+                                    c.id.as_deref().unwrap_or("unknown"),
+                                    c.revision
+                                        .map(|v| v.to_string())
+                                        .unwrap_or("unknown".into())
+                                )
+                            } else {
+                                String::new()
+                            },
+                            store::safe(&c.description, 80)
+                        ))
                         .collect::<Vec<_>>()
                         .join("; "))
                     .unwrap_or_else(|| "unknown".into()),
@@ -917,7 +1862,7 @@ fn module_brief(store: &Store, m: &Module) -> String {
         })
         .unwrap_or_default();
     format!(
-        "{} {} — {} — {}/{} tasks done; {} open; {} canceled; Atomics {}/{} done, {} open, {} canceled; {} — {owner}; last reported: {}{}",
+        "{} {} — {} — {}/{} tasks done; {} open; {} canceled; Atomics {}/{} done, {} open, {} canceled; {} — {owner}; last reported: {}{}{}",
         m.id,
         store::safe(&m.title, 120),
         store.phase(m),
@@ -940,7 +1885,8 @@ fn module_brief(store: &Store, m: &Module) -> String {
             .count(),
         lead_line(m),
         m.updated_at,
-        obligations
+        obligations,
+        core_preview
     )
 }
 /// Compact embedded work row preserves identity/state/checks and declared Atomic executor.
@@ -987,6 +1933,18 @@ fn result_rows(rows: &mut Vec<String>, target: &str, report: &Option<Report>) {
                 .unwrap_or("unknown".into()),
             r.reported_at
         ));
+        if let Some(candidate) = &r.candidate {
+            rows.push(format!(
+                "{target} candidate: {}",
+                store::safe(candidate, 256)
+            ));
+        }
+        for scope in &r.changed_scope {
+            rows.push(format!(
+                "{target} changed scope: {}",
+                store::safe(scope, 256)
+            ));
+        }
         for (label, values) in [
             ("Gap", &r.gaps),
             ("Followup", &r.followups),
@@ -1082,7 +2040,7 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
     let done = scan
         .modules
         .iter()
-        .filter(|m| m.value.id.starts_with("M-") && store.phase(&m.value) == "accepted")
+        .filter(|m| m.value.id.starts_with("M-") && store.module_ready(&m.value))
         .count();
     let tasks: usize = scan.modules.iter().map(|m| m.value.tasks.len()).sum();
     let counts = |s| {
@@ -1091,7 +2049,12 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
             .map(|m| count(&m.value, s))
             .sum::<usize>()
     };
-    value.lines.push(format!("Modules: {done} accepted / {modules} readable. Tasks: {} done / {tasks} readable; {} open; {} canceled.{}",
+    let module_label = if scan.modules.iter().any(|m| m.value.core().is_some()) {
+        "current-reviewed"
+    } else {
+        "accepted"
+    };
+    value.lines.push(format!("Modules: {done} {module_label} / {modules} readable. Tasks: {} done / {tasks} readable; {} open; {} canceled.{}",
         counts(TaskState::Done),counts(TaskState::Open),counts(TaskState::Canceled),if scan.complete {""}else{" Counts are lower bounds; unreadable work is unknown."}));
     let epics = scan
         .modules
@@ -1172,6 +2135,7 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
     for snapshot in &scan.modules {
         let m = &snapshot.value;
         value.rows.push(module_brief(&store, m));
+        core_attention(&store, m, &mut value);
         value.rows.push(format!(
             "{} expected: {} — current summary: {}",
             m.id,
@@ -1229,6 +2193,23 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
             value
                 .rows
                 .push(format!("{} writes blocked: {}", m.id, store::safe(&e, 180)));
+        }
+    }
+    if args.module.is_none() && scan.modules.iter().any(|m| m.value.core().is_some()) {
+        match store.ready_sets(None) {
+            Ok(sets) => {
+                for participants in sets {
+                    match store.coverage_basis(&participants) {
+                    Ok(key) => value.rows.push(format!("Integration attention: ready connected Modules {}; candidate/contract key={key}; get_context view=integration for current coverage and dispatch scope.",participants.join(", "))),
+                    Err(e) => partial(&mut value,"integration dispatch key",&e.message),
+                }
+                }
+            }
+            Err(e) => partial(
+                &mut value,
+                "integration dispatch scope (unknown)",
+                &e.message,
+            ),
         }
     }
     for issue in scan.unreadable {
@@ -1298,6 +2279,12 @@ fn evidence_fields(
 ) {
     if let Some(r) = result {
         fields.push(("result", r.summary.clone()));
+        if let Some(candidate) = &r.candidate {
+            fields.push(("candidate", candidate.clone()));
+        }
+        if !r.changed_scope.is_empty() {
+            fields.push(("changed_scope", r.changed_scope.join(" ")));
+        }
         fields.push(("gaps", r.gaps.join(" ")));
         fields.push(("followups", r.followups.join(" ")));
         fields.push(("artifacts", r.artifacts.join(" ")));
@@ -1432,9 +2419,127 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
             }
             fields.push(("scenarios", w.scenarios.join(" ")));
         }
+        if let Some(core) = m.core() {
+            if let Some(plan) = &core.planning {
+                fields.push((
+                    "planning",
+                    format!(
+                        "{} {} {} {} {}",
+                        plan.responsibility,
+                        plan.scope,
+                        plan.exclusions.join(" "),
+                        plan.read_refs.join(" "),
+                        plan.uncertainties.join(" ")
+                    ),
+                ));
+            }
+            for agreement in &core.agreements {
+                fields.push((
+                    "contract agreement",
+                    format!(
+                        "{} revision {} {}",
+                        agreement.contract_id, agreement.revision, agreement.summary
+                    ),
+                ));
+            }
+            for evidence in &core.boundary_evidence {
+                fields.push((
+                    "boundary control",
+                    format!(
+                        "{} {} {} {} {} {} {} {}",
+                        evidence.contract_id,
+                        evidence.candidate,
+                        evidence.conditions,
+                        evidence.mutation,
+                        evidence.correct.detail,
+                        evidence.failed.detail,
+                        evidence.restored.detail,
+                        evidence.artifacts.join(" ")
+                    ),
+                ));
+            }
+            for scope in &core.criterion_scopes {
+                fields.push((
+                    "criterion affected scope",
+                    format!("{} {}", scope.text, scope.modules.join(" ")),
+                ));
+            }
+            for verification in &core.criterion_verifications {
+                fields.push((
+                    "business verification",
+                    format!(
+                        "{} {} {} {} {} {}",
+                        verification.scope.text,
+                        verification.candidate,
+                        verification.environment,
+                        verification.scenarios.join(" "),
+                        verification.summary,
+                        verification.artifacts.join(" ")
+                    ),
+                ));
+            }
+            let mut projection = page(String::new(), String::new());
+            core_rows(&store, m, View::Summary, &mut projection);
+            fields.push((
+                "core planning/recovery/contracts/integration",
+                projection.rows.join(" "),
+            ));
+            for binding in &core.bindings {
+                for term in std::iter::once(&binding.current).chain(&binding.history) {
+                    if let Some(loss) = &term.loss {
+                        fields.push((
+                            "irrecoverable agent loss",
+                            format!("{} {}", loss.reason, loss.observation),
+                        ));
+                    }
+                    if let Some(immersion) = &term.immersion {
+                        fields.push((
+                            "agent immersion",
+                            format!(
+                                "{} {} {} {}",
+                                immersion.understanding,
+                                immersion.sources.join(" "),
+                                immersion.unfinished.join(" "),
+                                immersion.gaps.join(" ")
+                            ),
+                        ));
+                    }
+                    fields.push((
+                        "bound agent",
+                        format!(
+                            "{} {} {} {} {}",
+                            term.identity.harness,
+                            term.identity.agent_id,
+                            term.identity.communication_ref,
+                            term.identity.resume_ref.as_deref().unwrap_or_default(),
+                            term.identity.launch_ref
+                        ),
+                    ));
+                }
+            }
+        }
         evidence_fields(&mut fields, &m.result, &m.checks);
         for r in &m.reviews {
             fields.push(("review", r.summary.clone()));
+            if let Some(candidate) = &r.candidate {
+                fields.push(("review candidate", candidate.clone()));
+            }
+            if !r.contracts.is_empty() {
+                fields.push((
+                    "review contracts",
+                    r.contracts
+                        .iter()
+                        .map(|(id, revision)| format!("{id} revision {revision}"))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ));
+            }
+            if !r.changed_scope.is_empty() {
+                fields.push(("review changed_scope", r.changed_scope.join(" ")));
+            }
+            for resolution in &r.resolved_findings {
+                fields.push(("finding resolution", resolution.summary.clone()));
+            }
             for f in &r.findings {
                 fields.push(("finding", f.text.clone()));
             }

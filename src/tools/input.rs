@@ -1,6 +1,7 @@
 //! Closed semantic arguments. Presence-aware edits never erase omitted fields.
 use crate::model::{
-    CheckInput, CheckStatus, Contracts, Dependency, Execution, Finding, Lead, Verdict,
+    AgentRole, BoundaryObservation, CheckInput, CheckStatus, Contracts, CriterionScope, Dependency,
+    Execution, Finding, FindingResolution, Lead, Verdict,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer};
@@ -94,6 +95,8 @@ pub enum View {
     Log,
     /// Retained local commit observations/messages without rescanning Git.
     Commits,
+    /// Current ready connected components, candidate/contract coverage and gaps.
+    Integration,
 }
 
 /// Read one Project/Epic/Module/Task/Atomic scope with snapshot-bound pagination.
@@ -172,6 +175,11 @@ pub struct TaskInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Plan {
+    /// Freeze the negotiated roster after lead discovery/agreement and cycle/isolation checks, not completion waits.
+    FreezeEpic {
+        /// Existing Epic reference and current owner Version.
+        epic: String,
+    },
     /// Explicitly initialize only missing owned records in an empty configured root.
     InitProject {
         /// Required human project title.
@@ -267,6 +275,10 @@ pub enum Plan {
         #[serde(default, deserialize_with = "required_patch")]
         #[schemars(with = "Vec<String>")]
         atomics: Patch<Vec<String>>,
+        /// Exact zero-based current business criterion scopes; omission preserves, [] clears.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "Vec<CriterionScope>")]
+        criterion_scopes: Patch<Vec<CriterionScope>>,
     },
     /// Allocate a standalone Atomic; attach it to an Epic separately using edit_epic.
     CreateAtomic {
@@ -296,11 +308,11 @@ pub enum Plan {
         module: String,
         /// Nonempty Atomic title.
         title: String,
-        /// Expected outcome, reviewed with the whole Module.
+        /// Expected independently reviewed Atomic outcome.
         outcome: String,
         /// Optional declared executor.
         executor: Option<Lead>,
-        /// Explicit Atomic checks, enforced at whole-Module review.
+        /// Explicit Atomic checks, enforced at its independent and owning-Module reviews.
         #[serde(default)]
         required_checks: Vec<String>,
     },
@@ -421,11 +433,135 @@ pub enum Completion {
     Done,
 }
 
+/// Explicit role recovery stage; no runtime polling or automatic replacement.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryStage {
+    /// Original actor is lost and cannot continue or resume.
+    Lost,
+    /// Replacement reconstructs context; gaps still block use.
+    Immersed,
+}
+
 /// Record current substance or lifecycle, never supplied timestamps or raw patches.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Work {
-    /// Report execution start; never launches agents. First Epic begin permanently freezes its Module roster.
+    /// Explicitly activate lead-first coordination; reads never migrate or invent historical facts.
+    AdoptCore {},
+    /// Bind actual launch receipt identity; never launches a model or guesses an ID.
+    BindAgent {
+        /// Persistent role owned by this record.
+        role: AgentRole,
+        /// Supported configured harness.
+        harness: String,
+        /// Actual observed runtime ID.
+        agent_id: String,
+        /// Supported messaging address.
+        communication_ref: String,
+        /// Optional actual resume address.
+        resume_ref: Option<String>,
+        /// Observed launch/request receipt.
+        launch_ref: String,
+    },
+    /// Report both irrecoverable loss or replacement's reconstructed understanding.
+    RecoverAgent {
+        /// Current persistent role.
+        role: AgentRole,
+        /// lost or immersed; no arbitrary state setter.
+        stage: RecoveryStage,
+        /// Lost-stage reason, at most 512 bytes.
+        reason: Option<String>,
+        /// Observed loss AND inability to continue/resume.
+        observation: Option<String>,
+        /// Lost stage requires true.
+        lost: Option<bool>,
+        /// Lost stage requires true; temporary timeouts do not qualify.
+        unrecoverable: Option<bool>,
+        /// Immersed understanding, at most 1024 bytes.
+        understanding: Option<String>,
+        /// Eight context/source references.
+        #[serde(default)]
+        sources: Vec<String>,
+        /// Eight concrete unfinished items.
+        #[serde(default)]
+        unfinished: Vec<String>,
+        /// Eight unresolved gaps; any gap blocks continuation.
+        #[serde(default)]
+        gaps: Vec<String>,
+    },
+    /// Actual bound lead discovers responsibility, Tasks and boundary obligations before implementation.
+    Planning {
+        /// Code-supported responsibility.
+        responsibility: String,
+        /// Inclusion/read boundary.
+        scope: String,
+        /// Eight exclusions.
+        #[serde(default)]
+        exclusions: Vec<String>,
+        /// Eight code/material refs.
+        #[serde(default)]
+        read_refs: Vec<String>,
+        /// Advisory unknowns; blockers preserve mandatory unresolved work.
+        #[serde(default)]
+        uncertainties: Vec<String>,
+    },
+    /// Actual bound affected lead confirms exact reciprocal canonical revision.
+    AgreeContract {
+        /// Canonical boundary ID.
+        contract_id: String,
+        /// Exact positive current revision.
+        revision: u64,
+        /// Meaningful agreement.
+        summary: String,
+    },
+    /// Report correct pass, intended mutant failure, and restored pass for exact candidate/contract.
+    BoundaryEvidence {
+        /// Canonical ID, or local when no cross-boundary contract is declared.
+        contract_id: String,
+        /// Exact positive revision.
+        revision: u64,
+        /// Restored candidate.
+        candidate: String,
+        /// Controlled initial conditions.
+        conditions: String,
+        /// Correct implementation control.
+        correct: BoundaryObservation,
+        /// Deliberate promised-behavior violation.
+        mutation: String,
+        /// Intended failure under the same contract test.
+        failed: BoundaryObservation,
+        /// Successful restored control.
+        restored: BoundaryObservation,
+        /// Eight primary artifacts.
+        #[serde(default)]
+        artifacts: Vec<String>,
+    },
+    /// Actual current business/E2E verification over the declared criterion's affected composition.
+    VerifyCriterion {
+        /// Zero-based current Epic criterion index.
+        index: usize,
+        /// Exact current criterion text.
+        text: String,
+        /// Exact declared affected Module set.
+        modules: Vec<String>,
+        /// Actual composition candidate, not union of pairwise jobs.
+        candidate: String,
+        /// Actual environment.
+        environment: String,
+        /// Actual scenarios.
+        scenarios: Vec<String>,
+        /// Meaningful business outcome.
+        summary: String,
+        /// Required passed check observations.
+        checks: Vec<CheckInput>,
+        /// Eight primary artifacts.
+        #[serde(default)]
+        artifacts: Vec<String>,
+        /// Optional ONE accepted composition covering the whole affected set.
+        integration_ref: Option<String>,
+    },
+    /// Report execution start; never launches agents. Core Epic roster freezes explicitly after planning.
     Begin {},
     /// Explicitly complete a Task/Atomic using its already-recorded meaningful result; never reviews a Task.
     Complete {},
@@ -449,6 +585,11 @@ pub enum Work {
     Result {
         /// Meaningful outcome, at most 1024 UTF-8 bytes.
         summary: String,
+        /// Definite Module/integration candidate; no separate submission action.
+        candidate: Option<String>,
+        /// Eight explicit changed-scope references for later review.
+        #[serde(default)]
+        changed_scope: Vec<String>,
         /// Tasks/Atomics only; omission preserves local completion. Modern Atomic done remains pending independent review.
         state: Option<Completion>,
         /// Current check reports; omission means an empty set, not a partial edit.
@@ -528,7 +669,7 @@ pub struct ReviewArgs {
     pub version: String,
     /// accepted or changes_requested; a saved negative verdict is not a tool error.
     pub verdict: Verdict,
-    /// Meaningful review conclusion, at most 1024 UTF-8 bytes.
+    /// Meaningful review conclusion, at most 1024 UTF-8 bytes; core whole-Module reviews require a submission.
     pub summary: String,
     /// At most eight findings; accepted forbids must_fix findings.
     #[serde(default)]
@@ -538,6 +679,12 @@ pub struct ReviewArgs {
     pub checks: Vec<ReviewCheck>,
     /// Declared reviewer identity; unknown remains unknown, never authenticated.
     pub actor: Option<String>,
+    /// Explicit follow-up scope; empty for initial whole review.
+    #[serde(default)]
+    pub changed_scope: Vec<String>,
+    /// Independently resolved retained finding refs, zero-based.
+    #[serde(default)]
+    pub resolved_findings: Vec<FindingResolution>,
 }
 
 /// Independent whole-Epic/Module and standalone/embedded Atomic review; Tasks have no review.
@@ -563,6 +710,12 @@ pub struct ReviewWorkArgs {
     pub checks: Vec<ReviewCheck>,
     /// Declared independent reviewer; unknown remains unknown.
     pub actor: Option<String>,
+    /// Explicit follow-up scope, eight 256-byte refs.
+    #[serde(default)]
+    pub changed_scope: Vec<String>,
+    /// Stable zero-based prior finding refs in this target's own history, with verified resolutions.
+    #[serde(default)]
+    pub resolved_findings: Vec<FindingResolution>,
 }
 
 /// Common mutation fields removed before decoding the closed operation variant.

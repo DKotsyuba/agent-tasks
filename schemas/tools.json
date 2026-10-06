@@ -116,7 +116,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Purpose: Obtain a bounded start/resume pack, actual conditions and correct write Version.\nInput: project alias; omit ref for Project, otherwise E-001/M-001/A-001/M-001/T-001/M-001/A-001. Default view=summary; work views tasks/results/checks/review/log/commits. Project supports summary; Tasks have no review. Module-ref delegation uses this pack plus addressed detail pages, without copying a second launch brief.\nOutput: intent, relevant parent background, own criteria, declared execution, provides/consumes peers, explicit waits/readiness, lead/executor, local progress, independent review, delivery and current/stale integration. Parent criteria are background; only owner-declared checks are requirements. Missing/unreadable requirements remain named PARTIAL data, not zero work. Actor/runtime/artifact facts are reported.\nVersion guards the owning record; embedded children share Module Version. Relevant dependency observations bind modern writes; Allocation version only creates top-level work. Snapshot version is READ continuation only. start=0 and limit=1-20; continue returned start/Snapshot version with unchanged project/ref/view/review_index. review_index selects retained verdict history.\ncommits reads retained source metadata/original messages without querying Git. Effects: read only, no migration/repair/runtime polling. After stale/partial/unknown outcomes inspect current scope, then reconcile; do not replay a write to fix presentation.",
+    "description": "Purpose: Read one bounded assignment/current continuation pack with the correct owning Version. Omit ref for Project; E/M/A/M/T/M/A refs select work. Default summary; tasks/results/checks/review/log/commits detail views. integration is Project/Epic-only and returns ready connected components >=2, exact candidate/contract coverage keys and current/needed assembly facts without unrelated-Module barriers.\nCore summary exposes real observed harness/agent_id/contact/resume, retained predecessors, loss/immersion gaps, lead discovery, exact canonical agreements, candidates and correct-pass/mutant-fail/restored-pass controls. Module-ref assignment does not duplicate a launch brief. Labels are not runtime IDs; text grants no permissions. Current role contacts/history are distinct from quality applicability.\nVersion is the owning file/dependency observation token; embedded work shares Module Version. Allocation version creates top-level records. Snapshot version is read continuation only: reuse returned start/snapshot with unchanged project/ref/view/review_index; indexes are zero-based, limit1-20. Changed scope/data refuses.\nData/detail coverage are explicit; partial/unreadable facts are not zero or fully verified. commits reads retained messages without Git. Effects: read only, no migration/runtime polling/repair. After lost/partial/uncertain writes inspect this current scope before another mutation.",
     "inputSchema": {
       "$defs": {
         "View": {
@@ -155,6 +155,11 @@
             {
               "const": "commits",
               "description": "Retained local commit observations/messages without rescanning Git.",
+              "type": "string"
+            },
+            {
+              "const": "integration",
+              "description": "Current ready connected components, candidate/contract coverage and gaps.",
               "type": "string"
             }
           ]
@@ -225,7 +230,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Purpose: Present one complete bounded overview of tracked project activity to the owner.\nInput: project alias; optional module=E-001/M-001/A-001 narrows work and totals.\nOutput: readable Epic/Module/Task/Atomic counts, active/standalone scope, declared leads/executors, local results/checks, peer obligations/waits, review/delivery/integration attention, blockers and imported report summaries. Tasks are counted separately; Atomic local done is distinct from current reviewed closure. Canceled work is separate. Existing intrinsic approvals/delivery do not become implementation drift merely because parent ownership is unknown; new decisions still refuse uncertain requirements.\nData coverage names unreadable work; partial totals are lower bounds. Detail coverage separately discloses omitted rows; use narrowing or get_context detail pages. Handles are reported references, not live-process proof.\nEffects: read only; no saved status document, Git query, agent launch or automatic cascade. Requires a readable Project manifest.",
+    "description": "Purpose: One compact tracked-work overview for orchestration/owner reporting. Input project alias, optional module=E/M/A scope. Shows planning/agreement/role recovery attention, real observed IDs versus display labels, Module candidate quality readiness, Tasks local done, Atomic local outcome/review, connected integration coverage and business verification. No live process claim.\nCore positive Module review means ready for integration even without target-branch merge. Parent cancellation or contact bookkeeping does not invent implementation drift. Missing ownership/required facts still block new decisions. Canceled work and partial readable totals are separate; omitted detail has routes to get_context.\nEffects: read only; no saved status document, model launch, Git query or cascade. Counts cover healthy readable scope; unknown work is named, not zero. Narrow after budgets.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -317,7 +322,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Create/edit intent and relationships; never start agents or set arbitrary status.\nInput: project, op, current Version and optional actor. init_project(title,purpose,remote?) and create_module/create_epic/create_atomic use Project Allocation version. edit_project uses manifest Version.\ncreate_module(title,outcome,lead?,criteria[],required_checks[],tasks[],execution?,contracts?,dependencies[]) creates standalone M-001. execution={repository,worktree,branch,target_branch}; contracts={not_required,provides[],consumes[]} entries={peer:M-001,description,reference?,ready}. Bundle obligations per peer/direction; reciprocal contract links are allowed and do not imply waits. dependencies={ref:E/M,condition:accepted|delivered,reason}; delivered is Module-only. Reject dangling/duplicate/self/cyclic blocking refs including parent closure cycles.\nedit_module(module, optional matching fields) uses Module Version. add_task(module,title,criterion?,required_checks[]) / edit_task(ref,...) preserve Task leaf ownership.\ncreate_epic(title,outcome,criteria[],lead?,required_checks[]) creates E-001; edit_epic(epic,intent/checks/lead?,modules[],atomics[]) replaces supplied member lists. First reported Epic begin freezes the Module roster forever through reopen; later Module changes/moves refuse. Atomics remain attachable. Creation and attachment are separate writes with disclosed independent outcomes.\ncreate_atomic(title,outcome,executor?,required_checks[],participants[],execution?,environment?,scenarios[]) creates A-001; add_atomic(module,title,outcome,executor?,required_checks[]) embeds M-001/A-001. edit_atomic(ref, optional matching fields) preserves omission; embedded Atomics inherit execution and cannot declare standalone participants/environment.\nOmission preserves; null clears optional fields, [] clears lists. Semantic edits stale approval and modern Module delivery. New records follow explicit workflow; legacy records remain grandfathered until explicit begin. Adding declarations alone does not opt legacy lifecycle in.\nOutput: saved/unchanged target, owning Version/phase and effects. Effects: local guarded YAML writes with allocated IDs/dates; no Git write, runner or document writer. Lost/partial/uncertain creation retains reserved gaps; inspect context/inventory before another mutation.",
+    "description": "Purpose: Create/edit durable intent and relationships, not run models. Common project/op/version/optional actor; top-level init/create uses Allocation version; owner edits and embedded children use owning Version. New records use core coordination; old managed1/unmanaged records keep absent-core behavior until explicit adopt_core, without read migration.\ncreate_module creates provisional title/outcome/criteria/execution/contracts/dependencies context, without invented initial Tasks. Launch the lead externally, bind the returned ID, then actual bound lead uses add_task/edit_task with actor=agent_id and planning report. edit_module lead cannot silently change/clear a bound runtime identity. Display metadata is not an ID.\nContracts={not_required,provides[],consumes[]}; each core entry={id,revision,peer,description,reference?,ready}. Provider owns canonical boundary ID/positive revision/artifact; reciprocal consumed facts must match. Bundle obligations per peer/direction; all affected bound leads explicitly agree. ready is legacy metadata, never a substitute. Affecting changes need increased revision and fresh confirmations/quality; removal does not reset retained canonical revision or definition history (16 snapshots). Literal local is reserved for local quality controls.\nDependencies={ref:E/M,condition:accepted|delivered,reason}. Only real blocking waits form cycles; contract/data-flow cycles are allowed. Cycles return architecture attention before coding.\ncreate_epic(title,outcome,criteria,lead?,checks?) / edit_epic(epic,...modules[],atomics[],criterion_scopes[]) plan provisional roster and exact business scopes {index,text,modules}. Index/text matches current criteria, zero-based. freeze_epic(epic) follows lead discovery/agreement/prepared distinct checkouts and cycle checks BEFORE implementation. It does not require acyclic completion waits already met. Atomics remain attachable; creation and attachment are independent explicit publications.\ncreate/edit_atomic uses participants/execution/environment/scenarios for real integration jobs; Module Atomics remain embedded. Omission preserves; null clears optional fields; [] clears lists. Canceled work needs reasoned reopen. Semantic intent/candidate/contracts stale affecting approval/coverage, contact-only bookkeeping does not.\nOutput saved/unchanged target, owning Version/phase and disclosed effects. No model/Git write/daemon. Lost/partial creation retains reservations and visible state; inspect before retrying.",
     "inputSchema": {
       "$defs": {
         "Contract": {
@@ -327,6 +332,13 @@
             "description": {
               "description": "Behavioral obligation, at most 1024 bytes, distinct from the owning work's outcome.",
               "type": "string"
+            },
+            "id": {
+              "description": "Canonical boundary identity; absence preserves old entries.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "peer": {
               "description": "Canonical peer M- reference; dangling/self peers refuse.",
@@ -340,6 +352,15 @@
               "description": "Optional canonical artifact/document reference, at most 256 bytes.",
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "revision": {
+              "description": "Positive exact canonical revision.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
                 "null"
               ]
             }
@@ -378,6 +399,35 @@
           },
           "required": [
             "not_required"
+          ],
+          "type": "object"
+        },
+        "CriterionScope": {
+          "additionalProperties": false,
+          "description": "Existing criterion and explicit affected composition scope.",
+          "properties": {
+            "index": {
+              "description": "Zero-based Epic criteria index.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "modules": {
+              "description": "At most 32 affected canonical Modules.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "text": {
+              "description": "Exact current criterion text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "index",
+            "text",
+            "modules"
           ],
           "type": "object"
         },
@@ -503,6 +553,42 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Flat operation-specific plan arguments. Common project/version/actor are decoded separately.",
       "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Freeze the negotiated roster after lead discovery/agreement and cycle/isolation checks, not completion waits.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "epic": {
+              "description": "Existing Epic reference and current owner Version.",
+              "type": "string"
+            },
+            "op": {
+              "const": "freeze_epic",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "epic",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
         {
           "additionalProperties": false,
           "description": "Explicitly initialize only missing owned records in an empty configured root.",
@@ -795,6 +881,13 @@
               },
               "type": "array"
             },
+            "criterion_scopes": {
+              "description": "Exact zero-based current business criterion scopes; omission preserves, [] clears.",
+              "items": {
+                "$ref": "#/$defs/CriterionScope"
+              },
+              "type": "array"
+            },
             "epic": {
               "description": "Target E-001; module and Atomic ownership lives only in this record.",
               "type": "string"
@@ -978,7 +1071,7 @@
               "type": "string"
             },
             "outcome": {
-              "description": "Expected outcome, reviewed with the whole Module.",
+              "description": "Expected independently reviewed Atomic outcome.",
               "type": "string"
             },
             "project": {
@@ -987,7 +1080,7 @@
             },
             "required_checks": {
               "default": [],
-              "description": "Explicit Atomic checks, enforced at whole-Module review.",
+              "description": "Explicit Atomic checks, enforced at its independent and owning-Module reviews.",
               "items": {
                 "type": "string"
               },
@@ -1327,9 +1420,55 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Report actual progress, local decisions, start, delivery or explicit local Git report import.\nInput: project, op, ref, owning Version, optional declared actor. Embedded children share Module Version.\nbegin reports lifecycle start only; never launches agents. First Epic begin freezes its Module roster. Module begin needs known lead/criteria, declared repository/worktree/branch/target_branch, declared ready contracts and resolved blocking waits plus open/begun parent. Integration Atomic begin needs executor, real environment/scenarios and currently accepted/delivered participating Modules. Explicit legacy begin opts into modern policy.\nresult replaces the COMPLETE summary/checks/gaps/followups/artifacts report; omitted lists clear current data. Task/Atomic state=open|done is explicit local state, omission preserves. Task done is the known Module lead's decision after tests OR manual verification; no Task review. Modern Atomic local done remains pending independent review. Module/Epic results omit state. complete decides local Task/Atomic completion using its existing meaningful report, avoiding duplicate narration. Modern undo uses reasoned reopen.\ndeliver(ref=M,target_branch,summary,artifact?) reports the current independently reviewed Module's delivery to the declared target. Local merge counts; hosting PR optional. No second review is needed for delivery bookkeeping; semantic changes/reopen invalidate it.\nimport_commits(commits:[1-8 hex selectors],state?) resolves declared execution and uses ONE bounded five-second/80-KiB read-only Git inspection. Repository/worktree identity and actual branch must match declarations; selectors must name commit objects. Retain canonical repository/full SHA/author/date/subject/original message and parsed Result/Checks/Gaps/Followups. Dedup repository+SHA across owner targets. All reads/validation finish before publication; capacity or late failure leaves current report unchanged. Import alone never closes work; explicit done remains a local decision. Duplicate imports never refresh integration evidence. view=commits reads retained history after Git changes.\nblocker/handoff/clear_* target top-level work; clear requires reason. Handoff/date metadata does not stale evidence. cancel/reopen require reasons; parents resolve children first, no cascade, canceled parents block writes. Every modern Atomic has independent review.\nOutput: saved/unchanged target, owning phase/Version and exact effects; embedded receipts label Module phase. Imported facts remain reported assertions, not certificates. No Git commit/merge/push, GitHub API, credential reading or agent launch. After stale/lost/partial/unknown outcomes inspect context/history before retrying.",
+    "description": "Purpose: Record explicit trusted observations and progress, never launch models or arbitrarily set status. Common project/ref/version/actor; owning Module Version covers its Tasks/Atomics.\nadopt_core explicitly activates an old owner, stales earlier approval and invents no missing facts. bind_agent(role,harness,agent_id,communication_ref,resume_ref?,launch_ref) stores actual launch-before-bind receipt data; same ID retries do not duplicate history. Module lead/reviewer and integration integrator/reviewer persist. Epic actions have orchestrator attribution and no binding slots; generic Atomic retains executor/review policy.\nrecover_agent(role,stage=lost|immersed,...): lost requires lost=true AND unrecoverable=true plus reason/observation of inability to continue/resume; temporary timeout/model preference is insufficient. Only then may replacement bind; it needs a new actual-ID immersion report with understanding/sources/unfinished/gaps. Gaps block scoped continuation; prior identities/work/findings remain.\nplanning(responsibility,scope,exclusions,read_refs,uncertainties) is the bound lead discovery before coding; Task/contract/dependency outputs do not self-invalidate it. Significant goal/criteria/execution changes need renewal. agree_contract(contract_id,revision,summary) is each actual affected lead's exact reciprocal confirmation.\nbegin reports lifecycle only. Core Epic begin permits planning; freeze_epic later freezes negotiated roster. Module coding needs actual bound lead/current planning/agreement/environment/frozen parent and actual fulfilled waits. Separate active Module writable checkouts; integration separate.\nresult replaces COMPLETE current summary/checks/gaps/followups/artifacts with optional definite candidate/changed_scope. Module positive review needs exact restored candidate. Task completion is actual bound lead's tests OR manual decision; import/runtime/check success does not close it. complete uses the existing meaningful local report. No independent Task review.\nboundary_evidence(contract_id,revision,candidate,conditions,correct,mutation,failed,restored,artifacts) records actual passed/failed/passed controls. correct/failed/restored={status,detail,artifact?}; no assertion/setup mutation to fake failure. For contracts.not_required=true use local revision1, reserved for Module-local quality. Controls bind candidate AND meaningful goal/criteria/execution intent; changed tested scope needs fresh observations. MCP neither executes nor certifies them.\nIntegration Atomic begins with >=2 connected current-reviewed Modules, actual integrator, distinct checkout/environment/scenarios. First begin claims exact current inputs and refuses equivalent pending or accepted work. Definite assembly candidate is required for review; changed inputs need explicit reopen/recheck, never late rebinding. No code change needs no fabricated commit.\nverify_criterion(index,text,modules,candidate,environment,scenarios,summary,checks,artifacts,integration_ref?) on Epic matches its exact declared affected scope. Record actual current business/E2E verification; ONE integration_ref must cover that whole composition and match report inputs. AB+BC union is never ABC business proof. All indexes zero-based.\nimport_commits reads1-8 validated hex commit objects under ONE5s/80KiB preflight/read budget; verifies declared repo/worktree/branch, retains original metadata/messages and dedups canonical repo/fullSHA. Parsed Result/Checks/Gaps/Followups are reported assertions. Module core candidate is exact fullSHA; artifacts retain commit locators. Late failure/capacity preserves current report. Explicit done is still lead decision; duplicate import never refreshes integration evidence.\ndeliver records separate local delivery bookkeeping; it is not core Module integration readiness. blocker/handoff/clear/cancel/reopen preserve reasons/history and no cascade. Semantic candidate/reopen invalidates relevant coverage; role/contact/handoff dates alone do not.\nOutput saved/unchanged owning Version/phase and exact effects. No Git write/GitHub/runtime execution/credential reading. After stale/lost/partial/unknown outcomes inspect current context/history before retrying.",
     "inputSchema": {
       "$defs": {
+        "AgentRole": {
+          "description": "Durable participant role; runtime execution remains external.",
+          "oneOf": [
+            {
+              "const": "lead",
+              "description": "Persistent Module discovery/implementation owner.",
+              "type": "string"
+            },
+            {
+              "const": "reviewer",
+              "description": "Persistent independent reviewer.",
+              "type": "string"
+            },
+            {
+              "const": "integrator",
+              "description": "Integration assembly/check owner.",
+              "type": "string"
+            }
+          ]
+        },
+        "BoundaryObservation": {
+          "additionalProperties": false,
+          "description": "Meaningful reported test observation; MCP does not execute it.",
+          "properties": {
+            "artifact": {
+              "description": "Optional primary output.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "description": "Result/failure conditions, at most 512 bytes.",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/CheckStatus",
+              "description": "Actual control status."
+            }
+          },
+          "required": [
+            "status",
+            "detail"
+          ],
+          "type": "object"
+        },
         "CheckInput": {
           "additionalProperties": false,
           "description": "Agent-supplied check content. Dates and attribution are added by the MCP.",
@@ -1395,6 +1534,21 @@
               "type": "string"
             }
           ]
+        },
+        "RecoveryStage": {
+          "description": "Explicit role recovery stage; no runtime polling or automatic replacement.",
+          "oneOf": [
+            {
+              "const": "lost",
+              "description": "Original actor is lost and cannot continue or resume.",
+              "type": "string"
+            },
+            {
+              "const": "immersed",
+              "description": "Replacement reconstructs context; gaps still block use.",
+              "type": "string"
+            }
+          ]
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1402,7 +1556,527 @@
       "oneOf": [
         {
           "additionalProperties": false,
-          "description": "Report execution start; never launches agents. First Epic begin permanently freezes its Module roster.",
+          "description": "Explicitly activate lead-first coordination; reads never migrate or invent historical facts.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "adopt_core",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Bind actual launch receipt identity; never launches a model or guesses an ID.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_id": {
+              "description": "Actual observed runtime ID.",
+              "type": "string"
+            },
+            "communication_ref": {
+              "description": "Supported messaging address.",
+              "type": "string"
+            },
+            "harness": {
+              "description": "Supported configured harness.",
+              "type": "string"
+            },
+            "launch_ref": {
+              "description": "Observed launch/request receipt.",
+              "type": "string"
+            },
+            "op": {
+              "const": "bind_agent",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "resume_ref": {
+              "description": "Optional actual resume address.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "$ref": "#/$defs/AgentRole",
+              "description": "Persistent role owned by this record."
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "role",
+            "harness",
+            "agent_id",
+            "communication_ref",
+            "launch_ref",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Report both irrecoverable loss or replacement's reconstructed understanding.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "gaps": {
+              "default": [],
+              "description": "Eight unresolved gaps; any gap blocks continuation.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "lost": {
+              "description": "Lost stage requires true.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "observation": {
+              "description": "Observed loss AND inability to continue/resume.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "recover_agent",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Lost-stage reason, at most 512 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "role": {
+              "$ref": "#/$defs/AgentRole",
+              "description": "Current persistent role."
+            },
+            "sources": {
+              "default": [],
+              "description": "Eight context/source references.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "stage": {
+              "$ref": "#/$defs/RecoveryStage",
+              "description": "lost or immersed; no arbitrary state setter."
+            },
+            "understanding": {
+              "description": "Immersed understanding, at most 1024 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unfinished": {
+              "default": [],
+              "description": "Eight concrete unfinished items.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "unrecoverable": {
+              "description": "Lost stage requires true; temporary timeouts do not qualify.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "role",
+            "stage",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Actual bound lead discovers responsibility, Tasks and boundary obligations before implementation.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "exclusions": {
+              "default": [],
+              "description": "Eight exclusions.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "planning",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "read_refs": {
+              "default": [],
+              "description": "Eight code/material refs.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "responsibility": {
+              "description": "Code-supported responsibility.",
+              "type": "string"
+            },
+            "scope": {
+              "description": "Inclusion/read boundary.",
+              "type": "string"
+            },
+            "uncertainties": {
+              "default": [],
+              "description": "Advisory unknowns; blockers preserve mandatory unresolved work.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "responsibility",
+            "scope",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Actual bound affected lead confirms exact reciprocal canonical revision.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "contract_id": {
+              "description": "Canonical boundary ID.",
+              "type": "string"
+            },
+            "op": {
+              "const": "agree_contract",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "revision": {
+              "description": "Exact positive current revision.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "summary": {
+              "description": "Meaningful agreement.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "contract_id",
+            "revision",
+            "summary",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Report correct pass, intended mutant failure, and restored pass for exact candidate/contract.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "artifacts": {
+              "default": [],
+              "description": "Eight primary artifacts.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "candidate": {
+              "description": "Restored candidate.",
+              "type": "string"
+            },
+            "conditions": {
+              "description": "Controlled initial conditions.",
+              "type": "string"
+            },
+            "contract_id": {
+              "description": "Canonical ID, or local when no cross-boundary contract is declared.",
+              "type": "string"
+            },
+            "correct": {
+              "$ref": "#/$defs/BoundaryObservation",
+              "description": "Correct implementation control."
+            },
+            "failed": {
+              "$ref": "#/$defs/BoundaryObservation",
+              "description": "Intended failure under the same contract test."
+            },
+            "mutation": {
+              "description": "Deliberate promised-behavior violation.",
+              "type": "string"
+            },
+            "op": {
+              "const": "boundary_evidence",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "restored": {
+              "$ref": "#/$defs/BoundaryObservation",
+              "description": "Successful restored control."
+            },
+            "revision": {
+              "description": "Exact positive revision.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "contract_id",
+            "revision",
+            "candidate",
+            "conditions",
+            "correct",
+            "mutation",
+            "failed",
+            "restored",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Actual current business/E2E verification over the declared criterion's affected composition.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "artifacts": {
+              "default": [],
+              "description": "Eight primary artifacts.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "candidate": {
+              "description": "Actual composition candidate, not union of pairwise jobs.",
+              "type": "string"
+            },
+            "checks": {
+              "description": "Required passed check observations.",
+              "items": {
+                "$ref": "#/$defs/CheckInput"
+              },
+              "type": "array"
+            },
+            "environment": {
+              "description": "Actual environment.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Zero-based current Epic criterion index.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "integration_ref": {
+              "description": "Optional ONE accepted composition covering the whole affected set.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "modules": {
+              "description": "Exact declared affected Module set.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "verify_criterion",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "scenarios": {
+              "description": "Actual scenarios.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "summary": {
+              "description": "Meaningful business outcome.",
+              "type": "string"
+            },
+            "text": {
+              "description": "Exact current criterion text.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "index",
+            "text",
+            "modules",
+            "candidate",
+            "environment",
+            "scenarios",
+            "summary",
+            "checks",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Report execution start; never launches agents. Core Epic roster freezes explicitly after planning.",
           "properties": {
             "actor": {
               "description": "Declared identity; omitted/null remains unknown.",
@@ -1594,6 +2268,21 @@
             "artifacts": {
               "default": [],
               "description": "Reported commit/PR/other artifact references; defaults empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "candidate": {
+              "description": "Definite Module/integration candidate; no separate submission action.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "changed_scope": {
+              "default": [],
+              "description": "Eight explicit changed-scope references for later review.",
               "items": {
                 "type": "string"
               },
@@ -1940,7 +2629,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Independently review a whole Epic/Module or ANY Atomic, including embedded M-001/A-001. Tasks refuse.\nInput: project, ref=E/M/A/M/A, current owning Version, verdict=accepted|changes_requested, summary, optional actor/findings={text,must_fix}/checks={target,label,status,detail}. Known lead/executor/result author cannot self-review Atomics; known Module/Epic lead cannot self-review. Declared identities are not authentication.\nAtomic accepted needs reported begin, meaningful local completion, passed required checks and no gaps; integration evidence must be current. Embedded Atomic review writes only its owning Module and may update only that Atomic's checks. Whole Module review requires terminal Tasks and independently accepted/canceled Atomics, meaningful outcome, passed required checks and no blocker/gaps. Positive Module review yields reviewed; delivery pending until explicit matching reported delivery.\nEpic accepted needs begun frozen roster, current accepted/delivered noncanceled Modules, currently reviewed noncanceled Atomics, own result/checks/criteria and current independently reviewed integration whose participant set EXACTLY matches the active frozen roster with environment/scenarios. A zero-Module Epic needs no invented integration. Missing/unreadable decision requirements refuse.\nUpdates retain before/after check provenance; accepted forbids must_fix findings. changes_requested is a saved successful call. Semantic changes/reopen stale approval; delivery/handoff/date bookkeeping alone does not.\nOutput: saved owning Version/phase; get_context view=review provides retained verdicts. Effects: guarded local review/history/check writes, no external merge, runner or proof engine. Inspect after lost/partial/stale/unknown replies; never replay blindly.",
+    "description": "Purpose: Current whole Module/Epic or standalone/embedded Atomic verdict; Task refs refuse. Inputs project/ref/version/verdict/summary, actual reviewer actor, findings/checks, changed_scope[], resolved_findings[{review_index,finding_index,summary}]. Finding indexes are zero-based immutable history addresses.\nCore Module review uses the SAME observed bound reviewer through initial whole review and changed-scope follow-up. Replacement requires observed irrecoverable loss/bind/new immersion; prior findings remain. Every actual whole-Module or integration review needs a definite submission. Positive review needs definite restored candidate, exact affecting canonical revisions/all-party confirmations and meaningful correct-pass/mutant-fail/restored-pass observations. Local no-cross-boundary quality is local revision1 tied to current goal/criteria/candidate. Unresolved required findings cannot disappear; follow-up names scope and independent resolutions in the reviewed target own history. Embedded Atomic reviews do not require unrelated whole-Module findings or submission.\nPositive core Module is ready for integration WITHOUT merge/delivery. Affecting contract changes stale readiness even if code unchanged; same lead/reviewer handle corrections. Runtime contact/recovery metadata alone does not erase valid quality.\nIntegration review binds actual >=2 connected exact candidate/contract assembly/environment/scenarios. Current coverage may be incremental AB then BC/ABC, with no unrelated/full-roster job barrier. Epic final acceptance still requires every business criterion current verified over its declared affected composition or actual Epic E2E; raw edge union plus generic pass is insufficient.\nEvery Atomic remains independently reviewed; generic Atomic executor policy differs from actual persistent integration role. Known authors/integrators cannot self-review. Declared ID observations are not authentication.\nNegative changes_requested is a saved successful call. Check updates preserve before/after provenance. Output owning Version/phase/effects; context review/history can be paged. No external merge/model execution/certificate platform; inspect uncertain replies before another write.",
     "inputSchema": {
       "$defs": {
         "CheckStatus": {
@@ -1984,6 +2673,34 @@
           "required": [
             "text",
             "must_fix"
+          ],
+          "type": "object"
+        },
+        "FindingResolution": {
+          "additionalProperties": false,
+          "description": "Stable retained finding address and independent resolution.",
+          "properties": {
+            "finding_index": {
+              "description": "Finding index in the immutable review.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "review_index": {
+              "description": "Retained review index.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "summary": {
+              "description": "Verified fix/disproof, at most 512 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_index",
+            "finding_index",
+            "summary"
           ],
           "type": "object"
         },
@@ -2045,6 +2762,14 @@
             "null"
           ]
         },
+        "changed_scope": {
+          "default": [],
+          "description": "Explicit follow-up scope, eight 256-byte refs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "checks": {
           "description": "Owner or embedded child canonical check updates; never writes another file.",
           "items": {
@@ -2067,6 +2792,14 @@
         "ref": {
           "description": "E-001, M-001, A-001 or M-001/A-001; individual Task references refuse.",
           "type": "string"
+        },
+        "resolved_findings": {
+          "default": [],
+          "description": "Stable zero-based prior finding refs in this target's own history, with verified resolutions.",
+          "items": {
+            "$ref": "#/$defs/FindingResolution"
+          },
+          "type": "array"
         },
         "summary": {
           "description": "Meaningful reviewer conclusion.",
@@ -2100,7 +2833,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Compatible Module-only independent review entrypoint; use review_work for Epic or Atomic.\nInput: project, module=M-001, current Module Version, verdict, summary and optional actor/findings/check updates. Same whole-Module gates/provenance as review_work; no individual Task review and no Atomic bypass.\nFor modern work positive review is separate from reported delivery: reviewed; delivery pending becomes accepted after record_work deliver to declared target. Legacy records retain their original closure policy until explicit begin.\nOutput: saved owning Version/phase and effects. Known lead self-review refuses; negative verdict is successful. Semantic changes/reopen make approval historical; ordinary delivery/handoff/date bookkeeping does not require repeated review.\nEffects: one guarded Module write, no Git/GitHub action or runner. Retained review is readable via get_context view=review; inspect uncertain/lost outcomes before another mutation.",
+    "description": "Purpose: Compatible Module-only review surface; review_work also handles Epic/Atomic. Same candidate/contract/control/actual persistent reviewer rules in core mode. Initial review is whole; later changed scope resolves stable zero-based prior findings through same reviewer or explicitly recovered replacement.\nPositive core Module is ready for integration without delivery; managed1/unmanaged absent-core files preserve their old closure policy until adopt_core. Task has no review. Delivery/handoff/contact metadata alone is not implementation drift.\nInputs project/module/version/verdict/summary, actor, findings/checks, changed_scope/resolved_findings. Output saved owning Version/phase/effects; retained review readable by context. No runtime or Git write. Inspect stale/lost/partial/unknown outcomes before another mutation.",
     "inputSchema": {
       "$defs": {
         "CheckStatus": {
@@ -2144,6 +2877,34 @@
           "required": [
             "text",
             "must_fix"
+          ],
+          "type": "object"
+        },
+        "FindingResolution": {
+          "additionalProperties": false,
+          "description": "Stable retained finding address and independent resolution.",
+          "properties": {
+            "finding_index": {
+              "description": "Finding index in the immutable review.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "review_index": {
+              "description": "Retained review index.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "summary": {
+              "description": "Verified fix/disproof, at most 512 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_index",
+            "finding_index",
+            "summary"
           ],
           "type": "object"
         },
@@ -2205,6 +2966,14 @@
             "null"
           ]
         },
+        "changed_scope": {
+          "default": [],
+          "description": "Explicit follow-up scope; empty for initial whole review.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "checks": {
           "description": "At most eight updates to current canonical check reports.",
           "items": {
@@ -2228,8 +2997,16 @@
           "description": "Configured project alias.",
           "type": "string"
         },
+        "resolved_findings": {
+          "default": [],
+          "description": "Independently resolved retained finding refs, zero-based.",
+          "items": {
+            "$ref": "#/$defs/FindingResolution"
+          },
+          "type": "array"
+        },
         "summary": {
-          "description": "Meaningful review conclusion, at most 1024 UTF-8 bytes.",
+          "description": "Meaningful review conclusion, at most 1024 UTF-8 bytes; core whole-Module reviews require a submission.",
           "type": "string"
         },
         "verdict": {

@@ -158,6 +158,8 @@ pub fn call(
                     findings: a.findings,
                     checks: a.checks,
                     actor: a.actor,
+                    changed_scope: a.changed_scope,
+                    resolved_findings: a.resolved_findings,
                 };
                 let ack = review(config, args, &mut effects)?;
                 Ok(render_ack(templates, &ack, &effects))
@@ -211,7 +213,7 @@ fn validate_common(common: &Common) -> Result<()> {
             "Use the exact 64-character version returned by get_context.",
         ));
     }
-    optional(&common.actor, 128).map_err(arguments)
+    optional(&common.actor, 256).map_err(arguments)
 }
 
 /// Render once after capturing the immutable receipt; a presentation failure still names the saved target/version.
@@ -334,6 +336,21 @@ fn save_module(
             }
         }
     }
+    if value.core().is_some()
+        && (action == "reopened"
+            || value.result.as_ref().and_then(|r| r.candidate.as_ref())
+                != before
+                    .value
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.candidate.as_ref()))
+    {
+        let c = value.core_mut().map_err(arguments)?;
+        c.implementation_epoch = c
+            .implementation_epoch
+            .checked_add(1)
+            .ok_or_else(|| arguments("Implementation generation exhausted."))?;
+    }
     let semantic_change =
         value.basis().map_err(store::invalid)? != before.value.basis().map_err(store::invalid)?;
     if value.id.starts_with("A-")
@@ -441,6 +458,21 @@ fn plan(
     }
     let _lock = store.lock(true, effects)?;
     match operation {
+        Plan::FreezeEpic { epic } => {
+            let before = current(&store, &epic, &common.version)?;
+            let mut value = before.value.clone();
+            open_module(&value)?;
+            freeze_epic(&store, &mut value)?;
+            save_module(
+                &store,
+                &before,
+                value,
+                &epic,
+                "roster frozen",
+                &common.actor,
+                effects,
+            )
+        }
         Plan::InitProject {
             title,
             purpose,
@@ -503,6 +535,11 @@ fn plan(
             contracts,
             dependencies,
         } => {
+            if !tasks.is_empty() {
+                return Err(arguments(
+                    "Create the provisional Module goal, bind its actual lead, then let that lead discover/add Tasks.",
+                ));
+            }
             if tasks.len() > MAX_TASKS {
                 return Err(arguments("At most 32 initial tasks."));
             }
@@ -575,6 +612,7 @@ fn plan(
             required_checks,
             modules,
             atomics,
+            criterion_scopes,
         } => {
             number(&epic, "E-").map_err(arguments)?;
             let before = current(&store, &epic, &common.version)?;
@@ -591,6 +629,11 @@ fn plan(
             atomics
                 .required(&mut value.atomic_members)
                 .map_err(arguments)?;
+            if !matches!(criterion_scopes, input::Patch::Absent) {
+                criterion_scopes
+                    .required(&mut value.core_mut().map_err(arguments)?.criterion_scopes)
+                    .map_err(arguments)?;
+            }
             value.validate().map_err(arguments)?;
             store.membership(&value)?;
             let adds_edges = value
@@ -768,6 +811,15 @@ fn plan(
             open_module(&value)?;
             title.required(&mut value.title).map_err(arguments)?;
             outcome.required(&mut value.outcome).map_err(arguments)?;
+            if value
+                .core()
+                .is_some_and(|c| c.binding(AgentRole::Lead).is_some())
+                && !matches!(lead, input::Patch::Absent)
+            {
+                return Err(arguments(
+                    "Keep bound observed lead identity; edit_module lead cannot replace/clear it.",
+                ));
+            }
             lead.optional(&mut value.lead);
             required_checks
                 .required(&mut value.required_checks)
@@ -785,6 +837,7 @@ fn plan(
                     .required(&mut w.dependencies)
                     .map_err(arguments)?;
             }
+            contract_edit(&store, &before.value, &mut value)?;
             store.links(&value)?;
             save_module(
                 &store,
@@ -805,6 +858,7 @@ fn plan(
             let before = current(&store, &module, &common.version)?;
             let mut value = before.value.clone();
             open_module(&value)?;
+            core_actor(&value, AgentRole::Lead, &common.actor)?;
             if value.tasks.len() >= MAX_TASKS {
                 return Err(Error::new(
                     "capacity",
@@ -848,6 +902,7 @@ fn plan(
             let before = current(&store, module_id(&reference)?, &common.version)?;
             let mut value = before.value.clone();
             open_module(&value)?;
+            core_actor(&value, AgentRole::Lead, &common.actor)?;
             let i = value
                 .target(&reference)
                 .map_err(arguments)?
@@ -916,7 +971,11 @@ fn new_record(
         participants: Vec::new(),
         participant_basis: std::collections::BTreeMap::new(),
         completed: false,
-        workflow: Some(Workflow::new()),
+        workflow: Some({
+            let mut w = Workflow::new();
+            w.core = Some(CoreWorkflow::default());
+            w
+        }),
         imports: Vec::new(),
         result: None,
         checks: Vec::new(),
@@ -1072,7 +1131,381 @@ fn record(
     }
     let at = store::now();
     let action = match operation {
+        Work::AdoptCore {} => {
+            module_only(index)?;
+            if value.core().is_some() {
+                return Ok(ack(reference, before.version, store.phase(&value), false));
+            }
+            let w = value.workflow_mut();
+            w.managed = true;
+            w.active = false;
+            w.core = Some(CoreWorkflow::default());
+            "core adopted"
+        }
+        Work::BindAgent {
+            role,
+            harness,
+            agent_id,
+            communication_ref,
+            resume_ref,
+            launch_ref,
+        } => {
+            module_only(index)?;
+            role_owner(&value, role)?;
+            let identity = AgentIdentity {
+                harness,
+                agent_id,
+                communication_ref,
+                resume_ref,
+                launch_ref,
+            };
+            text(&identity.harness, 64).map_err(arguments)?;
+            text(&identity.agent_id, 256).map_err(arguments)?;
+            text(&identity.communication_ref, 256).map_err(arguments)?;
+            optional(&identity.resume_ref, 256).map_err(arguments)?;
+            text(&identity.launch_ref, 256).map_err(arguments)?;
+            let core = value.core_mut().map_err(arguments)?;
+            if let Some(binding) = core.bindings.iter_mut().find(|b| b.role == role) {
+                let same = binding.current.identity.harness == identity.harness
+                    && binding.current.identity.agent_id == identity.agent_id;
+                if same {
+                    binding.current.identity = identity;
+                } else {
+                    if binding.current.loss.is_none() {
+                        return Err(Error::new(
+                            "agent_replacement_refused",
+                            "Keep the same assigned agent unless both irrecoverable loss and inability to continue/resume were observed.",
+                        ));
+                    }
+                    let previous = std::mem::replace(
+                        &mut binding.current,
+                        AgentTerm {
+                            identity,
+                            loss: None,
+                            needs_immersion: true,
+                            immersion: None,
+                        },
+                    );
+                    binding.history.push(previous);
+                }
+            } else {
+                core.bindings.push(AgentBinding {
+                    role,
+                    current: AgentTerm {
+                        identity,
+                        loss: None,
+                        needs_immersion: false,
+                        immersion: None,
+                    },
+                    history: Vec::new(),
+                });
+            }
+            "agent bound"
+        }
+        Work::RecoverAgent {
+            role,
+            stage,
+            reason,
+            observation,
+            lost,
+            unrecoverable,
+            understanding,
+            sources,
+            unfinished,
+            gaps,
+        } => {
+            module_only(index)?;
+            role_owner(&value, role)?;
+            let binding = value
+                .core_mut()
+                .map_err(arguments)?
+                .bindings
+                .iter_mut()
+                .find(|b| b.role == role)
+                .ok_or_else(|| arguments("Bind the observed actor before recovery."))?;
+            match stage {
+                input::RecoveryStage::Lost => {
+                    if lost != Some(true) || unrecoverable != Some(true) {
+                        return Err(Error::new(
+                            "agent_loss_unproven",
+                            "Report BOTH lost and unable to continue/unrecoverable; temporary unavailability is insufficient.",
+                        ));
+                    }
+                    let reason = reason.ok_or_else(|| arguments("Loss reason required."))?;
+                    let observation = observation.ok_or_else(|| {
+                        arguments("Observed inability to continue/resume required.")
+                    })?;
+                    text(&reason, 512).map_err(arguments)?;
+                    text(&observation, 1024).map_err(arguments)?;
+                    binding.current.loss = Some(AgentLoss {
+                        reason,
+                        observation,
+                        at: at.clone(),
+                    });
+                }
+                input::RecoveryStage::Immersed => {
+                    if common.actor.as_deref() != Some(binding.current.identity.agent_id.as_str())
+                        || !binding.current.needs_immersion
+                    {
+                        return Err(arguments(
+                            "Only the current replacement records its new immersion.",
+                        ));
+                    }
+                    let understanding = understanding
+                        .ok_or_else(|| arguments("Recovered understanding required."))?;
+                    text(&understanding, 1024).map_err(arguments)?;
+                    strings(&sources, 256, false).map_err(arguments)?;
+                    strings(&unfinished, 256, false).map_err(arguments)?;
+                    strings(&gaps, 256, false).map_err(arguments)?;
+                    let complete = gaps.is_empty();
+                    binding.current.immersion = Some(Immersion {
+                        understanding,
+                        sources,
+                        unfinished,
+                        gaps,
+                        actor: binding.current.identity.agent_id.clone(),
+                        at: at.clone(),
+                    });
+                    binding.current.needs_immersion = !complete;
+                }
+            }
+            "agent recovery recorded"
+        }
+        Work::Planning {
+            responsibility,
+            scope,
+            exclusions,
+            read_refs,
+            uncertainties,
+        } => {
+            module_only(index)?;
+            number(&value.id, "M-").map_err(arguments)?;
+            core_actor(&value, AgentRole::Lead, &common.actor)?;
+            text(&responsibility, 1024).map_err(arguments)?;
+            text(&scope, 1024).map_err(arguments)?;
+            strings(&exclusions, 256, false).map_err(arguments)?;
+            strings(&read_refs, 256, false).map_err(arguments)?;
+            strings(&uncertainties, 256, false).map_err(arguments)?;
+            let basis = value.plan_basis().map_err(arguments)?;
+            value.core_mut().map_err(arguments)?.planning = Some(Planning {
+                responsibility,
+                scope,
+                exclusions,
+                read_refs,
+                uncertainties,
+                basis,
+                actor: common
+                    .actor
+                    .clone()
+                    .ok_or_else(|| arguments("Actual lead actor required."))?,
+                at: at.clone(),
+            });
+            "lead planning recorded"
+        }
+        Work::AgreeContract {
+            contract_id,
+            revision,
+            summary,
+        } => {
+            module_only(index)?;
+            number(&value.id, "M-").map_err(arguments)?;
+            core_actor(&value, AgentRole::Lead, &common.actor)?;
+            text(&summary, 1024).map_err(arguments)?;
+            let facts = store.contract_facts(&contract_id)?;
+            if facts.revision != revision
+                || !facts.parties.contains(&value.id)
+                || !facts.gaps.is_empty()
+            {
+                return Err(Error::new(
+                    "contract_agreement_refused",
+                    format!(
+                        "Exact reciprocal {contract_id} revision and artifact must resolve before agreement: {}",
+                        facts.gaps.join(" ")
+                    ),
+                ));
+            }
+            let core = value.core_mut().map_err(arguments)?;
+            if !core.agreements.iter().any(|a| {
+                a.contract_id == contract_id
+                    && a.revision == revision
+                    && a.snapshot == facts.snapshot
+            }) {
+                core.agreements.push(Agreement {
+                    contract_id,
+                    revision,
+                    summary,
+                    snapshot: facts.snapshot,
+                    actor: common
+                        .actor
+                        .clone()
+                        .ok_or_else(|| arguments("Actual lead actor required."))?,
+                    at: at.clone(),
+                });
+            }
+            "contract agreed"
+        }
+        Work::BoundaryEvidence {
+            contract_id,
+            revision,
+            candidate,
+            conditions,
+            correct,
+            mutation,
+            failed,
+            restored,
+            artifacts,
+        } => {
+            module_only(index)?;
+            number(&value.id, "M-").map_err(arguments)?;
+            core_actor(&value, AgentRole::Lead, &common.actor)?;
+            running(&store, &value, index)?;
+            text(&candidate, 256).map_err(arguments)?;
+            text(&conditions, 1024).map_err(arguments)?;
+            text(&mutation, 1024).map_err(arguments)?;
+            strings(&artifacts, 256, false).map_err(arguments)?;
+            for observation in [&correct, &failed, &restored] {
+                text(&observation.detail, 512).map_err(arguments)?;
+                optional(&observation.artifact, 256).map_err(arguments)?;
+            }
+            if correct.status != CheckStatus::Passed
+                || failed.status != CheckStatus::Failed
+                || restored.status != CheckStatus::Passed
+            {
+                return Err(Error::new(
+                    "boundary_control",
+                    "Record actual correct-pass, intended mutant-fail and restored-pass observations.",
+                ));
+            }
+            if contract_id == "local" {
+                if !store.contract_ids(&value).is_empty() || revision != 1 {
+                    return Err(arguments(
+                        "local scope applies only to a Module without declared cross-boundary contracts.",
+                    ));
+                }
+            } else {
+                let f = store.contract_facts(&contract_id)?;
+                if f.revision != revision || !f.parties.contains(&value.id) {
+                    return Err(arguments(
+                        "Evidence must match an affecting current contract revision.",
+                    ));
+                }
+            }
+            let worktree = value
+                .workflow
+                .as_ref()
+                .and_then(|w| w.execution.as_ref())
+                .map(|e| e.worktree.clone())
+                .ok_or_else(|| arguments("Declare the isolated Module checkout."))?;
+            let intent_basis = Some(value.plan_basis().map_err(arguments)?);
+            value
+                .core_mut()
+                .map_err(arguments)?
+                .boundary_evidence
+                .push(BoundaryEvidence {
+                    contract_id,
+                    revision,
+                    candidate,
+                    intent_basis,
+                    conditions,
+                    correct,
+                    mutation,
+                    failed,
+                    restored,
+                    artifacts,
+                    worktree,
+                    actor: common
+                        .actor
+                        .clone()
+                        .ok_or_else(|| arguments("Actual lead actor required."))?,
+                    at: at.clone(),
+                });
+            "boundary control recorded"
+        }
+        Work::VerifyCriterion {
+            index: criterion_index,
+            text: criterion_text,
+            modules,
+            candidate,
+            environment,
+            scenarios,
+            summary,
+            checks,
+            artifacts,
+            integration_ref,
+        } => {
+            module_only(index)?;
+            number(&value.id, "E-").map_err(arguments)?;
+            let scope = CriterionScope {
+                index: criterion_index,
+                text: criterion_text,
+                modules,
+            };
+            if !value
+                .core()
+                .is_some_and(|c| c.criterion_scopes.contains(&scope))
+            {
+                return Err(arguments(
+                    "Exact zero-based criterion text and declared affected Module set required.",
+                ));
+            }
+            text(&candidate, 256).map_err(arguments)?;
+            text(&environment, 1024).map_err(arguments)?;
+            text(&summary, 1024).map_err(arguments)?;
+            strings(&scenarios, 256, true).map_err(arguments)?;
+            strings(&artifacts, 256, false).map_err(arguments)?;
+            if scenarios.is_empty()
+                || checks.is_empty()
+                || checks.iter().any(|c| c.status != CheckStatus::Passed)
+            {
+                return Err(arguments(
+                    "Actual business scenarios and passed checks required.",
+                ));
+            }
+            if let Some(id) = &integration_ref {
+                let a = store.module(id)?.value;
+                if a.result.as_ref().and_then(|r| r.candidate.as_ref()) != Some(&candidate)
+                    || a.workflow.as_ref().is_none_or(|w| {
+                        w.environment.as_ref() != Some(&environment) || w.scenarios != scenarios
+                    })
+                {
+                    return Err(arguments(
+                        "Criterion reuse must match the ONE actual composition candidate/environment/scenarios.",
+                    ));
+                }
+            }
+            let basis = store.criterion_basis(&scope, integration_ref.as_deref())?;
+            value
+                .core_mut()
+                .map_err(arguments)?
+                .criterion_verifications
+                .push(CriterionVerification {
+                    scope,
+                    candidate,
+                    environment,
+                    scenarios,
+                    summary,
+                    checks: checks
+                        .into_iter()
+                        .map(|c| Check::from_input(c, &at, &common.actor))
+                        .collect(),
+                    artifacts,
+                    integration_ref,
+                    basis,
+                    actor: common.actor.clone(),
+                    at: at.clone(),
+                });
+            "business criterion verified"
+        }
         Work::Begin {} => {
+            core_actor(
+                &value,
+                if value.id.starts_with("M-") {
+                    AgentRole::Lead
+                } else {
+                    AgentRole::Integrator
+                },
+                &common.actor,
+            )?;
             if let Some(i) = index {
                 if value.modern() && !value.workflow.as_ref().is_some_and(|w| w.active) {
                     return Err(arguments("Begin the Module before child execution."));
@@ -1102,12 +1535,21 @@ fn record(
                 if value.workflow.as_ref().is_some_and(|w| w.active) {
                     return Ok(ack(reference, before.version, store.phase(&value), false));
                 }
+                if value.core().is_some()
+                    && value.id.starts_with("A-")
+                    && !value.participants.is_empty()
+                {
+                    value.participant_basis = std::collections::BTreeMap::from([(
+                        "core".into(),
+                        store.coverage_basis(&value.participants)?,
+                    )]);
+                }
                 let roster = value.modules.clone();
                 let epic = value.id.starts_with("E-");
                 let w = value.workflow_mut();
                 w.active = true;
                 w.started_at.get_or_insert(at.clone());
-                if epic {
+                if epic && w.core.is_none() {
                     w.frozen_modules.get_or_insert(roster);
                 }
                 if value.id.starts_with("M-") {
@@ -1130,7 +1572,13 @@ fn record(
         } => {
             module_only(index)?;
             number(&value.id, "M-").map_err(arguments)?;
-            running(&store, &value, index)?;
+            if value.core().is_none() {
+                running(&store, &value, index)?;
+            } else if !value.workflow.as_ref().is_some_and(|w| w.active) {
+                return Err(arguments(
+                    "Deliver only the current begun/reviewed candidate.",
+                ));
+            }
             text(&target_branch, 128).map_err(arguments)?;
             text(&summary, 1024).map_err(arguments)?;
             optional(&artifact, 256).map_err(arguments)?;
@@ -1140,8 +1588,11 @@ fn record(
                 ));
             }
             let basis = value.basis().map_err(arguments)?;
+            let reviewed_basis = store.work_basis(&value)?;
             let reviewed = value.reviews.last().is_some_and(|r| {
-                r.verdict == Verdict::Accepted && r.epoch == value.review_epoch && r.basis == basis
+                r.verdict == Verdict::Accepted
+                    && r.epoch == value.review_epoch
+                    && r.basis == reviewed_basis
             });
             if !reviewed || !store.acceptance(&value).is_empty() {
                 return Err(Error::new(
@@ -1170,11 +1621,44 @@ fn record(
             "delivery reported"
         }
         Work::ImportCommits { commits, state } => {
+            core_actor(
+                &value,
+                if value.id.starts_with("M-") {
+                    AgentRole::Lead
+                } else {
+                    AgentRole::Integrator
+                },
+                &common.actor,
+            )?;
             running(&store, &value, index)?;
+            if value.core().is_some()
+                && value.id.starts_with("A-")
+                && !value.participants.is_empty()
+            {
+                let current = store.coverage_basis(&value.participants)?;
+                if value
+                    .participant_basis
+                    .get("core")
+                    .is_some_and(|claimed| claimed != &current)
+                {
+                    return Err(Error::new(
+                        "integration_inputs_changed",
+                        "The begun candidate/contract set changed; explicitly reopen/recheck before importing a late result.",
+                    ));
+                }
+            }
             let imported =
                 import_commits(&mut value, index, reference, &commits, &common.actor, &at)?;
             if imported && value.id.starts_with("A-") {
-                value.participant_basis = store.participant_basis(&value.participants)?;
+                value.participant_basis =
+                    if value.core().is_some() && !value.participants.is_empty() {
+                        std::collections::BTreeMap::from([(
+                            "core".into(),
+                            store.coverage_basis(&value.participants)?,
+                        )])
+                    } else {
+                        store.participant_basis(&value.participants)?
+                    };
             }
             if let Some(state) = state {
                 set_completion(&mut value, index, state, &common.actor)?;
@@ -1188,10 +1672,50 @@ fn record(
             gaps,
             followups,
             artifacts,
+            candidate,
+            changed_scope,
         } => {
             running(&store, &value, index)?;
+            if value.core().is_some()
+                && value.id.starts_with("A-")
+                && !value.participants.is_empty()
+            {
+                let current = store.coverage_basis(&value.participants)?;
+                if value
+                    .participant_basis
+                    .get("core")
+                    .is_some_and(|claimed| claimed != &current)
+                {
+                    return Err(Error::new(
+                        "integration_inputs_changed",
+                        "The begun candidate/contract set changed; explicitly reopen/recheck instead of rebinding late completion.",
+                    ));
+                }
+            }
+            if value.core().is_some() {
+                core_actor(
+                    &value,
+                    if value.id.starts_with("M-") {
+                        AgentRole::Lead
+                    } else if value.id.starts_with("A-") {
+                        AgentRole::Integrator
+                    } else {
+                        AgentRole::Lead
+                    },
+                    &common.actor,
+                )
+                .or_else(|e| {
+                    if value.id.starts_with("E-") {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })?;
+            }
             let report = Report {
                 summary,
+                candidate,
+                changed_scope,
                 gaps,
                 followups,
                 artifacts,
@@ -1221,7 +1745,15 @@ fn record(
                     if let Some(state) = state {
                         set_completion(&mut value, index, state, &common.actor)?;
                     }
-                    value.participant_basis = store.participant_basis(&value.participants)?;
+                    value.participant_basis =
+                        if value.core().is_some() && !value.participants.is_empty() {
+                            std::collections::BTreeMap::from([(
+                                "core".into(),
+                                store.coverage_basis(&value.participants)?,
+                            )])
+                        } else {
+                            store.participant_basis(&value.participants)?
+                        };
                     if value.completed && !value.modern() {
                         let missing = store.acceptance(&value);
                         if !missing.is_empty() {
@@ -1310,7 +1842,10 @@ fn record(
                     store.membership(&value)?;
                     for id in value.modules.iter().chain(&value.atomic_members) {
                         let child = store.module(id)?.value;
-                        if !matches!(store.phase(&child), "accepted" | "done" | "canceled") {
+                        if !matches!(
+                            store.phase(&child),
+                            "accepted" | "ready for integration" | "done" | "canceled"
+                        ) {
                             return Err(Error::new(
                                 "open_children",
                                 format!("Resolve {id} before canceling Epic; no cascade."),
@@ -1373,6 +1908,19 @@ fn record(
 
 /// Require a current reported lifecycle before semantic outcome writes, without launching anything.
 fn running(store: &Store, m: &Module, index: Option<usize>) -> Result<()> {
+    if let Some(core) = m.core().filter(|_| {
+        m.id.starts_with("M-") || (m.id.starts_with("A-") && !m.participants.is_empty())
+    }) {
+        let role = if m.id.starts_with("M-") {
+            AgentRole::Lead
+        } else {
+            AgentRole::Integrator
+        };
+        let actor = core
+            .binding(role)
+            .map(|b| b.current.identity.agent_id.clone());
+        core.actor(role, &actor).map_err(arguments)?;
+    }
     if m.modern() {
         if !m.workflow.as_ref().is_some_and(|w| w.active) {
             return Err(Error::new(
@@ -1434,13 +1982,20 @@ fn set_completion(
 
 /// Mark a meaningful local result done; modern Task decisions must be declared by their Module lead.
 fn complete_local(m: &mut Module, index: Option<usize>, actor: &Option<String>) -> Result<()> {
+    if m.id.starts_with("A-") && !m.participants.is_empty() {
+        core_actor(m, AgentRole::Integrator, actor)?;
+    }
     if let Some(i) = index {
         if m.child(i).result.is_none() {
             return Err(arguments(
                 "Record a meaningful result before local completion.",
             ));
         }
-        if m.modern()
+        if m.core().is_some() && m.child(i).id.starts_with("T-") {
+            core_actor(m, AgentRole::Lead, actor)?;
+        }
+        if m.core().is_none()
+            && m.modern()
             && m.child(i).id.starts_with("T-")
             && !actor.as_ref().is_some_and(|a| {
                 m.lead
@@ -1527,6 +2082,12 @@ fn import_commits(
         .collect::<Vec<_>>();
     let report = Report {
         summary,
+        candidate: if m.core().is_some() {
+            observed.last().map(|c| c.sha.clone())
+        } else {
+            None
+        },
+        changed_scope: Vec::new(),
         gaps,
         followups,
         artifacts,
@@ -1640,6 +2201,7 @@ fn review_atomic(
         }
     }
     let basis = value.child(index).atomic_basis().map_err(arguments)?;
+    let core_policy = value.core().is_some();
     let w = value
         .child_mut(index)
         .atomic_workflow
@@ -1658,6 +2220,11 @@ fn review_atomic(
         at,
         reviewer: args.actor.clone(),
         check_updates: updates,
+        candidate: None,
+        contracts: std::collections::BTreeMap::new(),
+        changed_scope: args.changed_scope,
+        resolved_findings: args.resolved_findings,
+        core_policy,
     });
     save_module(
         store,
@@ -1670,6 +2237,255 @@ fn review_atomic(
     )
 }
 
+/// Validate persistent role ownership; Tasks do not acquire separate role/review ceremonies.
+fn role_owner(m: &Module, role: AgentRole) -> Result<()> {
+    if m.core().is_none() {
+        return Err(arguments("Explicitly adopt_core before new coordination."));
+    }
+    let allowed = match role {
+        AgentRole::Lead => m.id.starts_with("M-"),
+        AgentRole::Reviewer => m.id.starts_with("M-") || m.id.starts_with("A-"),
+        AgentRole::Integrator => m.id.starts_with("A-"),
+    };
+    if !allowed {
+        return Err(arguments(
+            "Persistent role does not belong to this owner kind.",
+        ));
+    }
+    Ok(())
+}
+/// Require the actual assigned usable ID for new scoped actions; do not authenticate a guessed label.
+fn core_actor(m: &Module, role: AgentRole, actor: &Option<String>) -> Result<()> {
+    if let Some(core) = m.core().filter(|_| {
+        m.id.starts_with("M-") || (m.id.starts_with("A-") && !m.participants.is_empty())
+    }) {
+        core.actor(role, actor)
+            .map_err(|e| Error::new("agent_binding", e))?;
+    }
+    Ok(())
+}
+/// Validate significant canonical revisions before publication while preserving staged reciprocal updates.
+/// Provider definitions/artifacts belong to the canonical ID across consumers and provider transfers;
+/// consumer-specific obligations retain their own peer history. Removal never recycles either revision.
+fn contract_edit(store: &Store, before: &Module, after: &mut Module) -> Result<()> {
+    if after.core().is_none() {
+        return Ok(());
+    }
+    if before.workflow.as_ref().and_then(|w| w.contracts.as_ref())
+        == after.workflow.as_ref().and_then(|w| w.contracts.as_ref())
+    {
+        return Ok(());
+    }
+    let inventory = store.scan(None)?;
+    if !inventory.complete {
+        return Err(arguments(
+            "Canonical revision history is unknown in incomplete inventory.",
+        ));
+    }
+    if let Some(c) = after.workflow.as_ref().and_then(|w| w.contracts.as_ref()) {
+        for (provides, new) in c
+            .provides
+            .iter()
+            .map(|e| (true, e))
+            .chain(c.consumes.iter().map(|e| (false, e)))
+        {
+            let id = new
+                .id
+                .as_ref()
+                .ok_or_else(|| arguments("Core boundary needs canonical id."))?;
+            text(id, 64).map_err(arguments)?;
+            if id == "local" || new.revision.is_none_or(|r| r == 0) {
+                return Err(arguments(
+                    "Declare positive revision; local is reserved for non-cross-boundary controls.",
+                ));
+            }
+            let revision = new.revision.unwrap_or_default();
+            for record in &inventory.modules {
+                let owner = &record.value;
+                let Some(core) = owner.core() else {
+                    continue;
+                };
+                let current = owner.workflow.as_ref().and_then(|w| w.contracts.as_ref());
+                let floor = core
+                    .agreements
+                    .iter()
+                    .filter(|a| a.contract_id == *id)
+                    .map(|a| a.revision)
+                    .chain(
+                        core.boundary_evidence
+                            .iter()
+                            .filter(|e| e.contract_id == *id)
+                            .map(|e| e.revision),
+                    )
+                    .chain(
+                        current
+                            .into_iter()
+                            .chain(core.contract_history.iter())
+                            .flat_map(|c| c.provides.iter().chain(&c.consumes))
+                            .filter(|e| e.id.as_ref() == Some(id))
+                            .filter_map(|e| e.revision),
+                    )
+                    .max()
+                    .unwrap_or_default();
+                if revision < floor {
+                    return Err(arguments(
+                        "Canonical revision cannot decrease below retained boundary history.",
+                    ));
+                }
+                if provides {
+                    for old in current
+                        .into_iter()
+                        .chain(core.contract_history.iter())
+                        .flat_map(|c| c.provides.iter())
+                        .filter(|e| e.id == new.id)
+                    {
+                        if new.revision <= old.revision
+                            && (new.description != old.description
+                                || new.reference != old.reference)
+                        {
+                            return Err(arguments(
+                                "Affecting provider definition/artifact changes require a greater retained canonical revision, independent of consumer or provider.",
+                            ));
+                        }
+                    }
+                }
+            }
+            for old in before
+                .workflow
+                .as_ref()
+                .and_then(|w| w.contracts.as_ref())
+                .into_iter()
+                .chain(
+                    before
+                        .core()
+                        .into_iter()
+                        .flat_map(|c| c.contract_history.iter()),
+                )
+                .flat_map(|c| {
+                    if provides {
+                        c.provides.iter()
+                    } else {
+                        c.consumes.iter()
+                    }
+                })
+                .filter(|e| e.id == new.id && e.peer == new.peer)
+            {
+                if new.revision <= old.revision
+                    && (new.description != old.description || new.reference != old.reference)
+                {
+                    return Err(arguments(
+                        "Affecting boundary changes require a greater retained canonical revision.",
+                    ));
+                }
+            }
+            if let Some(old) = before
+                .workflow
+                .as_ref()
+                .and_then(|w| w.contracts.as_ref())
+                .and_then(|c| {
+                    (if provides { &c.provides } else { &c.consumes })
+                        .iter()
+                        .find(|e| e.id == new.id && e.peer == new.peer)
+                })
+            {
+                let affecting =
+                    old.description != new.description || old.reference != new.reference;
+                if new.revision < old.revision || affecting && new.revision <= old.revision {
+                    return Err(arguments(
+                        "Affecting boundary changes require a greater canonical revision.",
+                    ));
+                }
+            }
+        }
+    }
+    let old = before.workflow.as_ref().and_then(|w| w.contracts.as_ref());
+    let new = after.workflow.as_ref().and_then(|w| w.contracts.as_ref());
+    if old != new
+        && let Some(old) = old.filter(|c| {
+            c.provides
+                .iter()
+                .chain(&c.consumes)
+                .any(|e| e.id.is_some() && e.revision.is_some())
+        })
+    {
+        let history = &mut after.core_mut().map_err(arguments)?.contract_history;
+        if !history.contains(old) {
+            if history.len() >= 16 {
+                return Err(arguments("Retained contract history capacity exhausted."));
+            }
+            let mut retained = old.clone();
+            retained
+                .provides
+                .retain(|e| e.id.is_some() && e.revision.is_some());
+            retained
+                .consumes
+                .retain(|e| e.id.is_some() && e.revision.is_some());
+            history.push(retained);
+        }
+    }
+    Ok(())
+}
+/// Freeze prepared negotiated roster without demanding acyclic completion prerequisites already satisfied.
+fn freeze_epic(store: &Store, value: &mut Module) -> Result<()> {
+    number(&value.id, "E-").map_err(arguments)?;
+    value.core_mut().map_err(arguments)?;
+    store.membership(value)?;
+    store.links(value)?;
+    let mut checkouts = std::collections::BTreeSet::new();
+    for id in &value.modules {
+        let m = store.module(id)?.value;
+        if m.state == ModuleState::Canceled {
+            continue;
+        }
+        let c = m
+            .core()
+            .ok_or_else(|| arguments(format!("{id}: explicitly adopt core planning.")))?;
+        let actor = c
+            .binding(AgentRole::Lead)
+            .map(|b| b.current.identity.agent_id.clone());
+        c.actor(AgentRole::Lead, &actor).map_err(arguments)?;
+        if !c
+            .planning
+            .as_ref()
+            .is_some_and(|p| m.plan_basis().is_ok_and(|b| b == p.basis))
+        {
+            return Err(arguments(format!(
+                "{id}: current bound lead discovery required."
+            )));
+        }
+        let gaps = store.agreement_gaps(&m);
+        if !gaps.is_empty() {
+            return Err(Error::new("contract_not_agreed", gaps.join(" ")));
+        }
+        let execution = m
+            .workflow
+            .as_ref()
+            .and_then(|w| w.execution.as_ref())
+            .ok_or_else(|| arguments(format!("{id}: prepared separate checkout required.")))?;
+        if !checkouts.insert(execution.worktree.clone()) {
+            return Err(arguments(
+                "Module implementation checkouts must be distinct.",
+            ));
+        }
+    }
+    let core = value.core().ok_or_else(|| arguments("Missing core."))?;
+    if core.criterion_scopes.len() != value.criteria.len()
+        || value.criteria.iter().enumerate().any(|(i, t)| {
+            !core
+                .criterion_scopes
+                .iter()
+                .any(|s| s.index == i && s.text == *t)
+        })
+    {
+        return Err(arguments(
+            "Declare every zero-based business criterion's exact affected Module set.",
+        ));
+    }
+    let roster = value.modules.clone();
+    value.workflow_mut().frozen_modules.get_or_insert(roster);
+    Ok(())
+}
+
 /// Refuse module-only blocker/handoff writes to tasks rather than silently rerouting them.
 fn module_only(index: Option<usize>) -> Result<()> {
     if index.is_some() {
@@ -1678,8 +2494,111 @@ fn module_only(index: Option<usize>) -> Result<()> {
     Ok(())
 }
 
+/// Verify stable finding resolutions and changed-scope continuation without discarding predecessor history.
+fn core_review_guard(m: &Module, args: &mut ReviewArgs, target: Option<usize>) -> Result<()> {
+    let Some(core) = m.core() else {
+        return Ok(());
+    };
+    if m.id.starts_with("M-") || (m.id.starts_with("A-") && !m.participants.is_empty()) {
+        core.actor(AgentRole::Reviewer, &args.actor)
+            .map_err(arguments)?;
+        let reviewer = &core
+            .binding(AgentRole::Reviewer)
+            .ok_or_else(|| arguments("Bind reviewer."))?
+            .current
+            .identity;
+        for role in [AgentRole::Lead, AgentRole::Integrator] {
+            if core.binding(role).is_some_and(|b| {
+                b.current.identity.harness == reviewer.harness
+                    && b.current.identity.agent_id == reviewer.agent_id
+            }) {
+                return Err(Error::new(
+                    "self_review",
+                    "The bound author/integrator cannot independently review its own candidate.",
+                ));
+            }
+        }
+    }
+    if target.is_none()
+        && (m.id.starts_with("M-") || (m.id.starts_with("A-") && !m.participants.is_empty()))
+        && m.result
+            .as_ref()
+            .and_then(|r| r.candidate.as_ref())
+            .is_none()
+    {
+        return Err(arguments(
+            "Submit a definite candidate before any core Module/integration review.",
+        ));
+    }
+    let reviews = target.map_or(m.reviews.as_slice(), |i| {
+        m.child(i)
+            .atomic_workflow
+            .as_ref()
+            .map_or(&[], |w| w.reviews.as_slice())
+    });
+    let report = target.map_or(m.result.as_ref(), |i| m.child(i).result.as_ref());
+    strings(&args.changed_scope, 256, false).map_err(arguments)?;
+    if args.resolved_findings.len() > 8 {
+        return Err(arguments(
+            "At most eight stable finding resolutions per round.",
+        ));
+    }
+    let mut resolving = std::collections::BTreeSet::new();
+    for resolution in &args.resolved_findings {
+        text(&resolution.summary, 512).map_err(arguments)?;
+        let finding = reviews
+            .get(resolution.review_index)
+            .and_then(|r| r.findings.get(resolution.finding_index))
+            .ok_or_else(|| arguments("Unknown retained zero-based finding reference."))?;
+        if !finding.must_fix
+            || !resolving.insert((resolution.review_index, resolution.finding_index))
+        {
+            return Err(arguments("Resolve each required prior finding once."));
+        }
+    }
+    if reviews
+        .iter()
+        .any(|r| r.core_policy || r.candidate.is_some())
+    {
+        if args.changed_scope.is_empty() {
+            args.changed_scope = report.map(|r| r.changed_scope.clone()).unwrap_or_default();
+        }
+        if args.changed_scope.is_empty() {
+            return Err(arguments(
+                "Follow-up review needs changed scope or a concrete verification gap; retain the same reviewer.",
+            ));
+        }
+    }
+    if args.verdict == Verdict::Accepted {
+        let mut resolved = std::collections::BTreeSet::new();
+        for review in reviews {
+            for r in &review.resolved_findings {
+                resolved.insert((r.review_index, r.finding_index));
+            }
+        }
+        resolved.extend(resolving);
+        for (ri, review) in reviews
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.core_policy || r.candidate.is_some())
+        {
+            for (fi, finding) in review.findings.iter().enumerate() {
+                if finding.must_fix && !resolved.contains(&(ri, fi)) {
+                    return Err(Error::new(
+                        "review_findings",
+                        format!(
+                            "Retained finding review_index={ri} finding_index={fi} still requires independent resolution."
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Independently review the whole module, applying new check reports before basis/epoch capture.
-fn review(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Result<Ack> {
+fn review(config: &Config, mut args: ReviewArgs, effects: &mut Vec<String>) -> Result<Ack> {
     validate_common(&Common {
         project: args.project.clone(),
         version: args.version.clone(),
@@ -1692,7 +2611,12 @@ fn review(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Resul
     let before = current(&store, &id, &args.version)?;
     let mut value = before.value.clone();
     open_module(&value)?;
+    if value.core().is_some() && !value.id.starts_with("E-") {
+        core_actor(&value, AgentRole::Reviewer, &args.actor)?;
+    }
+    strings(&args.changed_scope, 256, false).map_err(arguments)?;
     let target_index = value.target(&args.module).map_err(arguments)?;
+    core_review_guard(&value, &mut args, target_index)?;
     if let Some(i) = target_index {
         if !value.child(i).id.starts_with("A-") {
             return Err(arguments("Tasks have no individual review."));
@@ -1704,14 +2628,16 @@ fn review(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Resul
             "Report Atomic begin before opting into independent review.",
         ));
     }
-    if args.actor.as_ref().is_some_and(|a| {
-        value
-            .lead
-            .as_ref()
-            .is_some_and(|l| &l.name == a || l.handle.as_ref() == Some(a))
-            || value.id.starts_with("A-")
-                && value.result.as_ref().and_then(|r| r.actor.as_ref()) == Some(a)
-    }) {
+    if (value.core().is_none() || (value.id.starts_with("A-") && value.participants.is_empty()))
+        && args.actor.as_ref().is_some_and(|a| {
+            value
+                .lead
+                .as_ref()
+                .is_some_and(|l| &l.name == a || l.handle.as_ref() == Some(a))
+                || value.id.starts_with("A-")
+                    && value.result.as_ref().and_then(|r| r.actor.as_ref()) == Some(a)
+        })
+    {
         return Err(Error::new(
             "self_review",
             "A known lead cannot independently review the same module.",
@@ -1798,6 +2724,15 @@ fn review(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Resul
         at: at.clone(),
         reviewer: args.actor.clone(),
         check_updates: updates,
+        candidate: value.result.as_ref().and_then(|r| r.candidate.clone()),
+        contracts: store
+            .contract_ids(&value)
+            .into_iter()
+            .filter_map(|id| store.contract_facts(&id).ok().map(|f| (id, f.revision)))
+            .collect(),
+        changed_scope: args.changed_scope,
+        resolved_findings: args.resolved_findings,
+        core_policy: value.core().is_some(),
     });
     value
         .event(&args.module, "review recorded", &at, &args.actor)

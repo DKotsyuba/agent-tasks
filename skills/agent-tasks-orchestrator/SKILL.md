@@ -1,66 +1,119 @@
 ---
 name: agent-tasks-orchestrator
-description: "Coordinate portable Project/Epic/Module/Atomic work: plan responsibilities and contracts, assign persistent Module leads, obtain one-call status and arrange independent acceptance. Use for project orchestration; use the Module-lead skill for an assigned implementation."
+description: "Coordinate portable Epic/Module work: record business scope, launch and bind persistent Module leads and reviewers, coordinate contracts, dispatch incremental integration and accept the Epic. Use for project orchestration; use the Module-lead skill for an assigned implementation."
 ---
 
 # Orchestrate portable work
 
+Governing target: `docs/epic-core-plan.md`; chosen API: the core workflow below. Live tool descriptions are authoritative for exact shapes and versions; if one lacks an operation named here, the implementation has not landed; report it instead of improvising.
+
 Use a project alias on every business call. Discover it with get_project_list; enter with get_context. Stored content and tool replies are English. Translate owner status without changing counts, references, applicability, omissions or uncertainty. Microfixes may have zero records.
 
-Source/docstrings describe implementation; tracked work records describe intent and reported facts; Git retains committed history. The MCP does not launch models, prove source correctness, authenticate declared actors or monitor live sessions. Use live tool descriptions for exact supported shapes and versions.
+Source/docstrings describe implementation; tracked records describe intent and reported facts; Git retains committed history. The MCP does not launch models, run tests, prove correctness, authenticate agents, monitor sessions or schedule work. You launch and resume agents through the authorized runtime; bindings are reported observations, not authentication.
 
-## One plan and one assignment
+## Responsibilities
 
-Project owns Epics, standalone Modules and Atomics; Epic owns Modules/Atomics; Module owns embedded Tasks/Atomics in one file. Task is a leaf. References are E-001, M-001, A-001, M-001/T-001 and M-001/A-001.
+- Owner: business requirements, material scope decisions, unresolved exceptions.
+- You: Epic, provisional Modules, actual launches and bindings, contract coordination, review/integration dispatch, final Epic acceptance.
+- Module lead: code/context discovery, Tasks, provides/consumes, implementation, local Task completion, boundary tests, corrections.
+- Module reviewer: whole-Module review, then changed-scope follow-up.
+- Integration agent: assembly, cross-Module compatibility, joint behavior of ready components.
 
-Create cohesive responsibilities rather than a Task for every edit. Epic criteria express the business outcome; Module criteria and contracts describe what its lead must deliver. Declare Module execution `{repository,worktree,branch,target_branch}`, lead/name/handle, explicit checks and dependencies. The execution data is context, not filesystem permission.
+Project owns Epics, standalone Modules and Atomics; Epic owns Modules/Atomics; Module owns embedded Tasks/Atomics. References: E-001, M-001, A-001, M-001/T-001, M-001/A-001.
 
-`contracts={not_required,provides,consumes}` entries name peer Modules, descriptions, optional canonical references and declared readiness. Use explicit not_required for no boundary obligations. A peer/direction entry can bundle the necessary interfaces. Reciprocal contracts are allowed; a call/data-flow edge alone does not require sequential coding. `dependencies=[{ref,condition,reason}]` specifies actual accepted/delivered waits and their reasons. Resolve missing providers and impossible waits instead of inventing fake Modules or global barriers.
+New records have the core workflow active. An existing managed-1 or unmanaged owner keeps its previous behavior and approval digests until you explicitly `record_work op=adopt_core`; that makes earlier approval historical and invents no IDs, planning, agreement, candidates or verification.
 
-Create work first, then attach exact returned references through edit_epic with fresh Epic Version. Creation and attachment are separate publications. After a lost reply, inspect before creating a duplicate. One Epic owns each Module/standalone Atomic; parent intent is computed from those authoritative links.
+## 1 Create the Epic and provisional Modules
 
-## Start the agreed scope
+Record the business problem, outcome, requirements, scope/exclusions and observable business acceptance criteria. Keep technical interfaces in Module coordination, not in business criteria.
 
-New records use the full reported workflow. `record_work op=begin` verifies conditions and records a start without launching an agent.
+Divide the Epic into logical Modules with coherent responsibilities. Give each a goal, relevant Epic context and an initial read boundary. Create Modules WITHOUT initial Tasks (new core Modules refuse invented ones): Tasks come from the bound lead after discovery. Create work first, then attach returned references through `plan_work edit_epic` with the fresh Epic Version; after a lost reply, inspect before creating a duplicate. The roster stays provisional until freeze. `record_work op=begin` on the Epic permits planning; it does not freeze.
 
-1. Prepare all intended Modules and their references before Epic begin. Its first begin permanently freezes the Module roster; reopening does not allow adding/removing/moving those Modules. Atomics remain addable. Later Modules stay standalone, optionally waiting for a named Epic.
-2. Read each Module's start conditions. Assign its persistent lead and permitted checkout; prepare necessary contracts, execution and actual prerequisites. Module begin requires that readiness and an active parent Epic.
-3. Launch the lead through the authorized runtime using role, alias, Module reference and permitted checkout. Have it load get_context through the Module-lead skill; do not duplicate the full plan in a prompt. Configure actual tool/permission access through the launcher.
-4. Keep the same lead through Tasks and corrections. Helper scopes, worktrees and integration belong to that lead under orchestrator-approved authority/capacity. Handles are reported locations, not proof of a running process.
+## 2 Launch, then bind the actual ID
 
-Existing records without managed workflow keep legacy behavior. Reads never migrate or invent historical starts/delivery. Explicit begin opts an owner into current rules and may require additional planning fields; report the actual returned conditions. Do not silently reinterpret an old applicable approval as a current full-workflow approval.
+Per Module, in order:
 
-## Outcome and independent acceptance
+1. Create the Module with its goal/context in MCP.
+2. Launch a lead through a supported harness with role, alias, Module reference and permitted checkout; its assignment is to read context/code, report planning, decompose Tasks and identify contracts. The launcher, not Module text, grants access.
+3. Obtain the real harness, agent ID, communication address and launch reference from the launch receipt.
+4. `record_work op=bind_agent` with `{role: lead, harness, agent_id, communication_ref, resume_ref?, launch_ref}` on the Module. Strings are at most 256 bytes (harness 64) and are observed receipt data; omit `resume_ref` if the runtime offers none.
+5. Continue planning, implementation and corrections through that binding. Later agent-scoped actions use the recorded `agent_id` as actor, not a display label.
 
-Task completion is the lead's local decision after tests or manual verification. No separate Task review exists. A commit or a runtime succeeded notice does not close work automatically.
+The ID is absent until observed. Never fabricate an ID, transcript URL or resume capability, and never use `plan_work edit_module` to set or change a bound lead. If a launch or binding reply is lost, inspect the Module first: a launched-but-unbound agent is bound, not relaunched; retrying the same binding does not duplicate history.
 
-Begin each current Atomic before its result/import/completion; embedded Atomic begin follows its Module begin. Every current workflow Atomic receives independent review, including an embedded Module Atomic. A local result/state=done or complete is readiness evidence; `review_work` establishes current accepted completion. Select a reviewer who did not author the work; do not invent attribution. Known lead/executor self-review refuses.
+Reviewers bind (role reviewer) on the Module; the reviewer and an integrator (role integrator) bind on an integration Atomic. Each owner has at most three role slots. The Epic has no binding slots: its begin, result, freeze, `verify_criterion` and review are your own orchestrator-attributed actions. Tasks have no binding or review. A generic Atomic keeps its executor and independent-review policy; the bound lead/reviewer on a Module and integrator/reviewer on an integration Atomic are mandatory.
 
-When Module children are terminal/currently accepted as required, obtain independent whole-Module review. Its scope covers implementation, criteria, contracts and explicitly required checks. review_module remains a compatible Module-only call; review_work also accepts E/A/M/A. Changes requested are a saved negative conclusion, not a failed tool call. Return corrections to the same lead and review changed code/findings.
+### Replacement
 
-A reviewed current Module also needs reported delivery/merge into its declared target branch. Root performs any authorized actual Git integration outside MCP, then `record_work op=deliver` records target_branch/summary/artifact. A local merge suffices; a hosting PR is optional. Bookkeeping after review does not require a second unchanged-code review. Semantic changes/reopen make prior approval/delivery historical.
+Replace a lead, reviewer or integrator ONLY when the original is lost, unrecoverable AND cannot continue. Slowness, temporary unavailability, findings or model preference are not reasons.
 
-Create the integration Atomic under Epic/Project with participating Module refs, environment, scenarios and required check labels. Begin waits for currently accepted/delivered participants. Verify actual joint behavior, report real results and obtain independent Atomic review. No-code verification needs no invented commit. Final modern Epic acceptance requires current reviewed integration whose participant set exactly matches the active noncanceled frozen Module roster, other required owned Atomics, own criteria/result/checks and independent Epic review.
+1. Record `recover_agent` with `stage=lost`, `lost=true`, `unrecoverable=true`, a reason (512 bytes) and the observed inability to continue/resume (1024 bytes).
+2. Launch the replacement with a context-recovery assignment and `bind_agent` its actual new ID; a different binding refuses before the loss is recorded. The prior term stays in history.
+3. The replacement reads Epic/Module goals, code and exact candidates, agreed contracts, Task outcomes, prior decisions, reports, tests, findings, integration coverage and unfinished work, then records `recover_agent stage=immersed`, attributed to its own new `agent_id`, with understanding (1024 bytes) plus sources, unfinished and gaps (8×256 each). Remaining gaps block continuation of that role until reconciled.
 
-Required checks must pass; not_applicable is not a waiver. Gaps are unfinished scope; followups are outside scope. Canceled work is excluded but its history remains. Parent cancellation requires terminal children and never cascades. Reopen explicitly with reasons, parent before child; no automatic rollback or agent stop is implied.
+A replacement reviewer keeps the prior findings and changed-scope basis; repeat whole-Module review only for a concrete verification gap. Role bookkeeping (loss, bind, immersion) is not a new implementation or review of the work; history and findings are retained and only a loss permits replacement.
+
+## 3 Coordinate contracts, scopes and waits
+
+Leads create their own Tasks and contract entries. You match required inputs to providers, check business coverage and shared ownership, and send contradictions back to the same leads. Silence or a modified counterproposal is not agreement. Material business requirements must not vanish in decomposition.
+
+Contract entries are `{id, revision, peer, description, reference?, ready}`. One provider owns each `id` and its canonical definition/artifact; the reciprocal provides/consumes entries on all party Modules must carry the same id, revision and artifact. Several consumers are allowed. `ready` is metadata and never replaces confirmations. Each participating lead's bound agent confirms the exact current revision with `record_work agree_contract {contract_id, revision, summary}`; every affected party must confirm before its implementation. A changed affecting entry needs a higher revision and renewed confirmations; mismatches are reported until they agree. Removing an entry or changing its consumer does not reset the canonical provider definition/version. Provides/consumes are obligations, not waits.
+
+Declare business criterion scopes with `plan_work edit_epic criterion_scopes=[{index,text,modules}]` (at most 8; index is ZERO-BASED, and index and text must match the current criteria; Modules within the roster) so final verification knows the affected Module set.
+
+`dependencies` are the only real waits and already refuse true cycles. A refusal, or a mandatory-wait cycle you find, is an architecture problem: report the cycle and its impact to the owner and resolve it with the affected leads before the affected work starts. Non-blocking contract/data-flow cycles are allowed. No new report system exists; use ordinary reports/blockers.
+
+## 4 Freeze, then parallel implementation
+
+Freeze with `plan_work freeze_epic {epic}` after: every Module has a bound lead with current planning, relevant contracts agreed, criterion scopes declared, no mandatory-wait cycle, and each lead has a prepared distinct writable checkout. Freeze does NOT require acyclic waits to be already satisfied: a provider must be able to begin so its consumer can wait for acceptance. Module `begin` separately enforces its own dependencies, the frozen parent, the actual ready lead, current planning/agreement and a separate worktree; simultaneously active core Modules sharing a writable checkout refuse. The integration checkout is separate.
+
+After freeze the same leads implement in parallel; a consumer works against the agreed contract and a substitute unless a real prerequisite requires waiting. Tests isolate mutable state (databases, temp files, service fixtures) so worktrees cannot affect each other.
+
+## 5 Review
+
+Task completion is the lead's local decision after tests or manual verification. A commit, import or runtime success does not close work, and there is no Task review.
+
+The lead submits a definite candidate via `record_work result` (`candidate`, `changed_scope`); an imported Module candidate is the raw full Git SHA, no `commit:` prefix. Also record `boundary_evidence` per tested contract; a Module with `contracts.not_required=true` still needs the same mutation-quality controls under the reserved `contract_id=local`, `revision=1` (a required local quality scope, never a peer contract id; applicability pins the current Module intent and candidate despite revision 1). Positive Module review requires a candidate and applicable boundary evidence: for `{contract_id, revision, candidate, conditions, correct, mutation, failed, restored, artifacts}`, correct/restored must be passed and failed must be failed, each `{status, detail, artifact?}` with a meaningful detail. Recording executes no check; isolation is verified outside the MCP.
+
+Launch the reviewer after a definite whole-Module submission, bind it (role reviewer), and have it review as its recorded `agent_id` via `review_work` (or `review_module`). Embedded Atomic findings and follow-up references remain scoped to that Atomic. The reviewer is bound and did not author the work; known lead self-review refuses. Changes requested is a saved conclusion, not a tool failure. For findings:
+
+1. Return them to the same lead through its recorded ID.
+2. The lead fixes and submits an updated candidate with `changed_scope`.
+3. Resume the same reviewer through its recorded ID; it reviews only the changes and names resolved findings via `resolved_findings=[{review_index, finding_index, summary}]` (indexes ZERO-BASED) alongside `changed_scope`.
+
+A current positive core review makes the Module ready for integration. Delivery/merge into a target branch is separate bookkeeping (`record_work op=deliver`) and never a prerequisite for readiness. A review binds the candidate, affecting contract revisions and evidence. An affecting contract revision, even with unchanged code, invalidates readiness and integration coverage: the same lead assesses and updates or explains no change is needed, refreshes boundary/mutation evidence for the changed scope, and the same reviewer reviews the changed obligations. Prior approvals remain history. Internal defects found during integration use the same loop.
+
+Every current workflow Atomic, including Module-embedded, needs independent review. Local done is readiness evidence; `review_work` establishes accepted completion.
+
+## 6 Integrate incrementally
+
+Read `get_context view=integration` (Project or Epic). It derives ready connected components of at least two Modules from reciprocal agreed contracts and current positive reviews, with the exact candidate/contract coverage key, covered/uncovered status and named partial facts. Do not wait for unrelated or unfinished Modules and do not group unrelated ones.
+
+For an uncovered component create an integration Atomic (`create_atomic` with `participants`, environment, scenarios and required checks) and bind a reviewer and an integrator on it. Atomic `begin` requires at least two connected current-ready Modules, the bound integrator and a distinct execution checkout. The agent assembles real candidates, verifies provider/consumer obligations, valid/invalid cases, errors and effects, runs the actual combined behavior and records `result` with its definite assembly candidate plus honest report/checks; the bound reviewer then reviews the Atomic. The integrator owns wiring, assembly and checks only; internal Module defects return to that Module's lead.
+
+First begin captures the exact candidate/contract key. Equivalent active/pending jobs and current accepted coverage refuse duplicates; inspect and continue the existing job after an unknown outcome. Changed or reopened affecting inputs stale coverage; unrelated metadata does not. A later connected ready Module triggers the next assembly (e.g. A+B, then B+C). No-code verification needs no invented commit.
+
+## 7 Accept the Epic
+
+Each declared business criterion needs `record_work op=verify_criterion` on the Epic: `{index, text, modules, candidate, environment, scenarios, summary, checks, artifacts, integration_ref?}`. Index (ZERO-BASED), text and Module set must match the declared scope; all required checks passed. With `integration_ref` the integration must be current, accepted and ONE composition covering the whole criterion Module set with matching candidate/environment/scenarios. Union of A+B and B+C is not proof of A+B+C; without a covering integration the entry is an explicit Epic-level E2E report. Changes stale it.
+
+Final acceptance (your independent `review_work` on the Epic) needs required Modules currently reviewed, every required relevant boundary covered by current integration, and every criterion currently verified. There is no all-roster-per-job barrier. Green Modules or full Task progress do not establish the business outcome.
+
+Required checks must pass; not_applicable is not a waiver. Gaps are unfinished scope; followups are outside scope. Canceled work is excluded but its history stays; cancellation never cascades. Reopen with reasons, parent before child. Preserve unknown/partial coverage.
 
 ## One code report
 
-A coding lead writes `Result:` and optional `Checks:`, `Gaps:`, `Followups:` once in local commit messages. Check lines use `status | label | optional detail`; statuses are passed/failed/not_run/not_applicable. Then import explicit commits through `record_work op=import_commits` using owning Version. Multiple commits/dedup and retained messages prevent duplicated reports or loss after Git history changes.
-
-Imported checks remain lead assertions; the importer does not run tests or independently close a Task. Explicit state=done/complete records the lead's decision. Noncode outcomes, reviews and integration can use ordinary semantic reports. Never fabricate a commit for verification or a URL for an unavailable remote/transcript.
+A coding lead writes `Result:` and optional `Checks:`, `Gaps:`, `Followups:` once in local commit messages; check lines are `status | label | optional detail` with passed/failed/not_run/not_applicable. Import explicit commits through `record_work op=import_commits` using the owning Version. Imported checks are lead assertions; import does not run tests or close a Task. Noncode outcomes, reviews and integration use ordinary semantic reports. Never fabricate a commit or URL.
 
 ## Context, status and safe continuation
 
-get_context supplies assignment, relevant parent background, actual criteria/contracts/dependency conditions, execution, results/corrections and versions. Read addressed tasks/results/checks/review/log views as needed; summary is not every child or full source report.
-
-On an owner status request call project_status once and translate its facts. Preserve standalone work, Task/Atomic distinction, canceled counts, missing leads, blockers/review/delivery attention and data/detail coverage. Unreadable work is unknown and partial counts are lower bounds. Narrow only when the question needs more detail; do not reconstruct status with file scans or live-runtime polling.
+get_context supplies the assignment, parent background, criteria, contracts, dependencies, execution, results and versions; read addressed views as needed. For owner status call project_status once; preserve standalone work, Task/Atomic distinction, canceled counts, missing leads, attention items and data/detail coverage. Unreadable work is unknown; partial counts are lower bounds. Do not reconstruct status with file scans or runtime polling.
 
 | Token | Use |
 |---|---|
 | Allocation version | Init and top-level creation |
 | Project Version | Manifest edit |
-| Owning record Version | Plan/report/begin/complete/import/delivery/review; embedded children share whole Module |
-| Snapshot version | Read continuation only, with unchanged selection and returned next offset |
+| Owning record Version | Plan/report/begin/bind/import/review; embedded children share the whole Module |
+| Snapshot version | Read continuation only |
 
-Chain the new Version from confirmed receipts. Plan omission preserves; result replaces the complete current report. On stale refusal, reconcile fresh context. On lost/partial/unknown outcome inspect context/results/log/review/inventory before another mutation; equal text is not replay identity. Ordinary work does not automatically commit, push, install or repair state.
+Chain new Versions from confirmed receipts. Plan omission preserves; result replaces the complete current report. On stale refusal reconcile fresh context. On lost/partial/unknown outcomes inspect context/results/log/review before another mutation; equal text is not replay identity. Ordinary work does not commit, push, install or repair state.
