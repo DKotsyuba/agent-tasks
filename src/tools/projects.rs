@@ -327,6 +327,8 @@ pub(super) fn register(
             if ![
                 "project.yaml",
                 "modules",
+                "epics",
+                "atomics",
                 ".agent-tasks",
                 "README.md",
                 ".gitignore",

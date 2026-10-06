@@ -335,7 +335,7 @@ async fn core_project_registry_cold_and_legacy_config() {
 #[tokio::test]
 async fn core_config_cold_aliases_and_read_only_absence() {
     let f = Fixture::new();
-    assert_eq!(super::definitions().len(), 9);
+    assert_eq!(super::definitions().len(), 10);
     f.call("get_status", json!({}), false).await;
     let absent = f
         .call("get_context", json!({"project":"alpha"}), false)
@@ -766,6 +766,8 @@ async fn core_store_stale_busy_reservations_and_partial_init() {
     let state = Allocator {
         schema_version: SCHEMA,
         next_module: 7,
+        next_epic: Some(1),
+        next_atomic: Some(1),
     };
     fs::write(
         f.root.join(".agent-tasks/state.yaml"),
@@ -791,6 +793,8 @@ async fn core_store_stale_busy_reservations_and_partial_init() {
         store::encode(&Allocator {
             schema_version: SCHEMA,
             next_module: 1,
+            next_epic: Some(1),
+            next_atomic: Some(1),
         })
         .unwrap(),
     )
@@ -1195,6 +1199,8 @@ async fn core_presentation_large_scan_and_exact_budget_pages() {
     let state = Allocator {
         schema_version: SCHEMA,
         next_module: 36,
+        next_epic: Some(1),
+        next_atomic: Some(1),
     };
     fs::write(
         f.root.join(".agent-tasks/state.yaml"),
@@ -1338,4 +1344,594 @@ async fn core_store_capacity_log_tail_and_post_write_presentation() {
             &mut Vec::new(),
         )
         .unwrap();
+}
+
+/// Allocate a new top-level kind using a real Project Allocation version; return its canonical ref.
+async fn core_create_kind(f: &Fixture, op: &str, mut args: Value) -> String {
+    args["project"] = json!("alpha");
+    args["op"] = json!(op);
+    args["version"] = json!(f.allocation().await);
+    f.call("plan_work", args, false)
+        .await
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_owned()
+}
+
+/// Save an independent purpose-based verdict with a freshly observed dependency-bound Version.
+async fn core_review_entity(f: &Fixture, reference: &str, error: bool) -> String {
+    f.call("review_work",json!({"project":"alpha","ref":reference,"version":f.version(reference).await,
+        "verdict":"accepted","summary":"Explicit criteria and current delivery independently checked","actor":"reviewer"}),error).await
+}
+
+/// Embedded Atomics share Module review, evidence views and lifecycle without indexing Task storage.
+#[tokio::test]
+async fn core_epic_atomic_embedded_lifecycle_views_and_review() {
+    let f = Fixture::new();
+    f.init().await;
+    let module = f.module(vec![], Some(json!({"name":"Module lead"}))).await;
+    for i in 1..=5 {
+        f.plan(
+            &module,
+            json!({"op":"add_atomic","module":module,"title":format!("Verification {i}"),
+            "outcome":"Observe integrated behavior","required_checks":["scenario"],
+            "executor":{"name":"Atomic executor","handle":"session-atomic"}}),
+            false,
+        )
+        .await;
+    }
+    f.record(
+        "M-001/A-001",
+        json!({"op":"result","summary":"Partial verification result"}),
+        false,
+    )
+    .await;
+    assert_eq!(f.store().module(&module).unwrap().value.phase(), "working");
+    let status = f
+        .call("project_status", json!({"project":"alpha"}), false)
+        .await;
+    assert!(status.contains("task details omitted"), "{status}");
+    assert!(
+        status.contains("Atomic executor") && status.contains("session-atomic"),
+        "{status}"
+    );
+    f.record(
+        "M-001/A-001",
+        json!({"op":"cancel","reason":"Replace the scenario setup"}),
+        false,
+    )
+    .await;
+    f.record(
+        "M-001/A-001",
+        json!({"op":"reopen","reason":"Scenario setup available"}),
+        false,
+    )
+    .await;
+    f.record(
+        "M-001/A-001",
+        json!({"op":"result","state":"done","summary":"Verification outcome",
+        "checks":[{"label":"scenario","status":"failed"}]}),
+        false,
+    )
+    .await;
+    for i in 2..=5 {
+        f.record(
+            &format!("M-001/A-{i:03}"),
+            json!({"op":"cancel","reason":"Outside final scope"}),
+            false,
+        )
+        .await;
+    }
+    core_review_entity(&f, &module, true).await;
+    let reply=f.review(&module,json!({"verdict":"accepted","summary":"Whole Module checked","actor":"reviewer",
+        "checks":[{"target":"M-001/A-001","label":"scenario","status":"passed","detail":"Independent scenario rerun"}]}),false).await;
+    assert!(reply.contains("Module phase: accepted"), "{reply}");
+    for view in ["results", "checks"] {
+        let text = f
+            .call(
+                "get_context",
+                json!({"project":"alpha","ref":module,"view":view}),
+                false,
+            )
+            .await;
+        assert!(text.contains("M-001/A-001"), "{text}");
+    }
+    let search = f
+        .call(
+            "search",
+            json!({"project":"alpha","query":"Verification"}),
+            false,
+        )
+        .await;
+    assert!(
+        search.contains("M-001/A-001") && search.contains("5 matches"),
+        "{search}"
+    );
+    let atom = f
+        .call(
+            "get_context",
+            json!({"project":"alpha","ref":"M-001/A-001"}),
+            false,
+        )
+        .await;
+    assert!(
+        atom.contains("Atomic executor") && atom.contains("session-atomic"),
+        "{atom}"
+    );
+    f.record(
+        "M-001/A-001",
+        json!({"op":"reopen","reason":"New scenario"}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        f.store().module(&module).unwrap().value.phase(),
+        "stale approval"
+    );
+}
+
+/// Standalone Atomic done is lightweight acceptance, and semantic edits cannot reuse its old completion.
+#[tokio::test]
+async fn core_epic_atomic_completion_conditions_and_edits() {
+    let f = Fixture::new();
+    f.init().await;
+    let atomic=core_create_kind(&f,"create_atomic",json!({"title":"Root verification","outcome":"Observe outcome","required_checks":["scenario"]})).await;
+    for status in ["failed", "not_run", "not_applicable"] {
+        f.record(&atomic,json!({"op":"result","state":"done","summary":"Verification outcome","checks":[{"label":"scenario","status":status}]}),true).await;
+    }
+    let done=f.record(&atomic,json!({"op":"result","state":"done","summary":"Verification outcome","checks":[{"label":"scenario","status":"passed"}]}),false).await;
+    assert!(done.contains("Atomic phase: done"), "{done}");
+    let before = f.store().module(&atomic).unwrap().bytes;
+    f.record(&atomic,json!({"op":"result","summary":"New gap","gaps":["Unfinished"],"checks":[{"label":"scenario","status":"passed"}]}),true).await;
+    assert_eq!(f.store().module(&atomic).unwrap().bytes, before);
+    f.plan(
+        &atomic,
+        json!({"op":"edit_atomic","ref":atomic,"outcome":"Different expected outcome"}),
+        false,
+    )
+    .await;
+    assert!(!f.store().module(&atomic).unwrap().value.completed);
+    f.record(&atomic,json!({"op":"result","state":"done","summary":"New outcome verified","checks":[{"label":"scenario","status":"passed"}]}),false).await;
+    f.record(&atomic,json!({"op":"blocker","problem":"Environment missing","needed_action":"Restore environment"}),false).await;
+    assert!(!f.store().module(&atomic).unwrap().value.completed);
+    let clear = f
+        .record(
+            &atomic,
+            json!({"op":"clear_blocker","reason":"Environment restored"}),
+            false,
+        )
+        .await;
+    assert!(!clear.contains("Atomic phase: done"), "{clear}");
+    f.call("review_work",json!({"project":"alpha","ref":atomic,"version":f.version(&atomic).await,"verdict":"accepted","summary":"Not a review target"}),true).await;
+}
+
+/// Membership is unique, cancellation never cascades, and unknown ownership preserves healthy reads.
+#[tokio::test]
+async fn core_epic_atomic_membership_unknown_and_canceled_parent() {
+    let f = Fixture::new();
+    f.init().await;
+    let module = f.module(vec![], None).await;
+    let epic = core_create_kind(
+        &f,
+        "create_epic",
+        json!({"title":"Delivery","outcome":"Complete delivery","criteria":["Required outcome"]}),
+    )
+    .await;
+    let other=core_create_kind(&f,"create_epic",json!({"title":"Other delivery","outcome":"Different outcome","criteria":["Other criterion"]})).await;
+    f.plan(
+        &epic,
+        json!({"op":"edit_epic","epic":epic,"modules":[module]}),
+        false,
+    )
+    .await;
+    f.plan(
+        &other,
+        json!({"op":"edit_epic","epic":other,"modules":[module]}),
+        true,
+    )
+    .await;
+    f.plan(
+        &epic,
+        json!({"op":"edit_epic","epic":epic,"modules":["M-999"]}),
+        true,
+    )
+    .await;
+    f.record(&module,json!({"op":"result","summary":"Useful preserved report","checks":[{"label":"readable","status":"passed"}]}),false).await;
+    let original = fs::read(f.root.join("epics/E-002.yaml")).unwrap();
+    fs::write(f.root.join("epics/E-002.yaml"), "unknown: broken").unwrap();
+    let own = f
+        .call(
+            "get_context",
+            json!({"project":"alpha","ref":module,"view":"results"}),
+            false,
+        )
+        .await;
+    assert!(
+        own.contains("PARTIAL") && own.contains("Useful preserved report"),
+        "{own}"
+    );
+    f.record(
+        &module,
+        json!({"op":"handoff","stopping_point":"Preserve","next_action":"Resume"}),
+        true,
+    )
+    .await;
+    fs::write(f.root.join("epics/E-002.yaml"), original).unwrap();
+    f.record(
+        &epic,
+        json!({"op":"cancel","reason":"Resolve remaining scope"}),
+        true,
+    )
+    .await;
+    f.record(
+        &module,
+        json!({"op":"cancel","reason":"Canceled child scope"}),
+        false,
+    )
+    .await;
+    f.record(
+        &epic,
+        json!({"op":"cancel","reason":"All child scope resolved"}),
+        false,
+    )
+    .await;
+    f.record(
+        &module,
+        json!({"op":"reopen","reason":"New child work"}),
+        true,
+    )
+    .await;
+    f.record(
+        &epic,
+        json!({"op":"reopen","reason":"Resume parent"}),
+        false,
+    )
+    .await;
+    f.record(
+        &module,
+        json!({"op":"reopen","reason":"Resume child"}),
+        false,
+    )
+    .await;
+    assert_eq!(f.store().module(&epic).unwrap().value.modules, vec![module]);
+}
+
+/// Integration dependencies outside Epic membership invalidate Epic write/read snapshots and old acceptance.
+#[tokio::test]
+async fn core_epic_atomic_transitive_versions_and_stale_receipts() {
+    let f = Fixture::new();
+    f.init().await;
+    let module = f.module(vec![], None).await;
+    f.record(
+        &module,
+        json!({"op":"result","summary":"Original participant outcome"}),
+        false,
+    )
+    .await;
+    let atomic = core_create_kind(
+        &f,
+        "create_atomic",
+        json!({"title":"Integration","outcome":"Combined scenario","participants":[module]}),
+    )
+    .await;
+    f.record(
+        &atomic,
+        json!({"op":"result","state":"done","summary":"Integration observed"}),
+        false,
+    )
+    .await;
+    let epic=core_create_kind(&f,"create_epic",json!({"title":"Integration Epic","outcome":"Combined outcome","criteria":["Scenario works"]})).await;
+    f.plan(
+        &epic,
+        json!({"op":"edit_epic","epic":epic,"atomics":[atomic]}),
+        false,
+    )
+    .await;
+    f.record(&epic,json!({"op":"result","summary":"Combined acceptance outcome","artifacts":["report-one","report-two"]}),false).await;
+    core_review_entity(&f, &epic, false).await;
+    let version = f.version(&epic).await;
+    let page = f
+        .call(
+            "get_context",
+            json!({"project":"alpha","ref":epic,"view":"results","limit":1}),
+            false,
+        )
+        .await;
+    let snapshot = field(&page, "Snapshot version: ");
+    f.record(
+        &module,
+        json!({"op":"result","summary":"Participant outcome changed"}),
+        false,
+    )
+    .await;
+    f.call("review_work",json!({"project":"alpha","ref":epic,"version":version,"verdict":"accepted","summary":"Stale observation","actor":"reviewer"}),true).await;
+    f.call("get_context",json!({"project":"alpha","ref":epic,"view":"results","limit":1,"start":1,"version":snapshot}),true).await;
+    assert_eq!(
+        f.store().phase(&f.store().module(&atomic).unwrap().value),
+        "stale completion"
+    );
+    assert_eq!(
+        f.store().phase(&f.store().module(&epic).unwrap().value),
+        "stale approval"
+    );
+    let noop = f
+        .plan(&epic, json!({"op":"edit_epic","epic":epic}), false)
+        .await;
+    assert!(noop.contains("Epic phase: stale approval"), "{noop}");
+    let noop = f
+        .record(
+            &atomic,
+            json!({"op":"clear_handoff","reason":"No pending handoff"}),
+            false,
+        )
+        .await;
+    assert!(noop.contains("Atomic phase: stale completion"), "{noop}");
+    let status = f
+        .call("project_status", json!({"project":"alpha"}), false)
+        .await;
+    assert!(
+        status.contains("stale completion") && status.contains("stale approval"),
+        "{status}"
+    );
+    f.record(
+        &atomic,
+        json!({"op":"result","state":"done","summary":"Integration observed again"}),
+        false,
+    )
+    .await;
+    core_review_entity(&f, &epic, false).await;
+}
+
+/// New allocator metadata preserves unpublished gaps and refuses lost counters, while old roots stay untouched on read.
+#[tokio::test]
+async fn core_epic_atomic_allocators_gaps_roots_and_legacy() {
+    let f = Fixture::new();
+    f.init().await;
+    let mut allocator: Allocator =
+        store::decode(&fs::read(f.root.join(".agent-tasks/state.yaml")).unwrap()).unwrap();
+    assert_eq!(allocator.schema_version, 2);
+    allocator.next_epic = Some(7);
+    allocator.next_atomic = Some(4);
+    fs::write(
+        f.root.join(".agent-tasks/state.yaml"),
+        store::encode(&allocator).unwrap(),
+    )
+    .unwrap();
+    let epic = core_create_kind(
+        &f,
+        "create_epic",
+        json!({"title":"Reserved gap","outcome":"Keep IDs monotonic","criteria":["No reuse"]}),
+    )
+    .await;
+    assert_eq!(epic, "E-007");
+    let atomic = core_create_kind(
+        &f,
+        "create_atomic",
+        json!({"title":"Reserved Atomic gap","outcome":"Keep Atomic IDs monotonic"}),
+    )
+    .await;
+    assert_eq!(atomic, "A-004");
+    let other = Fixture::new();
+    other.init().await;
+    assert_eq!(core_create_kind(&other,"create_epic",json!({"title":"Other root","outcome":"Independent numbering","criteria":["Independent"]})).await,"E-001");
+    let modern = other.root.join(".agent-tasks/state.yaml");
+    fs::write(&modern, "schema_version: 2\nnext_module: 1\nnext_epic: 2\n").unwrap();
+    let version = other.allocation().await;
+    other.call("plan_work",json!({"project":"alpha","version":version,"op":"create_atomic","title":"No guessing","outcome":"Refuse lost counter"}),true).await;
+    let legacy = Fixture::new();
+    legacy.init().await;
+    let old = b"schema_version: 1\nnext_module: 1\n";
+    fs::write(legacy.root.join(".agent-tasks/state.yaml"), old).unwrap();
+    legacy
+        .call("get_context", json!({"project":"alpha"}), false)
+        .await;
+    assert_eq!(
+        fs::read(legacy.root.join(".agent-tasks/state.yaml")).unwrap(),
+        old
+    );
+    assert_eq!(
+        core_create_kind(
+            &legacy,
+            "create_atomic",
+            json!({"title":"New kind in old root","outcome":"Explicit write upgrades allocator"})
+        )
+        .await,
+        "A-001"
+    );
+    let new: Allocator =
+        store::decode(&fs::read(legacy.root.join(".agent-tasks/state.yaml")).unwrap()).unwrap();
+    assert_eq!(new.schema_version, 2);
+}
+
+/// Healthy owners retain context and can detach unknown dependencies without weakening file safety.
+#[tokio::test]
+async fn core_epic_atomic_unknown_dependency_recovery() {
+    let f = Fixture::new();
+    f.init().await;
+    let module = f.module(vec![], None).await;
+    let epic = core_create_kind(
+        &f,
+        "create_epic",
+        json!({"title":"Recoverable Epic","outcome":"Keep intent","criteria":["Preserve"]}),
+    )
+    .await;
+    f.plan(
+        &epic,
+        json!({"op":"edit_epic","epic":epic,"modules":[module]}),
+        false,
+    )
+    .await;
+    let atomic=core_create_kind(&f,"create_atomic",json!({"title":"Recoverable integration","outcome":"Keep own result","participants":[module]})).await;
+    let child = f.root.join("modules/M-001.yaml");
+    let original = fs::read(&child).unwrap();
+    for oversized in [true, false] {
+        if oversized {
+            fs::write(&child, vec![b'x'; store::RECORD_CAP + 1]).unwrap();
+        } else {
+            fs::remove_file(&child).unwrap();
+            fs::create_dir(&child).unwrap();
+        }
+        for owner in [&epic, &atomic] {
+            let context = f
+                .call("get_context", json!({"project":"alpha","ref":owner}), false)
+                .await;
+            assert!(
+                context.contains("PARTIAL") && context.contains("M-001"),
+                "{context}"
+            );
+        }
+        core_review_entity(&f, &epic, true).await;
+        f.plan(
+            &epic,
+            json!({"op":"edit_epic","epic":epic,"modules":[]}),
+            false,
+        )
+        .await;
+        f.plan(
+            &atomic,
+            json!({"op":"edit_atomic","ref":atomic,"participants":[]}),
+            false,
+        )
+        .await;
+        if !oversized {
+            fs::remove_dir(&child).unwrap();
+        }
+        fs::write(&child, &original).unwrap();
+        f.plan(
+            &epic,
+            json!({"op":"edit_epic","epic":epic,"modules":[module]}),
+            false,
+        )
+        .await;
+        f.plan(
+            &atomic,
+            json!({"op":"edit_atomic","ref":atomic,"participants":[module]}),
+            false,
+        )
+        .await;
+    }
+}
+
+/// New purpose-based variants remain closed and required patches never accept null.
+#[test]
+fn core_epic_atomic_closed_shapes() {
+    for mut args in [
+        json!({"op":"create_epic","title":"Epic","outcome":"Outcome","criteria":["Criterion"]}),
+        json!({"op":"edit_epic","epic":"E-001","modules":[],"atomics":[]}),
+        json!({"op":"create_atomic","title":"Atomic","outcome":"Outcome","participants":[]}),
+        json!({"op":"add_atomic","module":"M-001","title":"Atomic","outcome":"Outcome"}),
+        json!({"op":"edit_atomic","ref":"A-001","outcome":"Changed"}),
+    ] {
+        args["project"] = json!("alpha");
+        args["version"] = json!("a".repeat(64));
+        assert!(input::mutation::<input::Plan>(args.clone(), false).is_ok());
+        args["unknown"] = json!("No untyped patches");
+        assert!(input::mutation::<input::Plan>(args, false).is_err());
+    }
+    for args in [
+        json!({"op":"edit_epic","epic":"E-001","modules":null}),
+        json!({"op":"edit_atomic","ref":"A-001","outcome":null}),
+        json!({"op":"create_epic","title":"Epic","outcome":"Outcome"}),
+    ] {
+        let mut args = args;
+        args["project"] = json!("alpha");
+        args["version"] = json!("a".repeat(64));
+        assert!(input::mutation::<input::Plan>(args, false).is_err());
+    }
+    assert!(!input_shape::<input::ReviewWorkArgs>(
+        json!({"project":"alpha","ref":"E-001","version":"a".repeat(64),"verdict":"accepted","summary":"Review","unknown":true})
+    ));
+}
+
+/// Degraded mutation rendering preserves exact Epic/Atomic targets, versions and real saved effects.
+#[tokio::test]
+async fn core_epic_atomic_render_fallback_preserves_creation() {
+    let f = Fixture::new();
+    f.init().await;
+    let broken = Templates::new(&[]).unwrap();
+    for (op, reference, extra) in [
+        (
+            "create_epic",
+            "E-001",
+            json!({"criteria":["Required outcome"]}),
+        ),
+        ("create_atomic", "A-001", json!({})),
+    ] {
+        let mut args = extra;
+        args["op"] = json!(op);
+        args["project"] = json!("alpha");
+        args["version"] = json!(f.allocation().await);
+        args["title"] = json!("Recoverable publication");
+        args["outcome"] = json!("Inspect exact target without replay");
+        let reply = super::call("plan_work", args, &f.identity, &broken, &f.config)
+            .await
+            .unwrap();
+        assert_eq!(reply.is_error, Some(false));
+        let value = serde_json::to_value(reply).unwrap();
+        let text = value["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains(reference)
+                && text.contains("Presentation degraded")
+                && text.contains("Creation target"),
+            "{text}"
+        );
+        assert!(f.store().module(reference).is_ok());
+    }
+}
+
+/// Faults after allocator or owner publication disclose exact E/A targets and preserve inspect-before-retry recovery.
+#[tokio::test]
+async fn core_epic_atomic_partial_publication_recovery() {
+    let f = Fixture::new();
+    f.init().await;
+    for (op, first, second, extra) in [
+        (
+            "create_epic",
+            "E-001",
+            "E-002",
+            json!({"criteria":["Keep scope"]}),
+        ),
+        ("create_atomic", "A-001", "A-002", json!({})),
+    ] {
+        let mut args = extra.clone();
+        args["op"] = json!(op);
+        args["title"] = json!("Partial publication");
+        args["outcome"] = json!("Retain reserved gaps");
+        args["project"] = json!("alpha");
+        args["version"] = json!(f.allocation().await);
+        store::fail_next_directory_sync();
+        let failed = f.call("plan_work", args, true).await;
+        assert!(
+            failed.contains("durability_unknown")
+                && failed.contains(first)
+                && failed.contains(".agent-tasks/state.yaml"),
+            "{failed}"
+        );
+        assert!(
+            f.store().module(first).is_err(),
+            "Allocator publication must not imply owner publication"
+        );
+        let mut next = extra;
+        next["title"] = json!("Recovered creation");
+        next["outcome"] = json!("Use next reservation");
+        assert_eq!(core_create_kind(&f, op, next).await, second);
+        let version = f.version(second).await;
+        store::fail_next_directory_sync();
+        let failed=f.call("record_work",json!({"project":"alpha","ref":second,"version":version,"op":"result","summary":"Visible owner report"}),true).await;
+        assert!(
+            failed.contains(second) && failed.contains("durability_unknown"),
+            "{failed}"
+        );
+        let current = f.store().module(second).unwrap();
+        assert_eq!(
+            current.value.result.as_ref().unwrap().summary,
+            "Visible owner report"
+        );
+        f.call("record_work",json!({"project":"alpha","ref":second,"version":version,"op":"result","summary":"Never blindly replay"}),true).await;
+        assert_eq!(f.store().module(second).unwrap().bytes, current.bytes);
+    }
 }

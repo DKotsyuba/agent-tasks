@@ -2,7 +2,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Owned YAML schema revision; unfamiliar revisions are never rewritten.
 pub const SCHEMA: u32 = 1;
@@ -88,10 +88,79 @@ impl Project {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Allocator {
-    /// Owned schema revision.
+    /// Allocator revision: legacy 1 is read-only compatible; new guarded writes publish revision 2.
     pub schema_version: u32,
     /// Next unused module number; reservations are never recycled.
     pub next_module: u64,
+    /// Next Epic reservation; absent only for a virgin legacy kind, otherwise restoration is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_epic: Option<u64>,
+    /// Next standalone Atomic reservation; missing/invalid used counters block allocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_atomic: Option<u64>,
+}
+
+impl Allocator {
+    /// Validate numbering and upgrade only an explicit in-memory write candidate to allocator schema 2.
+    /// Legacy schema 1 may initialize new kind counters only with empty inventories for those kinds.
+    /// Schema 2 always requires every counter, even when a reserved publication left no visible record.
+    pub fn prepare(&mut self, ids: &[String]) -> Result<(), String> {
+        if !matches!(self.schema_version, 1 | 2) {
+            return Err("Unsupported allocator schema_version.".into());
+        }
+        if self.schema_version == 1 {
+            if self.next_epic.is_none() && !ids.iter().any(|id| id.starts_with("E-")) {
+                self.next_epic = Some(1);
+            }
+            if self.next_atomic.is_none() && !ids.iter().any(|id| id.starts_with("A-")) {
+                self.next_atomic = Some(1);
+            }
+        }
+        for (prefix, counter) in [
+            ("M-", Some(self.next_module)),
+            ("E-", self.next_epic),
+            ("A-", self.next_atomic),
+        ] {
+            let maximum = ids
+                .iter()
+                .filter_map(|id| number(id, prefix).ok())
+                .max()
+                .unwrap_or(0);
+            if !counter.is_some_and(|n| n > maximum && n < u64::MAX) {
+                return Err("Missing or invalid allocator counter; restore retained state, never guess reserved IDs.".into());
+            }
+        }
+        self.schema_version = 2;
+        Ok(())
+    }
+}
+
+/// Initial counter for a previously unused kind; inventory validation prevents lost-ID reuse.
+pub fn initial_counter() -> Option<u64> {
+    Some(1)
+}
+
+/// Validate a top-level Epic, Module or Atomic reference and return its prefix and number.
+pub fn work_number(value: &str) -> Result<(&'static str, u64), String> {
+    for prefix in ["E-", "M-", "A-"] {
+        if value.starts_with(prefix) {
+            return number(value, prefix).map(|n| (prefix, n));
+        }
+    }
+    Err("Expected E-001, M-001 or A-001.".into())
+}
+
+/// Canonical owned filename; callers validate references before opening it.
+pub fn work_path(id: &str) -> Result<String, String> {
+    let (prefix, _) = work_number(id)?;
+    Ok(format!(
+        "{}/{id}.yaml",
+        match prefix {
+            "E-" => "epics",
+            "A-" => "atomics",
+            _ => "modules",
+        }
+    ))
 }
 
 /// Reported lead identity, never proof of session liveness or authentication.
@@ -104,7 +173,7 @@ pub struct Lead {
     pub handle: Option<String>,
 }
 
-/// Stored task lifecycle. Review belongs to the containing module.
+/// Embedded Task/Atomic lifecycle. Review belongs to the containing Module.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
@@ -116,7 +185,7 @@ pub enum TaskState {
     Canceled,
 }
 
-/// Stored module lifecycle; all display phases are derived from current facts.
+/// Stored Epic/Module/standalone Atomic cancellation lifecycle; current phases are derived.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ModuleState {
@@ -210,16 +279,19 @@ pub struct Cancellation {
     pub actor: Option<String>,
 }
 
-/// Embedded task with target-owned current evidence.
+/// Embedded Task (T-) or Atomic (A-) with target-owned evidence; whole-Module review covers both.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Task {
-    /// Positive module-local ID; public references include the module.
+    /// Positive Module-local T-/A- ID; public references include the owning M- reference.
     pub id: String,
     /// Human title, at most 256 UTF-8 bytes.
     pub title: String,
     /// Optional acceptance criterion, at most 1024 UTF-8 bytes.
     pub criterion: Option<String>,
+    /// Optional Atomic executor; Tasks preserve the original lead-through-Module policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor: Option<Lead>,
     /// Explicit required check labels; missing reports block module approval.
     pub required_checks: Vec<String>,
     /// Local completion lifecycle; no task review state.
@@ -260,7 +332,7 @@ pub struct Handoff {
     pub next_action: String,
 }
 
-/// Independent module review verdict.
+/// Independent whole-Epic/Module review verdict; leaves have no separate verdict.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
@@ -284,7 +356,7 @@ pub struct Finding {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CheckUpdate {
-    /// Module or owned task reference.
+    /// Top-level work or Module-owned Task/Atomic reference.
     pub target: String,
     /// Target-local check label.
     pub label: String,
@@ -326,7 +398,7 @@ pub struct LogEntry {
     pub at: String,
     /// Declared actor.
     pub actor: Option<String>,
-    /// Module or owned task reference.
+    /// Top-level work or Module-owned Task/Atomic reference.
     pub target: String,
     /// Machine action name.
     pub action: String,
@@ -338,7 +410,7 @@ pub struct LogEntry {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Reason {
-    /// Owned module/task reference.
+    /// Top-level work or Module-owned Task/Atomic reference.
     pub target: String,
     /// Clear or reopen operation.
     pub action: String,
@@ -350,13 +422,14 @@ pub struct Reason {
     pub actor: Option<String>,
 }
 
-/// One module is one guarded YAML file, including its tasks and retained reviews.
+/// Shared guarded evidence record: M owns embedded Tasks/Atomics, E owns references, A owns its result.
+/// Kind is determined by the canonical ID; validation rejects fields owned by another kind.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Module {
     /// Owned schema revision.
     pub schema_version: u32,
-    /// Canonical module ID matching its filename.
+    /// Canonical M-/E-/A- identity matching its kind-specific filename.
     pub id: String,
     /// Human title, at most 256 UTF-8 bytes.
     pub title: String,
@@ -378,6 +451,30 @@ pub struct Module {
     pub review_epoch: u64,
     /// At most 32 embedded tasks.
     pub tasks: Vec<Task>,
+    /// Module-owned Atomics, each with independent A numbering and whole-Module review.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub atomics: Vec<Task>,
+    /// Next embedded Atomic reservation; checked against existing Atomics before writes.
+    #[serde(default = "initial_counter", skip_serializing_if = "Option::is_none")]
+    pub next_atomic: Option<u64>,
+    /// Epic acceptance criteria; background for children, never implicitly inherited checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criteria: Vec<String>,
+    /// Epic-owned Module references; this list is the only membership authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
+    /// Epic-owned standalone Atomic references; canonical Atomic files remain independent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub atomic_members: Vec<String>,
+    /// Standalone integration Atomic's participating Modules, not an ownership relation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<String>,
+    /// Participating Module semantic basis captured when an Atomic result is reported.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub participant_basis: BTreeMap<String, String>,
+    /// Standalone Atomic completion; Module/Epic acceptance continues to use independent review.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub completed: bool,
     /// Current module report, optional when task reports establish the outcome.
     pub result: Option<Report>,
     /// Current module check evidence.
@@ -469,7 +566,55 @@ impl Module {
     /// Validate all owned semantic data. Missing counters remain diagnostically readable.
     pub fn validate(&self) -> Result<(), String> {
         revision(self.schema_version)?;
-        number(&self.id, "M-")?;
+        let (kind, _) = work_number(&self.id)?;
+        strings(&self.criteria, 1024, true)?;
+        if kind == "E-" && self.criteria.is_empty() {
+            return Err("Epic needs acceptance criteria.".into());
+        }
+        for (values, prefix) in [
+            (&self.modules, "M-"),
+            (&self.atomic_members, "A-"),
+            (&self.participants, "M-"),
+        ] {
+            if values.len() > MAX_TASKS {
+                return Err("At most 32 referenced children or participants.".into());
+            }
+            let mut seen = BTreeSet::new();
+            for id in values {
+                number(id, prefix)?;
+                if !seen.insert(id) {
+                    return Err("Duplicate referenced work.".into());
+                }
+            }
+        }
+        if kind != "E-"
+            && (!self.modules.is_empty()
+                || !self.atomic_members.is_empty()
+                || !self.criteria.is_empty())
+        {
+            return Err("Only an Epic owns member references and Epic criteria.".into());
+        }
+        if kind != "A-"
+            && (!self.participants.is_empty()
+                || !self.participant_basis.is_empty()
+                || self.completed)
+        {
+            return Err("Only standalone Atomics own integration bases or completion.".into());
+        }
+        if kind != "M-" && (!self.tasks.is_empty() || !self.atomics.is_empty()) {
+            return Err("Only Modules embed execution work.".into());
+        }
+        if self.completed && self.result.is_none() {
+            return Err("Completed Atomic has no result.".into());
+        }
+        for (id, basis) in &self.participant_basis {
+            if !self.participants.contains(id)
+                || basis.len() != 64
+                || !basis.bytes().all(|c| c.is_ascii_hexdigit())
+            {
+                return Err("Invalid integration basis.".into());
+            }
+        }
         text(&self.title, 256)?;
         text(&self.outcome, 1024)?;
         strings(&self.required_checks, 64, true)?;
@@ -477,12 +622,27 @@ impl Module {
             text(&l.name, 128)?;
             optional(&l.handle, 256)?;
         }
-        if self.tasks.len() > MAX_TASKS || self.log.len() > LOG_TAIL {
+        if self.tasks.len() > MAX_TASKS
+            || self.atomics.len() > MAX_TASKS
+            || self.log.len() > LOG_TAIL
+        {
             return Err("Record count limit exceeded.".into());
         }
         let mut ids = BTreeSet::new();
-        for t in &self.tasks {
-            number(&t.id, "T-")?;
+        for (t, prefix) in self
+            .tasks
+            .iter()
+            .map(|t| (t, "T-"))
+            .chain(self.atomics.iter().map(|t| (t, "A-")))
+        {
+            number(&t.id, prefix)?;
+            if prefix == "A-" && t.criterion.is_none() {
+                return Err("Atomic needs an expected outcome.".into());
+            }
+            if let Some(l) = &t.executor {
+                text(&l.name, 128)?;
+                optional(&l.handle, 256)?;
+            }
             if !ids.insert(&t.id) {
                 return Err("Duplicate task ID.".into());
             }
@@ -517,7 +677,7 @@ impl Module {
             return Err("Module cancellation state and reason disagree.".into());
         }
         if self.state == ModuleState::Canceled
-            && self.tasks.iter().any(|t| t.state == TaskState::Open)
+            && self.children().any(|t| t.state == TaskState::Open)
         {
             return Err("Canceled module has open tasks.".into());
         }
@@ -587,12 +747,45 @@ impl Module {
         if module != self.id {
             return Err("Reference belongs to another module.".into());
         }
-        number(task, "T-")?;
-        self.tasks
-            .iter()
-            .position(|t| t.id == task)
-            .map(Some)
-            .ok_or("Unknown task.".into())
+        if task.starts_with("T-") {
+            number(task, "T-")?;
+            self.tasks
+                .iter()
+                .position(|t| t.id == task)
+                .map(Some)
+                .ok_or("Unknown task.".into())
+        } else {
+            number(task, "A-")?;
+            self.atomics
+                .iter()
+                .position(|t| t.id == task)
+                .map(|i| Some(self.tasks.len() + i))
+                .ok_or("Unknown Atomic.".into())
+        }
+    }
+
+    /// Iterate embedded Tasks then Atomics without loading any other record.
+    pub fn children(&self) -> impl Iterator<Item = &Task> {
+        self.tasks.iter().chain(&self.atomics)
+    }
+
+    /// Read a child index returned by target; only validated indices are accepted.
+    pub fn child(&self, index: usize) -> &Task {
+        if index < self.tasks.len() {
+            &self.tasks[index]
+        } else {
+            &self.atomics[index - self.tasks.len()]
+        }
+    }
+
+    /// Mutate an already-resolved child while preserving siblings in the same owning file.
+    pub fn child_mut(&mut self, index: usize) -> &mut Task {
+        let tasks = self.tasks.len();
+        if index < tasks {
+            &mut self.tasks[index]
+        } else {
+            &mut self.atomics[index - tasks]
+        }
     }
 
     /// Require intact next-number metadata before any mutation, without guessing lost reservations.
@@ -609,6 +802,18 @@ impl Module {
             .filter_map(|t| number(&t.id, "L-").ok())
             .max()
             .unwrap_or(0);
+        let atomic_max = self
+            .atomics
+            .iter()
+            .filter_map(|t| number(&t.id, "A-").ok())
+            .max()
+            .unwrap_or(0);
+        if !self
+            .next_atomic
+            .is_some_and(|n| n > atomic_max && n < u64::MAX)
+        {
+            return Err("Missing or invalid Atomic counter; restore retained state.".into());
+        }
         if !self.next_task.is_some_and(|n| n > task_max && n < u64::MAX)
             || !self.next_log.is_some_and(|n| n > log_max && n < u64::MAX)
         {
@@ -627,10 +832,24 @@ impl Module {
             "state":t.state,"result":report_basis(&t.result),"checks":check_basis(&t.checks),
             "cancellation":t.cancellation.as_ref().map(|c| &c.reason)
         })).collect();
-        let value = serde_json::json!({"title":self.title,"outcome":self.outcome,"lead":self.lead,
+        let mut value = serde_json::json!({"title":self.title,"outcome":self.outcome,"lead":self.lead,
             "required_checks":self.required_checks,"state":self.state,"blocker":self.blocker,
             "result":report_basis(&self.result),"checks":check_basis(&self.checks),"tasks":tasks,
             "cancellation":self.cancellation.as_ref().map(|c| &c.reason)});
+        // Preserve legacy Module review digests when every new semantic field is absent.
+        if !self.atomics.is_empty() {
+            value["atomics"] = serde_json::Value::Array(self.atomics.iter().map(|t| serde_json::json!({
+                "id":t.id,"title":t.title,"criterion":t.criterion,"executor":t.executor,
+                "required_checks":t.required_checks,"state":t.state,"result":report_basis(&t.result),
+                "checks":check_basis(&t.checks),"cancellation":t.cancellation.as_ref().map(|c| &c.reason)
+            })).collect());
+        }
+        if self.id.starts_with("E-") {
+            value["epic"] = serde_json::json!({"criteria":self.criteria,"modules":self.modules,"atomics":self.atomic_members});
+        }
+        if self.id.starts_with("A-") {
+            value["atomic"] = serde_json::json!({"completed":self.completed,"participants":self.participants,"basis":self.participant_basis});
+        }
         let bytes = serde_json::to_vec(&value).map_err(|_| "Cannot encode review basis.")?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
@@ -644,10 +863,10 @@ impl Module {
         if self.blocker.is_some() {
             missing.push("Clear the active blocker.".into());
         }
-        if self.tasks.iter().any(|t| t.state == TaskState::Open) {
+        if self.children().any(|t| t.state == TaskState::Open) {
             missing.push("Complete or cancel open tasks.".into());
         }
-        if !self.tasks.iter().any(|t| t.state == TaskState::Done) && self.result.is_none() {
+        if !self.children().any(|t| t.state == TaskState::Done) && self.result.is_none() {
             missing.push(
                 "Report the module outcome; canceled tasks are not delivery evidence.".into(),
             );
@@ -659,8 +878,7 @@ impl Module {
             &self.checks,
         ))
         .chain(
-            self.tasks
-                .iter()
+            self.children()
                 .filter(|t| t.state != TaskState::Canceled)
                 .map(|t| {
                     (
@@ -693,6 +911,17 @@ impl Module {
         if self.state == ModuleState::Canceled {
             return "canceled";
         }
+        if self.id.starts_with("A-") {
+            return if self.completed && self.acceptance().is_empty() {
+                "done"
+            } else if self.completed {
+                "stale completion"
+            } else if self.result.is_some() {
+                "working"
+            } else {
+                "planned"
+            };
+        }
         if let Some(r) = self.reviews.last() {
             let applicable =
                 r.epoch == self.review_epoch && self.basis().is_ok_and(|b| b == r.basis);
@@ -711,8 +940,7 @@ impl Module {
             "ready"
         } else if self.result.is_some()
             || self
-                .tasks
-                .iter()
+                .children()
                 .any(|t| t.state != TaskState::Open || t.result.is_some())
         {
             "working"

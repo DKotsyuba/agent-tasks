@@ -80,7 +80,7 @@ pub enum View {
     /// Compact orientation and current conditions.
     #[default]
     Summary,
-    /// Embedded tasks and their local state.
+    /// Embedded Tasks and Atomics, or an Epic member list, with their local state.
     Tasks,
     /// Current outcome details and reported artifacts.
     Results,
@@ -92,13 +92,13 @@ pub enum View {
     Log,
 }
 
-/// Read one project/module/task with optional snapshot-bound pagination.
+/// Read one Project/Epic/Module/Task/Atomic scope with snapshot-bound pagination.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ContextArgs {
     /// Configured project alias; not a path or a global current project.
     pub project: String,
-    /// Omit for project; otherwise M-001 or M-001/T-001.
+    /// Omit for Project; otherwise E-001, M-001, A-001, M-001/T-001 or M-001/A-001.
     #[serde(rename = "ref")]
     pub reference: Option<String>,
     /// Default summary; select one allowlisted detail view.
@@ -122,7 +122,7 @@ pub struct ContextArgs {
 pub struct StatusArgs {
     /// Configured project alias.
     pub project: String,
-    /// Optional M-001 narrowing when aggregate detail is partial.
+    /// Optional E-001/M-001/A-001 record narrowing when aggregate detail is partial.
     pub module: Option<String>,
 }
 
@@ -134,7 +134,7 @@ pub struct SearchArgs {
     pub project: String,
     /// One to eight whitespace-separated terms, at most 256 UTF-8 bytes; all must match.
     pub query: String,
-    /// Optional M-001 narrowing.
+    /// Optional E-001/M-001/A-001 record narrowing.
     pub module: Option<String>,
     /// Zero-based match offset; default zero.
     #[serde(default)]
@@ -207,6 +207,108 @@ pub enum Plan {
         #[serde(default)]
         tasks: Vec<TaskInput>,
     },
+    /// Allocate one Epic using the Project Allocation version; attach existing members separately.
+    CreateEpic {
+        /// Nonempty Epic title.
+        title: String,
+        /// Expected Epic outcome.
+        outcome: String,
+        /// One to eight meaningful acceptance criteria; children receive these as background context.
+        criteria: Vec<String>,
+        /// Optional persistent Epic lead.
+        lead: Option<Lead>,
+        /// Explicit Epic-owned required checks; never automatically inherited.
+        #[serde(default)]
+        required_checks: Vec<String>,
+    },
+    /// Replace Epic membership or partially edit intent using the dependency-bound Epic Version.
+    EditEpic {
+        /// Target E-001; module and Atomic ownership lives only in this record.
+        epic: String,
+        /// Omission preserves; null refuses.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "String")]
+        title: Patch<String>,
+        /// Omission preserves; null refuses.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "String")]
+        outcome: Patch<String>,
+        /// Omission preserves; explicit nonempty list replaces criteria.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "Vec<String>")]
+        criteria: Patch<Vec<String>>,
+        /// Omission preserves; null clears declared lead.
+        #[serde(default)]
+        #[schemars(with = "Option<Lead>")]
+        lead: Patch<Lead>,
+        /// Omission preserves; [] clears explicit checks.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "Vec<String>")]
+        required_checks: Patch<Vec<String>>,
+        /// Omission preserves; [] removes memberships without deleting or canceling children.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "Vec<String>")]
+        modules: Patch<Vec<String>>,
+        /// Omission preserves; [] removes memberships; only standalone A-001 refs are accepted.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "Vec<String>")]
+        atomics: Patch<Vec<String>>,
+    },
+    /// Allocate a standalone Atomic; attach it to an Epic separately using edit_epic.
+    CreateAtomic {
+        /// Nonempty Atomic title.
+        title: String,
+        /// Meaningful expected outcome; no invented Task wrapper is required.
+        outcome: String,
+        /// Optional declared executor/handle.
+        executor: Option<Lead>,
+        /// Explicit required check labels, which also name integration scenarios when useful.
+        #[serde(default)]
+        required_checks: Vec<String>,
+        /// Participating Modules for integration evidence; at most 32, default empty.
+        #[serde(default)]
+        participants: Vec<String>,
+    },
+    /// Allocate an Atomic embedded in the single owning Module file.
+    AddAtomic {
+        /// Owning M-001; use its whole-file Version.
+        module: String,
+        /// Nonempty Atomic title.
+        title: String,
+        /// Expected outcome, reviewed with the whole Module.
+        outcome: String,
+        /// Optional declared executor.
+        executor: Option<Lead>,
+        /// Explicit Atomic checks, enforced at whole-Module review.
+        #[serde(default)]
+        required_checks: Vec<String>,
+    },
+    /// Partially edit an Atomic's intent; standalone participant changes invalidate current completion.
+    EditAtomic {
+        /// A-001 or M-001/A-001; use owning record Version.
+        #[serde(rename = "ref")]
+        reference: String,
+        /// Omission preserves; null refuses.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "String")]
+        title: Patch<String>,
+        /// Omission preserves; null refuses.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "String")]
+        outcome: Patch<String>,
+        /// Omission preserves; null clears.
+        #[serde(default)]
+        #[schemars(with = "Option<Lead>")]
+        executor: Patch<Lead>,
+        /// Omission preserves; [] clears.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "Vec<String>")]
+        required_checks: Patch<Vec<String>>,
+        /// Standalone Atomics only; Module integration refs are not ownership.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "Vec<String>")]
+        participants: Patch<Vec<String>>,
+    },
     /// Partially edit a module plan; semantic changes make old approval historical.
     EditModule {
         /// Target M-001.
@@ -264,9 +366,9 @@ pub enum Plan {
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Completion {
-    /// Keep this task open.
+    /// Keep this Task/Atomic open.
     Open,
-    /// Complete this task with its meaningful result.
+    /// Complete this Task/Atomic with a meaningful result; standalone Atomic completion enforces acceptance.
     Done,
 }
 
@@ -278,7 +380,7 @@ pub enum Work {
     Result {
         /// Meaningful outcome, at most 1024 UTF-8 bytes.
         summary: String,
-        /// Tasks only; omission preserves current open/done state.
+        /// Tasks/Atomics only; omission preserves completion. Standalone Atomic done enforces its checks.
         state: Option<Completion>,
         /// Current check reports; omission means an empty set, not a partial edit.
         #[serde(default)]
@@ -293,7 +395,7 @@ pub enum Work {
         #[serde(default)]
         artifacts: Vec<String>,
     },
-    /// Set an actionable module-only blocker.
+    /// Set a top-level Epic/Module/standalone Atomic blocker; embedded work uses its Module blocker.
     Blocker {
         /// What prevents progress.
         problem: String,
@@ -302,19 +404,19 @@ pub enum Work {
         /// Optional responsible person/agent.
         resolver: Option<String>,
     },
-    /// Set module-only resume guidance; does not invalidate approval.
+    /// Set top-level resume guidance; handoff does not invalidate acceptance.
     Handoff {
         /// Where the lead stopped.
         stopping_point: String,
         /// Concrete next action.
         next_action: String,
     },
-    /// Clear a module blocker; absent blocker is a no-op.
+    /// Clear a top-level blocker; absent blocker is a no-op.
     ClearBlocker {
         /// Required explanation for clearing.
         reason: String,
     },
-    /// Clear module handoff; absent handoff is a no-op.
+    /// Clear top-level handoff; absence is a no-op and does not change acceptance.
     ClearHandoff {
         /// Required explanation for clearing.
         reason: String,
@@ -335,7 +437,7 @@ pub enum Work {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewCheck {
-    /// The reviewed module or one of its owned tasks.
+    /// Reviewed Epic/Module itself or a Module-owned Task/Atomic; updates never cross owner files.
     pub target: String,
     /// Target-local check label.
     pub label: String,
@@ -366,6 +468,31 @@ pub struct ReviewArgs {
     #[serde(default)]
     pub checks: Vec<ReviewCheck>,
     /// Declared reviewer identity; unknown remains unknown, never authenticated.
+    pub actor: Option<String>,
+}
+
+/// Independent whole-Epic/Module review; Atomic completion has no separate ceremony.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewWorkArgs {
+    /// Configured portable root alias.
+    pub project: String,
+    /// E-001 or M-001; Task and Atomic review is deliberately absent.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// Exact current owning record Version, including Epic child observations.
+    pub version: String,
+    /// Accepted or changes_requested.
+    pub verdict: Verdict,
+    /// Meaningful reviewer conclusion.
+    pub summary: String,
+    /// At most eight retained findings.
+    #[serde(default)]
+    pub findings: Vec<Finding>,
+    /// Owner or embedded child canonical check updates; never writes another file.
+    #[serde(default)]
+    pub checks: Vec<ReviewCheck>,
+    /// Declared independent reviewer; unknown remains unknown.
     pub actor: Option<String>,
 }
 

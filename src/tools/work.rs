@@ -1,5 +1,5 @@
-//! Six business tools: planning, current reports, independent review and bounded retrieval.
-use super::input::{self, Common, Completion, Plan, ReviewArgs, TaskInput, Work};
+//! Purpose-based work tools: guarded planning, current evidence, whole-record review and bounded retrieval.
+use super::input::{self, Common, Completion, Plan, ReviewArgs, ReviewWorkArgs, TaskInput, Work};
 use crate::{
     model::*,
     response::Templates,
@@ -18,6 +18,8 @@ pub struct Ack {
     pub version: String,
     /// Derived current phase, never externally verified delivery.
     pub phase: String,
+    /// Owning record phase label; embedded children always report their Module phase.
+    pub phase_label: &'static str,
     /// Whether the call changed any business record.
     pub changed: bool,
 }
@@ -81,7 +83,7 @@ pub fn templates() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "core_ack",
-            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }}\n{% if ack.target == \"Project\" %}Project state:{% else %}Module phase:{% endif %} {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}Next: {% if ack.target == \"Project\" %}get_context with project only; omit ref.{% else %}get_context with ref={{ ack.target }}.{% endif %} Use project_status for the complete tracked overview. Do not replay a lost reply blindly.\n",
+            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }}\n{% if ack.target == \"Project\" %}Project state:{% else %}{{ ack.phase_label }} phase:{% endif %} {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}Next: {% if ack.target == \"Project\" %}get_context with project only; omit ref.{% else %}get_context with ref={{ ack.target }}.{% endif %} Use project_status for the complete tracked overview. Do not replay a lost reply blindly.\n",
         ),
         (
             "core_error",
@@ -107,6 +109,7 @@ pub fn call(
         "plan_work",
         "record_work",
         "review_module",
+        "review_work",
     ]
     .contains(&name)
     {
@@ -140,6 +143,22 @@ pub fn call(
             }
             "review_module" => {
                 let args: ReviewArgs = decode_args(args)?;
+                number(&args.module, "M-").map_err(arguments)?;
+                let ack = review(config, args, &mut effects)?;
+                Ok(render_ack(templates, &ack, &effects))
+            }
+            "review_work" => {
+                let a: ReviewWorkArgs = decode_args(args)?;
+                let args = ReviewArgs {
+                    project: a.project,
+                    module: a.reference,
+                    version: a.version,
+                    verdict: a.verdict,
+                    summary: a.summary,
+                    findings: a.findings,
+                    checks: a.checks,
+                    actor: a.actor,
+                };
                 let ack = review(config, args, &mut effects)?;
                 Ok(render_ack(templates, &ack, &effects))
             }
@@ -204,8 +223,17 @@ fn render_ack(templates: &Templates, ack: &Ack, effects: &[String]) -> String {
 
 /// Build a target receipt without deriving external success.
 fn ack(target: impl Into<String>, version: String, phase: impl Into<String>, changed: bool) -> Ack {
+    let target = target.into();
+    let phase_label = if target.starts_with("E-") {
+        "Epic"
+    } else if target.starts_with("A-") {
+        "Atomic"
+    } else {
+        "Module"
+    };
     Ack {
-        target: target.into(),
+        target,
+        phase_label,
         version,
         phase: phase.into(),
         changed,
@@ -218,6 +246,7 @@ fn make_task(input: TaskInput, n: u64, at: &str) -> Task {
         id: format!("T-{n:03}"),
         title: input.title,
         criterion: input.criterion,
+        executor: None,
         required_checks: input.required_checks,
         state: TaskState::Open,
         result: None,
@@ -235,12 +264,13 @@ pub fn module_id(reference: &str) -> Result<&str> {
         .split('/')
         .next()
         .ok_or_else(|| arguments("Invalid reference."))?;
-    number(id, "M-").map_err(arguments)?;
+    work_number(id).map_err(arguments)?;
     Ok(id)
 }
 
 /// Read a complete current module, enforce byte version and intact counters before any change.
 fn current(store: &Store, id: &str, version: &str) -> Result<Snapshot<Module>> {
+    store.open_parent(id)?;
     let snapshot = store.module(id)?;
     if snapshot.version != version {
         return Err(Error::new(
@@ -248,7 +278,7 @@ fn current(store: &Store, id: &str, version: &str) -> Result<Snapshot<Module>> {
             format!(
                 "No work saved. {} is {} with current version {}. Read get_context before retrying.",
                 id,
-                snapshot.value.phase(),
+                store.phase(&snapshot.value),
                 snapshot.version
             ),
         ));
@@ -270,11 +300,19 @@ fn save_module(
     effects: &mut Vec<String>,
 ) -> Result<Ack> {
     if value == before.value {
-        return Ok(ack(target, before.version.clone(), value.phase(), false));
+        return Ok(ack(
+            target,
+            before.version.clone(),
+            store.phase(&value),
+            false,
+        ));
     }
-    if action == "reopened"
-        || value.basis().map_err(store::invalid)? != before.value.basis().map_err(store::invalid)?
-    {
+    let semantic_change =
+        value.basis().map_err(store::invalid)? != before.value.basis().map_err(store::invalid)?;
+    if value.id.starts_with("A-") && semantic_change && action != "result reported" {
+        value.completed = false;
+    }
+    if action == "reopened" || semantic_change {
         value.review_epoch = value
             .review_epoch
             .checked_add(1)
@@ -284,14 +322,15 @@ fn save_module(
         .event(target, action, &store::now(), actor)
         .map_err(store::invalid)?;
     value.validate().map_err(store::invalid)?;
-    let version = store.save(
-        &format!("modules/{}.yaml", value.id),
+    store.save(
+        &work_path(&value.id).map_err(arguments)?,
         &value,
         Some(&before.bytes),
         action == "canceled",
         effects,
     )?;
-    Ok(ack(target, version, value.phase(), true))
+    let version = store.work_version(&value, &store::encode(&value)?)?;
+    Ok(ack(target, version, store.phase(&value), true))
 }
 
 /// Initialize missing manifest/allocator records under the caller's root lock.
@@ -318,16 +357,20 @@ pub(super) fn initialize(
     project.validate().map_err(arguments)?;
     let old = store.bytes(".agent-tasks/state.yaml")?;
     let allocator = Allocator {
-        schema_version: SCHEMA,
+        schema_version: 2,
         next_module: 1,
+        next_epic: Some(1),
+        next_atomic: Some(1),
     };
-    if let Some(bytes) = &old
-        && store::decode::<Allocator>(bytes)? != allocator
-    {
-        return Err(Error::new(
-            "partial_init",
-            "Existing allocator is inconsistent with empty initialization; restore a retained copy.",
-        ));
+    if let Some(bytes) = &old {
+        let mut existing: Allocator = store::decode(bytes)?;
+        existing.prepare(&inventory.ids).map_err(store::invalid)?;
+        if existing != allocator {
+            return Err(Error::new(
+                "partial_init",
+                "Existing allocator is inconsistent with empty initialization; restore a retained copy.",
+            ));
+        }
     }
     let expected_state = old.clone().unwrap_or(store::encode(&allocator)?);
     if old.is_none() {
@@ -420,105 +463,209 @@ fn plan(
             required_checks,
             tasks,
         } => {
-            expect_allocation(&store, &common.version)?;
-            let project = store
-                .project()?
-                .ok_or_else(|| Error::new("not_initialized", "Initialize the project first."))?;
-            let inventory = store.inventory()?;
-            require_inventory(&inventory)?;
-            if inventory.ids.len() >= store::MODULE_CAP {
-                return Err(Error::new("capacity", "Module inventory is at capacity."));
-            }
-            let bytes = store.bytes(".agent-tasks/state.yaml")?.ok_or_else(|| {
-                Error::new(
-                    "allocator",
-                    "Missing allocator; restore retained state before allocating.",
-                )
-            })?;
-            let mut state: Allocator = store::decode(&bytes)?;
-            let max = inventory
-                .ids
-                .iter()
-                .filter_map(|id| number(id, "M-").ok())
-                .max()
-                .unwrap_or(0);
-            if state.schema_version != SCHEMA
-                || state.next_module <= max
-                || state.next_module == u64::MAX
-            {
-                return Err(Error::new(
-                    "allocator",
-                    "Invalid allocator or exhausted IDs; no guessing or reuse.",
-                ));
-            }
             if tasks.len() > MAX_TASKS {
-                return Err(arguments("At most 32 initial tasks are allowed."));
+                return Err(arguments("At most 32 initial tasks."));
             }
-            let id = format!("M-{:03}", state.next_module);
             let at = store::now();
-            let mut module = Module {
-                schema_version: SCHEMA,
-                id: id.clone(),
+            let mut value = new_record("M-001", title, outcome, lead, required_checks, &at);
+            value.next_task = Some(tasks.len() as u64 + 1);
+            value.tasks = tasks
+                .into_iter()
+                .enumerate()
+                .map(|(i, t)| make_task(t, i as u64 + 1, &at))
+                .collect();
+            create_record(&store, common, value, effects)
+        }
+        Plan::CreateEpic {
+            title,
+            outcome,
+            criteria,
+            lead,
+            required_checks,
+        } => {
+            let mut value = new_record(
+                "E-001",
                 title,
                 outcome,
                 lead,
                 required_checks,
-                state: ModuleState::Open,
-                next_task: Some(tasks.len() as u64 + 1),
-                next_log: Some(1),
-                omitted_log_entries: 0,
-                review_epoch: 0,
-                tasks: tasks
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, t)| make_task(t, i as u64 + 1, &at))
-                    .collect(),
-                result: None,
-                checks: Vec::new(),
-                blocker: None,
-                handoff: None,
-                cancellation: None,
-                cancellation_history: Vec::new(),
-                reviews: Vec::new(),
-                reasons: Vec::new(),
-                log: Vec::new(),
-                created_at: at.clone(),
-                updated_at: at.clone(),
-            };
-            module
-                .event(&id, "created", &at, &common.actor)
+                &store::now(),
+            );
+            value.criteria = criteria;
+            create_record(&store, common, value, effects)
+        }
+        Plan::CreateAtomic {
+            title,
+            outcome,
+            executor,
+            required_checks,
+            participants,
+        } => {
+            let mut value = new_record(
+                "A-001",
+                title,
+                outcome,
+                executor,
+                required_checks,
+                &store::now(),
+            );
+            value.participants = participants;
+            value.validate().map_err(arguments)?;
+            store.participant_basis(&value.participants)?;
+            create_record(&store, common, value, effects)
+        }
+        Plan::EditEpic {
+            epic,
+            title,
+            outcome,
+            criteria,
+            lead,
+            required_checks,
+            modules,
+            atomics,
+        } => {
+            number(&epic, "E-").map_err(arguments)?;
+            let before = current(&store, &epic, &common.version)?;
+            let mut value = before.value.clone();
+            open_module(&value)?;
+            title.required(&mut value.title).map_err(arguments)?;
+            outcome.required(&mut value.outcome).map_err(arguments)?;
+            criteria.required(&mut value.criteria).map_err(arguments)?;
+            lead.optional(&mut value.lead);
+            required_checks
+                .required(&mut value.required_checks)
                 .map_err(arguments)?;
-            module.validate().map_err(arguments)?;
-            if store::encode(&module)?.len() > store::RECORD_CAP - store::CLOSING_RESERVE {
-                return Err(Error::new(
-                    "capacity",
-                    "Initial module exceeds its capacity.",
-                ));
+            modules.required(&mut value.modules).map_err(arguments)?;
+            atomics
+                .required(&mut value.atomic_members)
+                .map_err(arguments)?;
+            value.validate().map_err(arguments)?;
+            store.membership(&value)?;
+            for id in value.modules.iter().chain(&value.atomic_members) {
+                if !before.value.modules.contains(id) && !before.value.atomic_members.contains(id) {
+                    store.open_parent(id)?;
+                }
             }
-            state.next_module += 1;
-            store.save(
-                ".agent-tasks/state.yaml",
-                &state,
-                Some(&bytes),
-                false,
+            save_module(
+                &store,
+                &before,
+                value,
+                &epic,
+                "Epic plan edited",
+                &common.actor,
                 effects,
-            )?;
-            let after = store.inventory()?;
-            if store.bytes("project.yaml")?.as_deref() != Some(&project.bytes)
-                || after.ids != inventory.ids
-                || after.warnings != inventory.warnings
-                || !after.complete
-                || store.bytes(".agent-tasks/state.yaml")?.as_deref()
-                    != Some(store::encode(&state)?.as_slice())
-            {
-                return Err(Error::new(
-                    "allocation_changed",
-                    "Scope changed after reservation; reserved number remains a gap. Inspect context.",
-                ));
+            )
+        }
+        Plan::AddAtomic {
+            module,
+            title,
+            outcome,
+            executor,
+            required_checks,
+        } => {
+            number(&module, "M-").map_err(arguments)?;
+            let before = current(&store, &module, &common.version)?;
+            let mut value = before.value.clone();
+            open_module(&value)?;
+            if value.atomics.len() >= MAX_TASKS {
+                return Err(arguments("At most 32 Module Atomics."));
             }
-            let version =
-                store.save(&format!("modules/{id}.yaml"), &module, None, false, effects)?;
-            Ok(ack(id, version, module.phase(), true))
+            let n = value
+                .next_atomic
+                .ok_or_else(|| store::invalid("Missing Atomic counter."))?;
+            let mut atomic = make_task(
+                TaskInput {
+                    title,
+                    criterion: Some(outcome),
+                    required_checks,
+                },
+                n,
+                &store::now(),
+            );
+            atomic.id = format!("A-{n:03}");
+            atomic.executor = executor;
+            let target = format!("{module}/{}", atomic.id);
+            value.next_atomic = Some(
+                n.checked_add(1)
+                    .ok_or_else(|| store::invalid("Atomic counter exhausted."))?,
+            );
+            value.atomics.push(atomic);
+            save_module(
+                &store,
+                &before,
+                value,
+                &target,
+                "Atomic added",
+                &common.actor,
+                effects,
+            )
+        }
+        Plan::EditAtomic {
+            reference,
+            title,
+            outcome,
+            executor,
+            required_checks,
+            participants,
+        } => {
+            let before = current(&store, module_id(&reference)?, &common.version)?;
+            let mut value = before.value.clone();
+            open_module(&value)?;
+            let index = value.target(&reference).map_err(arguments)?;
+            if let Some(i) = index {
+                if !value.child(i).id.starts_with("A-") {
+                    return Err(arguments("edit_atomic requires an Atomic."));
+                }
+                if !matches!(participants, input::Patch::Absent) {
+                    return Err(arguments(
+                        "Integration participants belong to standalone Atomics.",
+                    ));
+                }
+                let atomic = value.child_mut(i);
+                if atomic.state == TaskState::Canceled {
+                    return Err(arguments("Reopen canceled Atomic first."));
+                }
+                title.required(&mut atomic.title).map_err(arguments)?;
+                let mut expected = atomic
+                    .criterion
+                    .clone()
+                    .ok_or_else(|| arguments("Atomic outcome missing."))?;
+                outcome.required(&mut expected).map_err(arguments)?;
+                atomic.criterion = Some(expected);
+                executor.optional(&mut atomic.executor);
+                required_checks
+                    .required(&mut atomic.required_checks)
+                    .map_err(arguments)?;
+                if atomic != before.value.child(i) {
+                    atomic.updated_at = store::now();
+                }
+            } else {
+                number(&value.id, "A-").map_err(arguments)?;
+                title.required(&mut value.title).map_err(arguments)?;
+                outcome.required(&mut value.outcome).map_err(arguments)?;
+                executor.optional(&mut value.lead);
+                required_checks
+                    .required(&mut value.required_checks)
+                    .map_err(arguments)?;
+                participants
+                    .required(&mut value.participants)
+                    .map_err(arguments)?;
+                value.validate().map_err(arguments)?;
+                store.participant_basis(&value.participants)?;
+                if value.basis().map_err(arguments)? != before.value.basis().map_err(arguments)? {
+                    value.completed = false;
+                    value.participant_basis.clear();
+                }
+            }
+            save_module(
+                &store,
+                &before,
+                value,
+                &reference,
+                "Atomic plan edited",
+                &common.actor,
+                effects,
+            )
         }
         Plan::EditModule {
             module,
@@ -527,6 +674,7 @@ fn plan(
             lead,
             required_checks,
         } => {
+            number(&module, "M-").map_err(arguments)?;
             let before = current(&store, &module, &common.version)?;
             let mut value = before.value.clone();
             open_module(&value)?;
@@ -602,7 +750,13 @@ fn plan(
                 .target(&reference)
                 .map_err(arguments)?
                 .ok_or_else(|| arguments("edit_task requires an owned task reference."))?;
-            let task = &mut value.tasks[i];
+            if !reference
+                .split_once('/')
+                .is_some_and(|(_, id)| id.starts_with("T-"))
+            {
+                return Err(arguments("edit_task requires a Task, not an Atomic."));
+            }
+            let task = value.child_mut(i);
             if task.state == TaskState::Canceled {
                 return Err(Error::new(
                     "canceled",
@@ -614,7 +768,7 @@ fn plan(
             required_checks
                 .required(&mut task.required_checks)
                 .map_err(arguments)?;
-            if *task != before.value.tasks[i] {
+            if task != before.value.child(i) {
                 task.updated_at = store::now();
             }
             save_module(
@@ -628,6 +782,126 @@ fn plan(
             )
         }
     }
+}
+
+/// Construct the existing lightweight evidence envelope for one typed top-level work reference.
+fn new_record(
+    id: &str,
+    title: String,
+    outcome: String,
+    lead: Option<Lead>,
+    required_checks: Vec<String>,
+    at: &str,
+) -> Module {
+    Module {
+        schema_version: SCHEMA,
+        id: id.into(),
+        title,
+        outcome,
+        lead,
+        required_checks,
+        state: ModuleState::Open,
+        next_task: Some(1),
+        next_atomic: Some(1),
+        next_log: Some(1),
+        omitted_log_entries: 0,
+        review_epoch: 0,
+        tasks: Vec::new(),
+        atomics: Vec::new(),
+        criteria: Vec::new(),
+        modules: Vec::new(),
+        atomic_members: Vec::new(),
+        participants: Vec::new(),
+        participant_basis: std::collections::BTreeMap::new(),
+        completed: false,
+        result: None,
+        checks: Vec::new(),
+        blocker: None,
+        handoff: None,
+        cancellation: None,
+        cancellation_history: Vec::new(),
+        reviews: Vec::new(),
+        reasons: Vec::new(),
+        log: Vec::new(),
+        created_at: at.into(),
+        updated_at: at.into(),
+    }
+}
+
+/// Reserve the next kind-specific number durably, then publish one independent no-clobber file.
+/// A failed publication retains its reservation/effects; membership is always a separate Epic write.
+fn create_record(
+    store: &Store,
+    common: &Common,
+    mut value: Module,
+    effects: &mut Vec<String>,
+) -> Result<Ack> {
+    expect_allocation(store, &common.version)?;
+    let project = store
+        .project()?
+        .ok_or_else(|| Error::new("not_initialized", "Initialize Project first."))?;
+    let inventory = store.inventory()?;
+    require_inventory(&inventory)?;
+    if inventory.ids.len() >= store::MODULE_CAP {
+        return Err(Error::new("capacity", "Work inventory at capacity."));
+    }
+    let bytes = store
+        .bytes(".agent-tasks/state.yaml")?
+        .ok_or_else(|| Error::new("allocator", "Missing allocator; restore retained state."))?;
+    let mut state: Allocator = store::decode(&bytes)?;
+    state.prepare(&inventory.ids).map_err(store::invalid)?;
+    let prefix = work_number(&value.id).map_err(arguments)?.0;
+    let counter = match prefix {
+        "E-" => state.next_epic.as_mut(),
+        "A-" => state.next_atomic.as_mut(),
+        _ => Some(&mut state.next_module),
+    }
+    .ok_or_else(|| store::invalid("Missing counter."))?;
+    value.id = format!("{prefix}{counter:03}");
+    *counter += 1;
+    let id = value.id.clone();
+    value
+        .event(&id, "created", &store::now(), &common.actor)
+        .map_err(arguments)?;
+    value.validate().map_err(arguments)?;
+    if store::encode(&value)?.len() > store::RECORD_CAP - store::CLOSING_RESERVE {
+        return Err(Error::new("capacity", "Initial record exceeds capacity."));
+    }
+    effects.push(format!(
+        "Creation target {id}; attachment is a separate Epic write."
+    ));
+    store.prepare(effects)?;
+    store.save(
+        ".agent-tasks/state.yaml",
+        &state,
+        Some(&bytes),
+        false,
+        effects,
+    )?;
+    let after = store.inventory()?;
+    if store.bytes("project.yaml")?.as_deref() != Some(&project.bytes)
+        || after.ids != inventory.ids
+        || after.warnings != inventory.warnings
+        || !after.complete
+        || store.bytes(".agent-tasks/state.yaml")?.as_deref()
+            != Some(store::encode(&state)?.as_slice())
+    {
+        return Err(Error::new(
+            "allocation_changed",
+            format!(
+                "Scope changed after reservation of {id}; reserved number remains a gap. Inspect context."
+            ),
+        ));
+    }
+    store.save(
+        &work_path(&id).map_err(arguments)?,
+        &value,
+        None,
+        false,
+        effects,
+    )?;
+    let version = store.work_version(&value, &store::encode(&value)?)?;
+    Ok(ack(id, version, store.phase(&value), true))
 }
 
 /// Compare only the creation snapshot under lock; not an idempotency certificate.
@@ -685,7 +959,7 @@ fn record(
     if !reopening || index.is_some() {
         open_module(&value)?;
     }
-    if index.is_some_and(|i| value.tasks[i].state == TaskState::Canceled) && !reopening {
+    if index.is_some_and(|i| value.child_mut(i).state == TaskState::Canceled) && !reopening {
         return Err(Error::new(
             "canceled",
             "Reopen this canceled task before changing it.",
@@ -714,7 +988,7 @@ fn record(
                 .map(|c| Check::from_input(c, &at, &common.actor))
                 .collect();
             if let Some(i) = index {
-                let task = &mut value.tasks[i];
+                let task = value.child_mut(i);
                 task.result = Some(report);
                 task.checks = current_checks;
                 if let Some(state) = state {
@@ -724,13 +998,28 @@ fn record(
                     };
                 }
             } else {
-                if state.is_some() {
+                if state.is_some() && !value.id.starts_with("A-") {
                     return Err(arguments(
-                        "state is only supported for task results; modules use independent review.",
+                        "state belongs only to Task/Atomic results; Modules/Epics use independent review.",
                     ));
                 }
                 value.result = Some(report);
                 value.checks = current_checks;
+                if value.id.starts_with("A-") {
+                    if let Some(state) = state {
+                        value.completed = matches!(state, Completion::Done);
+                    }
+                    value.participant_basis = store.participant_basis(&value.participants)?;
+                    if value.completed {
+                        let missing = store.acceptance(&value);
+                        if !missing.is_empty() {
+                            return Err(Error::new(
+                                "acceptance",
+                                missing.into_iter().take(3).collect::<Vec<_>>().join(" "),
+                            ));
+                        }
+                    }
+                }
             }
             "result reported"
         }
@@ -762,7 +1051,7 @@ fn record(
             module_only(index)?;
             text(&reason, 512).map_err(arguments)?;
             if value.blocker.take().is_none() {
-                return Ok(ack(reference, before.version, value.phase(), false));
+                return Ok(ack(reference, before.version, store.phase(&value), false));
             }
             value.reasons.push(Reason {
                 target: reference.into(),
@@ -777,7 +1066,7 @@ fn record(
             module_only(index)?;
             text(&reason, 512).map_err(arguments)?;
             if value.handoff.take().is_none() {
-                return Ok(ack(reference, before.version, value.phase(), false));
+                return Ok(ack(reference, before.version, store.phase(&value), false));
             }
             value.reasons.push(Reason {
                 target: reference.into(),
@@ -796,14 +1085,26 @@ fn record(
                 actor: common.actor.clone(),
             };
             if let Some(i) = index {
-                value.tasks[i].state = TaskState::Canceled;
-                value.tasks[i].cancellation = Some(cancellation);
+                value.child_mut(i).state = TaskState::Canceled;
+                value.child_mut(i).cancellation = Some(cancellation);
             } else {
-                if value.tasks.iter().any(|t| t.state == TaskState::Open) {
+                if value.children().any(|t| t.state == TaskState::Open) {
                     return Err(Error::new(
                         "open_children",
                         "Complete or cancel children explicitly before canceling their module.",
                     ));
+                }
+                if value.id.starts_with("E-") {
+                    store.membership(&value)?;
+                    for id in value.modules.iter().chain(&value.atomic_members) {
+                        let child = store.module(id)?.value;
+                        if !matches!(store.phase(&child), "accepted" | "done" | "canceled") {
+                            return Err(Error::new(
+                                "open_children",
+                                format!("Resolve {id} before canceling Epic; no cascade."),
+                            ));
+                        }
+                    }
                 }
                 value.state = ModuleState::Canceled;
                 value.cancellation = Some(cancellation);
@@ -813,13 +1114,14 @@ fn record(
         Work::Reopen { reason } => {
             text(&reason, 512).map_err(arguments)?;
             if let Some(i) = index {
-                let task = &mut value.tasks[i];
+                let task = value.child_mut(i);
                 task.state = TaskState::Open;
                 if let Some(c) = task.cancellation.take() {
                     task.cancellation_history.push(c);
                 }
             } else {
                 value.state = ModuleState::Open;
+                value.completed = false;
                 if let Some(c) = value.cancellation.take() {
                     value.cancellation_history.push(c);
                 }
@@ -835,7 +1137,7 @@ fn record(
         }
     };
     if let Some(i) = index {
-        value.tasks[i].updated_at = at;
+        value.child_mut(i).updated_at = at;
     }
     save_module(
         &store,
@@ -866,6 +1168,12 @@ fn review(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Resul
     })?;
     let store = config.resolve(&args.project)?;
     let _lock = store.lock(true, effects)?;
+    let (kind, _) = work_number(&args.module).map_err(arguments)?;
+    if kind == "A-" {
+        return Err(arguments(
+            "Atomics use lightweight result completion; review belongs to Modules/Epics.",
+        ));
+    }
     let before = current(&store, &args.module, &args.version)?;
     let mut value = before.value.clone();
     open_module(&value)?;
@@ -900,14 +1208,14 @@ fn review(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Resul
             return Err(arguments("Duplicate review check update."));
         }
         let index = value.target(&input.target).map_err(arguments)?;
-        if index.is_some_and(|i| value.tasks[i].state == TaskState::Canceled) {
+        if index.is_some_and(|i| value.child(i).state == TaskState::Canceled) {
             return Err(Error::new(
                 "canceled",
                 "Review cannot change checks on canceled tasks.",
             ));
         }
         let checks = if let Some(i) = index {
-            &mut value.tasks[i].checks
+            &mut value.child_mut(i).checks
         } else {
             &mut value.checks
         };
@@ -936,7 +1244,7 @@ fn review(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Resul
     }
     value.validate().map_err(arguments)?;
     if args.verdict == Verdict::Accepted {
-        let missing = value.acceptance();
+        let missing = store.acceptance(&value);
         if !missing.is_empty() {
             return Err(Error::new(
                 "acceptance",
@@ -951,7 +1259,7 @@ fn review(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Resul
         .review_epoch
         .checked_add(1)
         .ok_or_else(|| store::invalid("Review epoch exhausted."))?;
-    let basis = value.basis().map_err(store::invalid)?;
+    let basis = store.work_basis(&value)?;
     value.reviews.push(Review {
         verdict: args.verdict,
         summary: args.summary,
@@ -966,12 +1274,13 @@ fn review(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Resul
         .event(&args.module, "review recorded", &at, &args.actor)
         .map_err(store::invalid)?;
     value.validate().map_err(arguments)?;
-    let version = store.save(
-        &format!("modules/{}.yaml", args.module),
+    store.save(
+        &work_path(&args.module).map_err(arguments)?,
         &value,
         Some(&before.bytes),
         args.verdict == Verdict::Accepted,
         effects,
     )?;
-    Ok(ack(args.module, version, value.phase(), true))
+    let version = store.work_version(&value, &store::encode(&value)?)?;
+    Ok(ack(args.module, version, store.phase(&value), true))
 }

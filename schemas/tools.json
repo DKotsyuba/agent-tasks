@@ -116,7 +116,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Purpose: Read enough current context to choose the next action and obtain the correct write precondition.\nInput: project is a configured alias. Omit ref for Project; otherwise use M-001 or M-001/T-001. Do not pass ref=\"Project\".\nViews: summary is the default. Project supports summary only. Module supports summary, tasks, results, checks, review and log. Task supports summary, results, checks and log; review belongs to its Module.\nsummary returns orientation, phase/counts, lead, blockers/handoff and remaining acceptance conditions; it is not the full task list or result body. Use tasks for the Module's children, results for current reports/artifacts, checks for reported/required evidence, review for a retained verdict, and log for recent generated activity. A Module results view previews Task results; read the Task ref for its full result.\nOutput is compact English text with separate Data coverage and Detail coverage. Version is the editable manifest/whole-Module version. Allocation version is the Project creation precondition for init_project/create_module. Snapshot version is for READ continuation, never a write token.\nPages: start defaults 0; limit defaults 20 and must be 1-20. When Next supplies start/version, continue with Snapshot version and unchanged project/ref/view/review_index. review_index is zero-based; omission selects latest. A changed selection or snapshot refuses. Narrow scope/view after capacity limits.\nEffects: read only; never creates, repairs or finishes initialization. An absent configured root returns orientation and a creation precondition. Unknown aliases/missing config refuse safely.",
+    "description": "Purpose: Read enough current context to choose the next action and obtain the correct write precondition.\nInput: project is a configured alias. Omit ref for Project; otherwise use E-001, M-001, A-001, M-001/T-001 or M-001/A-001. Do not pass ref=\"Project\".\nViews: summary is the default. Project supports summary only. Epic/Module supports summary, tasks (children/members), results, checks, review and log. Atomic supports summary/results/checks/log; embedded Atomics are reviewed with their Module. Task supports summary, results, checks and log; review belongs to its Module.\nsummary returns orientation, phase/counts, lead, blockers/handoff and remaining acceptance conditions; it is not the full task list or result body. Use tasks for the Module's children, results for current reports/artifacts, checks for reported/required evidence, review for a retained verdict, and log for recent generated activity. A Module results view previews Task results; read the Task ref for its full result.\nOutput is compact English text with separate Data coverage and Detail coverage. Version is the editable manifest/whole-Module version. Allocation version is the Project creation precondition for init_project/create_module/create_epic/create_atomic. Epic/standalone Atomic Version also binds current member/participant observations; owning Module Version guards embedded Atomics. Snapshot version is for READ continuation, never a write token.\nPages: start defaults 0; limit defaults 20 and must be 1-20. When Next supplies start/version, continue with Snapshot version and unchanged project/ref/view/review_index. review_index is zero-based; omission selects latest. A changed selection or snapshot refuses. Narrow scope/view after capacity limits.\nEffects: read only; never creates, repairs or finishes initialization. An absent configured root returns orientation and a creation precondition. Unknown aliases/missing config refuse safely.",
     "inputSchema": {
       "$defs": {
         "View": {
@@ -129,7 +129,7 @@
             },
             {
               "const": "tasks",
-              "description": "Embedded tasks and their local state.",
+              "description": "Embedded Tasks and Atomics, or an Epic member list, with their local state.",
               "type": "string"
             },
             {
@@ -157,7 +157,7 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "Read one project/module/task with optional snapshot-bound pagination.",
+      "description": "Read one Project/Epic/Module/Task/Atomic scope with snapshot-bound pagination.",
       "properties": {
         "limit": {
           "default": 20,
@@ -171,7 +171,7 @@
           "type": "string"
         },
         "ref": {
-          "description": "Omit for project; otherwise M-001 or M-001/T-001.",
+          "description": "Omit for Project; otherwise E-001, M-001, A-001, M-001/T-001 or M-001/A-001.",
           "type": [
             "string",
             "null"
@@ -220,14 +220,14 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Purpose: Produce the tracked-work overview that the orchestrator can present to the owner in one call.\nInput: project is a configured alias; optional module=M-001 narrows both displayed work and totals to that Module. Omit module for project-wide totals.\nOutput: compact English text with project purpose, readable Module/Task counts and phases, declared leads/handles, current result summaries, blockers, latest review information and last reported activity. This is not live agent monitoring or independent artifact verification.\nData coverage reports unreadable/unscanned work; PARTIAL counts are lower bounds, not zero. Detail coverage separately reports omitted text. Project-wide status shows at most four Task details per Module before response-budget limits; counts still include readable Tasks. Use module narrowing or get_context view=tasks/results/checks/review for detail.\nEffects: read only. No version is needed. Does not save a status document, change lifecycle, start agents or inspect Git. The project must have a valid manifest.",
+    "description": "Purpose: Produce the tracked-work overview that the orchestrator can present to the owner in one call.\nInput: project is a configured alias; optional module=M-001 (also E-001/A-001 work scope) narrows both displayed work and totals to that Module. Omit module for project-wide totals.\nOutput: compact English text with project purpose, readable Epic/Module/Task/Atomic counts and phases, declared leads/handles, current result summaries, blockers, latest review information and last reported activity. This is not live agent monitoring or independent artifact verification.\nData coverage reports unreadable/unscanned work; PARTIAL counts are lower bounds, not zero. Detail coverage separately reports omitted text. Project-wide status shows at most four Task details per Module before response-budget limits; counts still include readable Tasks. Use module narrowing or get_context view=tasks/results/checks/review for detail.\nEffects: read only. No version is needed. Does not save a status document, change lifecycle, start agents or inspect Git. The project must have a valid manifest.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "description": "Return an owner-ready English status of the tracked work, not runtime liveness.",
       "properties": {
         "module": {
-          "description": "Optional M-001 narrowing when aggregate detail is partial.",
+          "description": "Optional E-001/M-001/A-001 record narrowing when aggregate detail is partial.",
           "type": [
             "string",
             "null"
@@ -253,7 +253,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Purpose: Find relevant tracked work before opening its context.\nInput: project alias and query containing 1-8 whitespace-separated words, at most 256 UTF-8 bytes. Optional module=M-001 restricts the scope.\nMatching: Unicode lowercase substring search across semantic fields. Every term must match somewhere in that target; different terms may match different fields. It is not regex, fuzzy, semantic, source-code or Markdown-document search. Rank by matching-field count, then numeric reference.\nOutput: references, titles, matching-field labels, bounded excerpts, match count and explicit data/detail coverage. An excerpt is a preview, not the complete report or proof that the whole repository was searched.\nOpen Module/Task hits with get_context ref=<reference>. A Project hit is opened with get_context(project=...) and OMITTED ref; current rendering shows Project as its label, not a legal ref.\nPages: start defaults 0; limit defaults 20, range 1-20. Continue using Snapshot version and returned Next start, preserving project/query/module. Changed data/selection refuses rather than skipping.\nEffects: read only; no write token, repair, global scan or external query. Requires initialized project context.",
+    "description": "Purpose: Find relevant tracked work before opening its context.\nInput: project alias and query containing 1-8 whitespace-separated words, at most 256 UTF-8 bytes. Optional module=M-001 restricts the scope.\nMatching: Unicode lowercase substring search across semantic fields. Every term must match somewhere in that target; different terms may match different fields. It is not regex, fuzzy, semantic, source-code or Markdown-document search. Rank by matching-field count, then numeric reference.\nOutput: references, titles, matching-field labels, bounded excerpts, match count and explicit data/detail coverage. An excerpt is a preview, not the complete report or proof that the whole repository was searched.\nOpen Epic/Module/Task/Atomic hits with get_context ref=<reference>. A Project hit is opened with get_context(project=...) and OMITTED ref; current rendering shows Project as its label, not a legal ref.\nPages: start defaults 0; limit defaults 20, range 1-20. Continue using Snapshot version and returned Next start, preserving project/query/module. Changed data/selection refuses rather than skipping.\nEffects: read only; no write token, repair, global scan or external query. Requires initialized project context.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -267,7 +267,7 @@
           "type": "integer"
         },
         "module": {
-          "description": "Optional M-001 narrowing.",
+          "description": "Optional E-001/M-001/A-001 record narrowing.",
           "type": [
             "string",
             "null"
@@ -312,7 +312,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Create or partially edit the work plan, not report completion.\nInput: project alias, op and the correct current version; actor is optional declared attribution, not authentication. Do not supply generated IDs, dates or raw YAML.\nOperations:\n- init_project: explicitly create missing owned project storage; requires title/purpose, optional reported remote. Obtain Project Allocation version first. Root parent must already exist; reads do not create it.\n- edit_project: optional title/purpose/remote patch; use Project Version.\n- create_module: required title/outcome, optional lead={name,handle}, required_checks and initial semantic tasks; use Project Allocation version. Returns the generated M-001 reference. Maximum 32 Tasks per Module.\n- edit_module: module plus optional title/outcome/lead/required_checks; use that Module Version.\n- add_task: module/title, optional criterion/required_checks; use Module Version. MCP allocates the next Task ID.\n- edit_task: ref=M-001/T-001 and optional title/criterion/required_checks; use the owning Module Version.\nEdit omission preserves existing data; null clears only optional remote/lead/criterion; [] clears a list. Required fields cannot be cleared. Plan edits preserve unrelated results/history but semantic changes make old Module approval historical. Canceled work must be reopened explicitly.\nOutput: SAVED or UNCHANGED, generated target/current file Version, owning Module phase where applicable, and disclosed filesystem effects. After init_project, read Project context again for fresh Allocation version before create_module. Do not treat the returned manifest Version as an allocation token.\nEffects: explicit local storage writes with generated IDs/UTC dates/activity. No status setter/cascade, Git action, agent launch or document writer. On stale/busy/validation refusal follow the diagnostic. A partial/uncertain publication or lost reply requires inspecting current context/log/inventory before another mutation; never blindly replay.",
+    "description": "Purpose: Create or partially edit the work plan, not report completion.\nInput: project alias, op and the correct current version; actor is optional declared attribution, not authentication. Do not supply generated IDs, dates or raw YAML.\nOperations:\n- init_project: explicitly create missing owned project storage; requires title/purpose, optional reported remote. Obtain Project Allocation version first. Root parent must already exist; reads do not create it.\n- edit_project: optional title/purpose/remote patch; use Project Version.\n- create_module: required title/outcome, optional lead={name,handle}, required_checks and initial semantic tasks; use Project Allocation version. Returns the generated M-001 reference. Maximum 32 Tasks per Module.\n- edit_module: module plus optional title/outcome/lead/required_checks; use that Module Version.\n- add_task: module/title, optional criterion/required_checks; use Module Version. MCP allocates the next Task ID.\n- create_epic: title/outcome/criteria (1-8), optional lead/required_checks; Project Allocation version allocates E-001.\n- edit_epic: epic=E-001, optional title/outcome/criteria/lead/required_checks/modules/atomics; Epic Version. modules/atomics are complete replacement reference lists, at most 32 each; ownership is exclusive and dangling/duplicate/unknown membership refuses. Creation and attachment are separate writes; no multi-file transaction is claimed.\n- create_atomic: title/outcome, optional executor={name,handle}/required_checks/participants (M refs); Project Allocation version allocates standalone A-001. Attach to Epic using edit_epic.\n- add_atomic: module/title/outcome, optional executor/required_checks; Module Version allocates embedded M-001/A-001.\n- edit_atomic: ref=A-001|M-001/A-001, optional title/outcome/executor/required_checks/participants (standalone only); owning Version. Meaningful standalone plan edits reset completion; current evidence remains reported history.\n- edit_task: ref=M-001/T-001 and optional title/criterion/required_checks; use the owning Module Version.\nEdit omission preserves existing data; null clears only optional remote/lead/criterion; [] clears a list. Required fields cannot be cleared. Plan edits preserve unrelated results/history but semantic changes make old Module approval historical. Canceled work must be reopened explicitly.\nOutput: SAVED or UNCHANGED, generated target/current owning record Version and Epic/Module/Atomic phase, and disclosed filesystem effects. After init_project, read Project context again for fresh Allocation version before create_module. Do not treat the returned manifest Version as an allocation token.\nEffects: explicit local storage writes with generated IDs/UTC dates/activity. No status setter/cascade, Git action, agent launch or document writer. On stale/busy/validation refusal follow the diagnostic. A partial/uncertain publication or lost reply requires inspecting current context/log/inventory before another mutation; never blindly replay.",
     "inputSchema": {
       "$defs": {
         "Lead": {
@@ -532,6 +532,359 @@
         },
         {
           "additionalProperties": false,
+          "description": "Allocate one Epic using the Project Allocation version; attach existing members separately.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "criteria": {
+              "description": "One to eight meaningful acceptance criteria; children receive these as background context.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "lead": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lead"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional persistent Epic lead."
+            },
+            "op": {
+              "const": "create_epic",
+              "type": "string"
+            },
+            "outcome": {
+              "description": "Expected Epic outcome.",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "required_checks": {
+              "default": [],
+              "description": "Explicit Epic-owned required checks; never automatically inherited.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Nonempty Epic title.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "title",
+            "outcome",
+            "criteria",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Replace Epic membership or partially edit intent using the dependency-bound Epic Version.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "atomics": {
+              "description": "Omission preserves; [] removes memberships; only standalone A-001 refs are accepted.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "criteria": {
+              "description": "Omission preserves; explicit nonempty list replaces criteria.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "epic": {
+              "description": "Target E-001; module and Atomic ownership lives only in this record.",
+              "type": "string"
+            },
+            "lead": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lead"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Omission preserves; null clears declared lead."
+            },
+            "modules": {
+              "description": "Omission preserves; [] removes memberships without deleting or canceling children.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "edit_epic",
+              "type": "string"
+            },
+            "outcome": {
+              "description": "Omission preserves; null refuses.",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "required_checks": {
+              "description": "Omission preserves; [] clears explicit checks.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Omission preserves; null refuses.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "epic",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Allocate a standalone Atomic; attach it to an Epic separately using edit_epic.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "executor": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lead"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional declared executor/handle."
+            },
+            "op": {
+              "const": "create_atomic",
+              "type": "string"
+            },
+            "outcome": {
+              "description": "Meaningful expected outcome; no invented Task wrapper is required.",
+              "type": "string"
+            },
+            "participants": {
+              "default": [],
+              "description": "Participating Modules for integration evidence; at most 32, default empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "required_checks": {
+              "default": [],
+              "description": "Explicit required check labels, which also name integration scenarios when useful.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Nonempty Atomic title.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "title",
+            "outcome",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Allocate an Atomic embedded in the single owning Module file.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "executor": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lead"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional declared executor."
+            },
+            "module": {
+              "description": "Owning M-001; use its whole-file Version.",
+              "type": "string"
+            },
+            "op": {
+              "const": "add_atomic",
+              "type": "string"
+            },
+            "outcome": {
+              "description": "Expected outcome, reviewed with the whole Module.",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "required_checks": {
+              "default": [],
+              "description": "Explicit Atomic checks, enforced at whole-Module review.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Nonempty Atomic title.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "module",
+            "title",
+            "outcome",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Partially edit an Atomic's intent; standalone participant changes invalidate current completion.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "executor": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lead"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Omission preserves; null clears."
+            },
+            "op": {
+              "const": "edit_atomic",
+              "type": "string"
+            },
+            "outcome": {
+              "description": "Omission preserves; null refuses.",
+              "type": "string"
+            },
+            "participants": {
+              "description": "Standalone Atomics only; Module integration refs are not ownership.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "A-001 or M-001/A-001; use owning record Version.",
+              "type": "string"
+            },
+            "required_checks": {
+              "description": "Omission preserves; [] clears.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Omission preserves; null refuses.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "Partially edit a module plan; semantic changes make old approval historical.",
           "properties": {
             "actor": {
@@ -715,7 +1068,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Record current outcome, an actionable obstacle/resume point, or an explicit lifecycle decision.\nInput: project alias, op, ref and current owning Module Version; actor is optional declared attribution.\nOperations:\n- result: required summary; optional checks/gaps/followups/artifacts constitute a COMPLETE current report replacement. Omitted lists become empty and erase the prior current lists; include every current check/artifact you intend to retain. Task state may be open or done; omission PRESERVES its current state, so reporting a result alone does not complete an open Task. Module results must omit state; Module acceptance uses review_module.\n- blocker: Module only; problem/needed_action, optional resolver.\n- handoff: Module only; stopping_point/next_action. Handoff does not invalidate current approval.\n- clear_blocker/clear_handoff: Module only, required reason; absent data is a no-op.\n- cancel: required reason; Module children must already be terminal. Never cascades.\n- reopen: required reason; resumes the same target and makes old Module approval historical.\nCanceled targets accept reopen only; canceled parents block child writes. Done Tasks need a meaningful result. Failed/missing check reports can coexist with Task done; explicit required checks must pass before Module acceptance.\nOutput: SAVED or UNCHANGED, target, current owning Module phase and whole-Module Version, plus effects. For a Task receipt, ready/accepted/etc. is the MODULE phase, not a Task state; inspect Task context/status for its state. Current report and reviewer updates retain declared attribution.\nEffects: local writes, generated dates and activity. Artifact/commit/PR references are reported strings; no Git/GitHub verification, commit, PR operation or agent launch occurs. Semantic changes invalidate old approval. Inspect context after stale/partial/uncertain outcomes; do not replay blindly.",
+    "description": "Purpose: Record current outcome, an actionable obstacle/resume point, or an explicit lifecycle decision.\nInput: project alias, op, ref and current owning record Version; actor is optional declared attribution.\nOperations:\n- result: required summary; optional checks/gaps/followups/artifacts constitute a COMPLETE current report replacement. Omitted lists become empty and erase the prior current lists; include every current check/artifact you intend to retain. Task state may be open or done; omission PRESERVES its current state, so reporting a result alone does not complete an open Task. Module/Epic results must omit state; acceptance uses independent review_work (review_module stays compatible). Standalone Atomic state=done is lightweight acceptance: meaningful result, no gaps/blocker, all explicit checks passed and current integration participant bases. A fresh result captures participant semantic basis and review generation; new reviews/semantic changes/reopen invalidate integration evidence. Module Atomic state=done follows Task evidence policy; required checks are enforced at whole-Module review.\n- blocker: top-level Epic/Module/standalone Atomic only; problem/needed_action, optional resolver.\n- handoff: top-level Epic/Module/standalone Atomic only; stopping_point/next_action. Handoff does not invalidate current approval.\n- clear_blocker/clear_handoff: top-level Epic/Module/standalone Atomic only, required reason; absent data is a no-op.\n- cancel: required reason; Module/Epic children must already be terminal/current accepted or canceled. Never cascades.\n- reopen: required reason; resumes the same target and makes old Module approval historical.\nCanceled targets accept reopen only; canceled parents block child writes. Done Tasks need a meaningful result. Failed/missing check reports can coexist with Task done; explicit required checks must pass before Module acceptance.\nOutput: SAVED or UNCHANGED, target, current owning Epic/Module/Atomic phase and owning record Version, plus effects. For a Task or embedded Atomic receipt, ready/accepted/etc. is the owning MODULE phase, not a Task state; inspect Task context/status for its state. Current report and reviewer updates retain declared attribution.\nEffects: local writes, generated dates and activity. Artifact/commit/PR references are reported strings; no Git/GitHub verification, commit, PR operation or agent launch occurs. Semantic changes invalidate old approval. Inspect context after stale/partial/uncertain outcomes; do not replay blindly.",
     "inputSchema": {
       "$defs": {
         "CheckInput": {
@@ -774,12 +1127,12 @@
           "oneOf": [
             {
               "const": "open",
-              "description": "Keep this task open.",
+              "description": "Keep this Task/Atomic open.",
               "type": "string"
             },
             {
               "const": "done",
-              "description": "Complete this task with its meaningful result.",
+              "description": "Complete this Task/Atomic with a meaningful result; standalone Atomic completion enforces acceptance.",
               "type": "string"
             }
           ]
@@ -852,7 +1205,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Tasks only; omission preserves current open/done state."
+              "description": "Tasks/Atomics only; omission preserves completion. Standalone Atomic done enforces its checks."
             },
             "summary": {
               "description": "Meaningful outcome, at most 1024 UTF-8 bytes.",
@@ -874,7 +1227,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Set an actionable module-only blocker.",
+          "description": "Set a top-level Epic/Module/standalone Atomic blocker; embedded work uses its Module blocker.",
           "properties": {
             "actor": {
               "description": "Declared identity; omitted/null remains unknown.",
@@ -927,7 +1280,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Set module-only resume guidance; does not invalidate approval.",
+          "description": "Set top-level resume guidance; handoff does not invalidate acceptance.",
           "properties": {
             "actor": {
               "description": "Declared identity; omitted/null remains unknown.",
@@ -973,7 +1326,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Clear a module blocker; absent blocker is a no-op.",
+          "description": "Clear a top-level blocker; absent blocker is a no-op.",
           "properties": {
             "actor": {
               "description": "Declared identity; omitted/null remains unknown.",
@@ -1014,7 +1367,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Clear module handoff; absent handoff is a no-op.",
+          "description": "Clear top-level handoff; absence is a no-op and does not change acceptance.",
           "properties": {
             "actor": {
               "description": "Declared identity; omitted/null remains unknown.",
@@ -1148,7 +1501,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Save an independent verdict on the WHOLE Module, not review or close a Task separately.\nInput: project alias, module=M-001, current Module Version, verdict=accepted|changes_requested and summary; optional findings={text,must_fix}, checks={target,label,status,detail} and actor. Supply reviewer attribution when known. A known lead matching actor by name/handle cannot self-review; unknown identities remain unknown rather than authenticated.\naccepted requires an open Module with no open Tasks, blocker or in-scope gaps; all explicitly required Module/Task check labels must have passed. Canceled children are excluded. If no Task is done, the Module needs its own meaningful result. not_applicable does not waive required checks. accepted cannot contain must_fix findings.\nchanges_requested saves a negative conclusion without requiring acceptance readiness. It is a successful call with isError=false, not a tool failure.\nOptional check updates replace canonical Module/owned Task check reports BEFORE validation/verdict capture. They retain before/after provenance without changing the lead result-summary author/date. Canceled Task checks cannot be changed by review.\nOutput: a saved receipt with current Module Version and derived phase. accepted immediately yields accepted while current; no separate status move/merge gate is required. Read get_context ref=M-001 view=review for conclusion/findings/check updates/history, using zero-based review_index if needed.\nEffects: local review/history/check/activity writes, no Git merge or artifact verification. Later semantic changes/reopen make approval historical; handoff alone does not. Retained reviews are not silently pruned. On a lost/partial/uncertain reply inspect current review/context before another write.",
+    "description": "Purpose: Independently accept or return corrections for a WHOLE Epic or Module. Tasks and Atomics have no separate review ceremony.\nInput: project, ref=E-001|M-001, current Version, verdict=accepted|changes_requested, summary; optional actor, findings={text,must_fix}, checks={target,label,status,detail}. Check updates belong to this record or embedded Module children, never another file. Known lead self-review refuses.\nEpic accepted requires current accepted noncanceled Modules, done/current noncanceled standalone Atomics, own meaningful result, passed required checks, no blocker/gaps and complete authoritative membership coverage. Module accepted also includes embedded Atomics in its whole implementation. Canceled children are excluded. Parent criteria are background; checks are explicit and never inherited.\nVersion is dependency-bound for Epic: concurrent child changes refuse stale reviews. Later child semantic/generation changes make accepted Epic history stale. Read get_context view=review for retained verdicts/findings/provenance.\nEffects: one local guarded record/check/history write, no Git, cascade, source inspection or external merge gate. A negative verdict is a successful saved call. Inspect context/review after stale, lost, partial or uncertain outcome before another mutation.",
     "inputSchema": {
       "$defs": {
         "CheckStatus": {
@@ -1215,7 +1568,7 @@
               "description": "Reviewer's explicit outcome."
             },
             "target": {
-              "description": "The reviewed module or one of its owned tasks.",
+              "description": "Reviewed Epic/Module itself or a Module-owned Task/Atomic; updates never cross owner files.",
               "type": "string"
             }
           },
@@ -1227,7 +1580,167 @@
           "type": "object"
         },
         "Verdict": {
-          "description": "Independent module review verdict.",
+          "description": "Independent whole-Epic/Module review verdict; leaves have no separate verdict.",
+          "oneOf": [
+            {
+              "const": "accepted",
+              "description": "Current evidence satisfies the module's explicit acceptance conditions.",
+              "type": "string"
+            },
+            {
+              "const": "changes_requested",
+              "description": "The same module needs more work.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Independent whole-Epic/Module review; Atomic completion has no separate ceremony.",
+      "properties": {
+        "actor": {
+          "description": "Declared independent reviewer; unknown remains unknown.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checks": {
+          "description": "Owner or embedded child canonical check updates; never writes another file.",
+          "items": {
+            "$ref": "#/$defs/ReviewCheck"
+          },
+          "type": "array"
+        },
+        "findings": {
+          "default": [],
+          "description": "At most eight retained findings.",
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "type": "array"
+        },
+        "project": {
+          "description": "Configured portable root alias.",
+          "type": "string"
+        },
+        "ref": {
+          "description": "E-001 or M-001; Task and Atomic review is deliberately absent.",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Meaningful reviewer conclusion.",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict",
+          "description": "Accepted or changes_requested."
+        },
+        "version": {
+          "description": "Exact current owning record Version, including Epic child observations.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "ref",
+        "version",
+        "verdict",
+        "summary"
+      ],
+      "title": "ReviewWorkArgs",
+      "type": "object"
+    },
+    "name": "review_work"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Purpose: Save an independent verdict on the WHOLE Module, not review or close a Task separately.\nInput: project alias, module=M-001, current Module Version, verdict=accepted|changes_requested and summary; optional findings={text,must_fix}, checks={target,label,status,detail} and actor. Supply reviewer attribution when known. A known lead matching actor by name/handle cannot self-review; unknown identities remain unknown rather than authenticated.\naccepted requires an open Module with no open Tasks or embedded Atomics, blocker or in-scope gaps; all explicitly required Module/Task/embedded Atomic check labels must have passed. Canceled children are excluded. If no Task or embedded Atomic is done, the Module needs its own meaningful result. not_applicable does not waive required checks. accepted cannot contain must_fix findings.\nchanges_requested saves a negative conclusion without requiring acceptance readiness. It is a successful call with isError=false, not a tool failure.\nOptional check updates replace canonical Module/owned Task check reports BEFORE validation/verdict capture. They retain before/after provenance without changing the lead result-summary author/date. Canceled Task checks cannot be changed by review.\nOutput: a saved receipt with current Module Version and derived phase. accepted immediately yields accepted while current; no separate status move/merge gate is required. Read get_context ref=M-001 view=review for conclusion/findings/check updates/history, using zero-based review_index if needed.\nEffects: local review/history/check/activity writes, no Git merge or artifact verification. Later semantic changes/reopen make approval historical; handoff alone does not. Retained reviews are not silently pruned. On a lost/partial/uncertain reply inspect current review/context before another write.",
+    "inputSchema": {
+      "$defs": {
+        "CheckStatus": {
+          "description": "Explicit check report; absence is not a success.",
+          "oneOf": [
+            {
+              "const": "passed",
+              "description": "Reported check succeeded.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "Reported check failed.",
+              "type": "string"
+            },
+            {
+              "const": "not_run",
+              "description": "Check has not been executed.",
+              "type": "string"
+            },
+            {
+              "const": "not_applicable",
+              "description": "Check is reported inapplicable; this does not waive a required check.",
+              "type": "string"
+            }
+          ]
+        },
+        "Finding": {
+          "additionalProperties": false,
+          "description": "Reviewer finding; required corrections cannot accompany acceptance.",
+          "properties": {
+            "must_fix": {
+              "description": "True for an in-scope correction required before acceptance.",
+              "type": "boolean"
+            },
+            "text": {
+              "description": "Actionable finding, at most 256 UTF-8 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "must_fix"
+          ],
+          "type": "object"
+        },
+        "ReviewCheck": {
+          "additionalProperties": false,
+          "description": "Review check update; it preserves before/after report provenance in review history.",
+          "properties": {
+            "detail": {
+              "description": "Optional explanation.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "description": "Target-local check label.",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/CheckStatus",
+              "description": "Reviewer's explicit outcome."
+            },
+            "target": {
+              "description": "Reviewed Epic/Module itself or a Module-owned Task/Atomic; updates never cross owner files.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "label",
+            "status"
+          ],
+          "type": "object"
+        },
+        "Verdict": {
+          "description": "Independent whole-Epic/Module review verdict; leaves have no separate verdict.",
           "oneOf": [
             {
               "const": "accepted",

@@ -538,15 +538,269 @@ impl Store {
 
     /// Read one module, not an aggregate; corrupt siblings cannot hide healthy context.
     pub fn module(&self, id: &str) -> Result<Snapshot<Module>> {
-        model::number(id, "M-").map_err(invalid)?;
-        let relative = format!("modules/{id}.yaml");
-        let snapshot = self
+        let relative = model::work_path(id).map_err(invalid)?;
+        let mut snapshot = self
             .snapshot(&relative, Module::validate)?
             .ok_or_else(|| Error::new("not_found", "Module does not exist."))?;
         if snapshot.value.id != id {
             return Err(invalid("Module ID does not match its filename."));
         }
+        snapshot.version = self.work_version(&snapshot.value, &snapshot.bytes)?;
         Ok(snapshot)
+    }
+
+    /// Bind Epic/Atomic writes and read snapshots to direct and transitive integration observations.
+    /// Missing/malformed dependencies remain digest inputs, while unknown work blocks acceptance.
+    /// Reads are bounded by the shared aggregate byte cap; no file is migrated or repaired.
+    pub fn work_version(&self, value: &Module, bytes: &[u8]) -> Result<String> {
+        let own = self.version(&model::work_path(&value.id).map_err(invalid)?, Some(bytes));
+        if value.modules.is_empty()
+            && value.atomic_members.is_empty()
+            && value.participants.is_empty()
+        {
+            return Ok(own);
+        }
+        let mut digest = Sha256::new();
+        digest.update(own.as_bytes());
+        let mut remaining = SCAN_CAP;
+        for id in value
+            .modules
+            .iter()
+            .chain(&value.atomic_members)
+            .chain(&value.participants)
+        {
+            self.dependency_digest(id, &mut digest, &mut remaining)?;
+        }
+        Ok(format!("{:x}", digest.finalize()))
+    }
+
+    /// Add a canonical dependency and standalone Atomic participants to a bounded digest.
+    /// Kind restrictions prevent cycles: Epic -> Module/Atomic and Atomic -> Module only.
+    fn dependency_digest(
+        &self,
+        id: &str,
+        digest: &mut Sha256,
+        remaining: &mut usize,
+    ) -> Result<()> {
+        let relative = model::work_path(id).map_err(invalid)?;
+        digest.update(id.as_bytes());
+        let path = match self.path(&relative) {
+            Ok(path) => path,
+            Err(e) => {
+                digest.update(e.code.as_bytes());
+                digest.update(e.message.as_bytes());
+                return Ok(());
+            }
+        };
+        match read_path(&path, RECORD_CAP.min(*remaining)) {
+            Ok(bytes) => {
+                digest.update(self.version(&relative, bytes.as_deref()).as_bytes());
+                if let Some(bytes) = bytes {
+                    *remaining = remaining.saturating_sub(bytes.len());
+                    if id.starts_with("A-") {
+                        match decode::<Module>(&bytes).and_then(|m| {
+                            m.validate().map_err(invalid)?;
+                            Ok(m)
+                        }) {
+                            Ok(m) => {
+                                for participant in m.participants {
+                                    self.dependency_digest(&participant, digest, remaining)?;
+                                }
+                            }
+                            Err(e) => digest.update(e.code.as_bytes()),
+                        }
+                    }
+                }
+            }
+
+            Err(e) => {
+                digest.update(e.code.as_bytes());
+                digest.update(e.message.as_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    /// Capture participating Module semantic state and generation; no Git commit is invented.
+    pub fn participant_basis(&self, participants: &[String]) -> Result<BTreeMap<String, String>> {
+        let mut result = BTreeMap::new();
+        for id in participants {
+            model::work_number(id).map_err(invalid)?;
+            let m = self.module(id)?.value;
+            let mut digest = Sha256::new();
+            digest.update(m.basis().map_err(invalid)?.as_bytes());
+            digest.update(m.review_epoch.to_le_bytes());
+            result.insert(id.clone(), format!("{:x}", digest.finalize()));
+        }
+        Ok(result)
+    }
+
+    /// Compute the acceptance basis, extending Epic intent with current member evidence and generations.
+    pub fn work_basis(&self, m: &Module) -> Result<String> {
+        let own = m.basis().map_err(invalid)?;
+        if !m.id.starts_with("E-") {
+            return Ok(own);
+        }
+        let mut digest = Sha256::new();
+        digest.update(own.as_bytes());
+        for id in m.modules.iter().chain(&m.atomic_members) {
+            let child = self.module(id)?.value;
+            digest.update(id.as_bytes());
+            digest.update(child.basis().map_err(invalid)?.as_bytes());
+            digest.update(child.review_epoch.to_le_bytes());
+            digest.update(self.phase(&child).as_bytes());
+        }
+        Ok(format!("{:x}", digest.finalize()))
+    }
+
+    /// Remaining local and referenced acceptance requirements; unreadable work remains a named condition.
+    pub fn acceptance(&self, m: &Module) -> Vec<String> {
+        let mut missing = m.acceptance();
+        if m.id.starts_with("E-") {
+            if let Err(e) = self.membership(m) {
+                missing.push(format!("Membership: {}", e.message));
+            }
+            for id in m.modules.iter().chain(&m.atomic_members) {
+                match self.module(id) {
+                    Ok(child) if child.value.state == model::ModuleState::Canceled => (),
+                    Ok(child) => {
+                        let phase = self.phase(&child.value);
+                        let expected = if id.starts_with("M-") {
+                            "accepted"
+                        } else {
+                            "done"
+                        };
+                        if phase != expected {
+                            missing
+                                .push(format!("{id}: requires current {expected}; now {phase}."));
+                        }
+                    }
+                    Err(e) => missing.push(format!("{id}: unknown member work ({})", e.message)),
+                }
+            }
+        }
+        if m.id.starts_with("A-") && !m.participants.is_empty() {
+            match self.participant_basis(&m.participants) {
+                Ok(basis) if basis == m.participant_basis => (),
+                Ok(_) => missing.push("Integration evidence is stale; report a fresh result against current participants.".into()),
+                Err(e) => missing.push(format!("Integration participant unreadable: {}", e.message)),
+            }
+        }
+        missing
+    }
+
+    /// Derive the current phase without modifying history or treating missing children as completed.
+    pub fn phase(&self, m: &Module) -> &'static str {
+        if m.state == model::ModuleState::Canceled {
+            return "canceled";
+        }
+        if m.id.starts_with("A-") {
+            return if m.completed {
+                if self.acceptance(m).is_empty() {
+                    "done"
+                } else {
+                    "stale completion"
+                }
+            } else {
+                m.phase()
+            };
+        }
+        if m.id.starts_with("E-") {
+            if let Some(r) = m.reviews.last() {
+                let applicable =
+                    r.epoch == m.review_epoch && self.work_basis(m).is_ok_and(|b| b == r.basis);
+                if applicable {
+                    return if r.verdict == model::Verdict::Accepted && self.acceptance(m).is_empty()
+                    {
+                        "accepted"
+                    } else if r.verdict == model::Verdict::ChangesRequested {
+                        "changes requested"
+                    } else {
+                        "stale approval"
+                    };
+                }
+                if r.verdict == model::Verdict::Accepted {
+                    return "stale approval";
+                }
+            }
+            return if self.acceptance(m).is_empty() {
+                "ready"
+            } else if m.result.is_some() {
+                "working"
+            } else {
+                "planned"
+            };
+        }
+        m.phase()
+    }
+
+    /// Validate sole Epic membership against all Epic authorities and referenced canonical records.
+    /// No cross-file publication occurs: candidate membership is validated before its one-file write.
+    pub fn membership(&self, candidate: &Module) -> Result<()> {
+        if !candidate.id.starts_with("E-") {
+            return Ok(());
+        }
+        let inventory = self.kind_inventory("epics", "E-")?;
+        if !inventory.complete {
+            return Err(invalid("Epic ownership inventory is incomplete."));
+        }
+        for id in candidate.modules.iter().chain(&candidate.atomic_members) {
+            self.module(id)?;
+        }
+        for id in inventory.ids {
+            if id == candidate.id {
+                continue;
+            }
+            let other = self.module(&id)?.value;
+            if candidate
+                .modules
+                .iter()
+                .any(|id| other.modules.contains(id))
+                || candidate
+                    .atomic_members
+                    .iter()
+                    .any(|id| other.atomic_members.contains(id))
+            {
+                return Err(invalid("A member already belongs to another Epic."));
+            }
+        }
+        Ok(())
+    }
+
+    /// Find an authoritative Epic parent; malformed ownership refuses rather than guessing standalone.
+    pub fn parent(&self, id: &str) -> Result<Option<Module>> {
+        let inventory = self.kind_inventory("epics", "E-")?;
+        if !inventory.complete {
+            return Err(invalid("Epic ownership inventory is incomplete."));
+        }
+        let mut owner = None;
+        for epic in inventory.ids {
+            let m = self.module(&epic)?.value;
+            if m.modules
+                .iter()
+                .chain(&m.atomic_members)
+                .any(|member| member == id)
+            {
+                if owner.is_some() {
+                    return Err(invalid("Duplicate Epic ownership."));
+                }
+                owner = Some(m);
+            }
+        }
+        Ok(owner)
+    }
+
+    /// Refuse child writes while their authoritative Epic parent is canceled; no cascade occurs.
+    pub fn open_parent(&self, id: &str) -> Result<()> {
+        if let Some(parent) = self.parent(id)?
+            && parent.state == model::ModuleState::Canceled
+        {
+            return Err(Error::new(
+                "canceled_parent",
+                format!("Reopen parent {} before changing its child.", parent.id),
+            ));
+        }
+        Ok(())
     }
 
     /// Parse observed bytes and attach their exact version without normalizing on read.
@@ -569,7 +823,31 @@ impl Store {
 
     /// Enumerate a bounded immediate module inventory; no recursive repository scan.
     pub fn inventory(&self) -> Result<Inventory> {
-        let path = self.path("modules")?;
+        let mut combined = Inventory {
+            ids: Vec::new(),
+            warnings: Vec::new(),
+            complete: true,
+        };
+        for (directory, prefix) in [("epics", "E-"), ("modules", "M-"), ("atomics", "A-")] {
+            let part = self.kind_inventory(directory, prefix)?;
+            combined.ids.extend(part.ids);
+            combined.warnings.extend(part.warnings);
+            combined.complete &= part.complete;
+        }
+        if combined.ids.len() > MODULE_CAP {
+            combined.complete = false;
+            combined
+                .warnings
+                .push("Combined work inventory limit reached; counts are lower bounds.".into());
+            combined.ids.truncate(MODULE_CAP);
+        }
+        combined.warnings.sort();
+        Ok(combined)
+    }
+
+    /// Enumerate one bounded kind directory; absence is empty and unknown entries remain warnings.
+    fn kind_inventory(&self, directory: &str, prefix: &str) -> Result<Inventory> {
+        let path = self.path(directory)?;
         if !path.exists() {
             return Ok(Inventory {
                 ids: Vec::new(),
@@ -605,7 +883,7 @@ impl Store {
             }
             let id = name
                 .strip_suffix(".yaml")
-                .filter(|s| model::number(s, "M-").is_ok());
+                .filter(|s| model::number(s, prefix).is_ok());
             let regular = entry
                 .file_type()
                 .is_ok_and(|t| t.is_file() && !t.is_symlink());
@@ -626,7 +904,7 @@ impl Store {
         }
         inventory
             .ids
-            .sort_by_key(|id| model::number(id, "M-").unwrap_or(0));
+            .sort_by_key(|id| model::number(id, prefix).unwrap_or(0));
         inventory.warnings.sort();
         Ok(inventory)
     }
@@ -656,7 +934,7 @@ impl Store {
     /// ponytail: bounded O(n) file scan; add an index only after measured scan cost matters.
     pub fn scan(&self, module: Option<&str>) -> Result<Scan> {
         let inventory = if let Some(id) = module {
-            model::number(id, "M-").map_err(invalid)?;
+            model::work_number(id).map_err(invalid)?;
             Inventory {
                 ids: vec![id.into()],
                 warnings: Vec::new(),
@@ -676,7 +954,7 @@ impl Store {
         let mut digest = Sha256::new();
         digest.update(self.root.as_os_str().as_encoded_bytes());
         for id in inventory.ids {
-            let relative = format!("modules/{id}.yaml");
+            let relative = model::work_path(&id).map_err(invalid)?;
             let available = SCAN_CAP.saturating_sub(total);
             let path = match self.path(&relative) {
                 Ok(path) => path,
@@ -743,6 +1021,36 @@ impl Store {
                 }
             }
         }
+        if module.is_none() {
+            let mut owners = BTreeMap::new();
+            for m in &scan.modules {
+                for id in m.value.modules.iter().chain(&m.value.atomic_members) {
+                    if !scan.modules.iter().any(|s| s.value.id == *id) {
+                        scan.complete = false;
+                        scan.warnings.push(format!(
+                            "{}: missing or unreadable member {id}.",
+                            m.value.id
+                        ));
+                    }
+                    if let Some(previous) = owners.insert(id, &m.value.id) {
+                        scan.complete = false;
+                        scan.warnings.push(format!(
+                            "{id}: duplicate ownership by {previous} and {}.",
+                            m.value.id
+                        ));
+                    }
+                }
+                for id in &m.value.participants {
+                    if !scan.modules.iter().any(|s| s.value.id == *id) {
+                        scan.complete = false;
+                        scan.warnings.push(format!(
+                            "{}: missing or unreadable participant {id}.",
+                            m.value.id
+                        ));
+                    }
+                }
+            }
+        }
         for warning in scan.warnings.iter().chain(&scan.unreadable) {
             digest.update(warning.as_bytes());
         }
@@ -757,7 +1065,7 @@ impl Store {
                 .map_err(|_| Error::new("io", "Cannot create the configured final root."))?;
             effects.push("Created configured root directory.".into());
         }
-        for relative in ["modules", ".agent-tasks"] {
+        for relative in ["modules", "epics", "atomics", ".agent-tasks"] {
             let path = self.path(relative)?;
             if !path.exists() {
                 fs::create_dir(&path)

@@ -6,7 +6,7 @@ use super::{
 use crate::{
     model::*,
     response::Templates,
-    store::{self, Config, Error, Result, Snapshot},
+    store::{self, Config, Error, Result, Snapshot, Store},
 };
 use sha2::{Digest, Sha256};
 
@@ -199,7 +199,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                 let allocator = store.bytes(".agent-tasks/state.yaml")?;
                 let partial = allocator.as_ref().is_some_and(|b| {
                     store::decode::<Allocator>(b)
-                        .is_ok_and(|s| s.schema_version == SCHEMA && s.next_module == 1)
+                        .is_ok_and(|s| matches!(s.schema_version, 1 | 2) && s.next_module == 1)
                 }) && scan.modules.is_empty()
                     && scan.complete;
                 value.lines.push(if partial {"Empty partial initialization: explicit init_project may resume missing manifest."}else{"Project is not initialized; only explicit plan_work init_project may create it."}.into());
@@ -212,7 +212,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
         }
         match store.bytes(".agent-tasks/state.yaml") {
             Ok(Some(bytes))=>{
-                let valid=store::decode::<Allocator>(&bytes).is_ok_and(|s|s.schema_version==SCHEMA && s.next_module>scan.modules.iter().filter_map(|m|number(&m.value.id,"M-").ok()).max().unwrap_or(0) && s.next_module<u64::MAX);
+                let ids=scan.modules.iter().map(|m|m.value.id.clone()).collect::<Vec<_>>(); let valid=store::decode::<Allocator>(&bytes).is_ok_and(|mut s|s.prepare(&ids).is_ok());
                 if !valid {value.lines.push("Module allocation blocked: invalid allocator. Restore retained state; healthy reads remain available.".into());}
             },
             Ok(None)=>value.lines.push("Allocator absent: healthy work remains readable; new module allocation waits for valid state or explicit empty init.".into()),
@@ -220,7 +220,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
         }
         warnings(&mut value, &scan.warnings);
         for m in scan.modules {
-            value.rows.push(module_brief(&m.value));
+            value.rows.push(module_brief(&store, &m.value));
         }
         for issue in scan.unreadable {
             value
@@ -240,7 +240,26 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
         "get_context:{reference}:{:?}:{:?}",
         args.view, args.review_index
     );
-    let read_version = scope_version(&selection, &snapshot.version, "");
+    let (parent, parent_warning) = match store.parent(&m.id) {
+        Ok(parent) => (parent, None),
+        Err(e) => (None, Some(e.message)),
+    };
+    let project = store.project()?;
+    let parent_version = parent
+        .as_ref()
+        .map(|p| store.module(&p.id).map(|s| s.version))
+        .transpose()?
+        .unwrap_or_default();
+    let background = format!(
+        "{}:{}:{}",
+        parent_version,
+        parent_warning.as_deref().unwrap_or_default(),
+        project
+            .as_ref()
+            .map(|p| p.version.as_str())
+            .unwrap_or_default()
+    );
+    let read_version = scope_version(&selection, &snapshot.version, &background);
     continuation(
         args.start,
         args.limit,
@@ -252,7 +271,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             "{} — {}",
             reference,
             store::safe(
-                index.map_or(m.title.as_str(), |i| m.tasks[i].title.as_str()),
+                index.map_or(m.title.as_str(), |i| m.child(i).title.as_str()),
                 256
             )
         ),
@@ -260,6 +279,54 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
     );
     value.snapshot_version = read_version;
     diagnostics(&mut value, &snapshot);
+    for id in m
+        .modules
+        .iter()
+        .chain(&m.atomic_members)
+        .chain(&m.participants)
+    {
+        if let Err(e) = store.module(id) {
+            value.coverage = "PARTIAL".into();
+            value
+                .rows
+                .push(format!("UNREADABLE {id}: {}", store::safe(&e.message, 240)));
+        }
+    }
+    if let Some(warning) = &parent_warning {
+        value.coverage = "PARTIAL".into();
+        value.lines.push(format!(
+            "Parent ownership unknown: {}. Writes refuse until ownership can be proven.",
+            store::safe(warning, 240)
+        ));
+    }
+    if let Some(p) = project {
+        value.lines.push(format!(
+            "Project background: {} — {}. Check labels are not inherited.",
+            store::safe(&p.value.title, 120),
+            store::safe(&p.value.purpose, 240)
+        ));
+    }
+    if let Some(parent) = parent {
+        value.lines.push(format!("Epic parent {} — {} — {}. Parent criteria are background; this target owns its explicit checks.",parent.id,store::safe(&parent.title,160),store::safe(&parent.outcome,240)));
+        for criterion in &parent.criteria {
+            value.rows.push(format!(
+                "Parent acceptance criterion (background): {}",
+                store::safe(criterion, 1024)
+            ));
+        }
+        if parent.state == ModuleState::Canceled {
+            value
+                .lines
+                .push("Parent is canceled: reopen it before child writes.".into());
+        }
+    } else if !m.id.starts_with("E-") && parent_warning.is_none() {
+        value
+            .lines
+            .push("Ownership: standalone Project work.".into());
+    }
+    if !m.participants.is_empty() {
+        value.lines.push(format!("Integration participants: {}. Evidence generation: {}; new Module reviews also invalidate it.", m.participants.join(", "), if store.acceptance(m).iter().any(|c|c.contains("Integration")) { "stale/missing" } else { "current" }));
+    }
     if !matches!(args.view, View::Review) && args.review_index.is_some() {
         return Err(Error::new(
             "invalid_arguments",
@@ -269,8 +336,15 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
     match args.view {
         View::Summary => {
             value.lines.push(format!(
-                "Module phase: {}; Task counts: {} done, {} open, {} canceled.",
-                m.phase(),
+                "{} phase: {}; Task counts: {} done, {} open, {} canceled.",
+                if m.id.starts_with("E-") {
+                    "Epic"
+                } else if m.id.starts_with("A-") {
+                    "Atomic"
+                } else {
+                    "Module"
+                },
+                store.phase(m),
                 count(m, TaskState::Done),
                 count(m, TaskState::Open),
                 count(m, TaskState::Canceled)
@@ -280,11 +354,44 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                 .push(format!("Outcome: {}", store::safe(&m.outcome, 1024)));
             value.lines.push(lead_line(m));
             value.lines.push(format!(
+                "Atomic counts (embedded): {} done, {} open, {} canceled.",
+                m.atomics
+                    .iter()
+                    .filter(|a| a.state == TaskState::Done)
+                    .count(),
+                m.atomics
+                    .iter()
+                    .filter(|a| a.state == TaskState::Open)
+                    .count(),
+                m.atomics
+                    .iter()
+                    .filter(|a| a.state == TaskState::Canceled)
+                    .count()
+            ));
+            for criterion in &m.criteria {
+                value.rows.push(format!(
+                    "Acceptance criterion: {}",
+                    store::safe(criterion, 1024)
+                ));
+            }
+            if m.id.starts_with("E-") {
+                let members = m.modules.iter().chain(&m.atomic_members);
+                for id in members {
+                    value.rows.push(match store.module(id) {
+                        Ok(child) => module_brief(&store, &child.value),
+                        Err(e) => {
+                            value.coverage = "PARTIAL".into();
+                            format!("UNREADABLE {id}: {}", store::safe(&e.message, 240))
+                        }
+                    });
+                }
+            }
+            value.lines.push(format!(
                 "Last managed report/change: {}; activity is reported, not live agent state.",
                 m.updated_at
             ));
             if let Some(i) = index {
-                let t = &m.tasks[i];
+                let t = &m.child(i);
                 value.lines.push(task_brief(m, t));
                 if let Some(c) = &t.criterion {
                     value
@@ -315,7 +422,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                     store::safe(&h.next_action, 512)
                 ));
             }
-            let missing = m.acceptance();
+            let missing = store.acceptance(m);
             value.lines.push(format!("Acceptance conditions remaining: {}. Evidence is reported; no Git/GitHub verification.",missing.len()));
             for condition in missing {
                 value
@@ -344,7 +451,18 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                     "view=tasks requires the module reference.",
                 ));
             }
-            for t in &m.tasks {
+            if m.id.starts_with("E-") {
+                for id in m.modules.iter().chain(&m.atomic_members) {
+                    value.rows.push(match store.module(id) {
+                        Ok(child) => module_brief(&store, &child.value),
+                        Err(e) => {
+                            value.coverage = "PARTIAL".into();
+                            format!("UNREADABLE {id}: {}", store::safe(&e.message, 240))
+                        }
+                    });
+                }
+            }
+            for t in m.children() {
                 value.rows.push(format!(
                     "{}{}{}",
                     task_brief(m, t),
@@ -361,10 +479,10 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
         }
         View::Results => {
             if let Some(i) = index {
-                result_rows(&mut value.rows, reference, &m.tasks[i].result);
+                result_rows(&mut value.rows, reference, &m.child(i).result);
             } else {
                 result_rows(&mut value.rows, &m.id, &m.result);
-                for t in &m.tasks {
+                for t in m.children() {
                     value.rows.push(format!(
                         "{} — {}",
                         task_brief(m, t),
@@ -403,12 +521,12 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                 check_rows(
                     &mut value.rows,
                     reference,
-                    &m.tasks[i].required_checks,
-                    &m.tasks[i].checks,
+                    &m.child(i).required_checks,
+                    &m.child(i).checks,
                 );
             } else {
                 check_rows(&mut value.rows, &m.id, &m.required_checks, &m.checks);
-                for t in &m.tasks {
+                for t in m.children() {
                     check_rows(
                         &mut value.rows,
                         &format!("{}/{}", m.id, t.id),
@@ -419,10 +537,10 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             }
         }
         View::Review => {
-            if index.is_some() {
+            if index.is_some() || m.id.starts_with("A-") {
                 return Err(Error::new(
                     "invalid_arguments",
-                    "Tasks have no separate review; read their module with view=review.",
+                    "Tasks/Atomics have no separate review; read their module with view=review.",
                 ));
             }
             let selected = args.review_index.or_else(|| m.reviews.len().checked_sub(1));
@@ -448,7 +566,8 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                     .push(format!("Conclusion: {}", store::safe(&r.summary, 1024)));
                 value.lines.push(format!(
                     "Applicability: {}; older reports remain history.",
-                    if r.epoch == m.review_epoch && m.basis().is_ok_and(|b| b == r.basis) {
+                    if r.epoch == m.review_epoch && store.work_basis(m).is_ok_and(|b| b == r.basis)
+                    {
                         "current"
                     } else {
                         "historical/stale"
@@ -568,25 +687,98 @@ fn lead_line(m: &Module) -> String {
         })
         .unwrap_or("Lead: unknown".into())
 }
-/// Human-oriented module row with explicit current counts and reported activity.
-fn module_brief(m: &Module) -> String {
+/// Human-oriented kind-specific row with current progress, ownership and reported actor.
+fn module_brief(store: &Store, m: &Module) -> String {
+    let owner = match store.parent(&m.id) {
+        Ok(Some(p)) => format!("Epic-owned {}", p.id),
+        Ok(None) => "standalone".into(),
+        Err(_) => "ownership unknown".into(),
+    };
+    if m.id.starts_with("E-") {
+        let accepted = m
+            .modules
+            .iter()
+            .filter(|id| {
+                store
+                    .module(id)
+                    .is_ok_and(|c| store.phase(&c.value) == "accepted")
+            })
+            .count();
+        let done = m
+            .atomic_members
+            .iter()
+            .filter(|id| {
+                store
+                    .module(id)
+                    .is_ok_and(|c| store.phase(&c.value) == "done")
+            })
+            .count();
+        return format!(
+            "{} {} — {} — Modules {accepted}/{} accepted; Atomics {done}/{} done; {} — last reported: {}",
+            m.id,
+            store::safe(&m.title, 120),
+            store.phase(m),
+            m.modules.len(),
+            m.atomic_members.len(),
+            lead_line(m),
+            m.updated_at
+        );
+    }
+    if m.id.starts_with("A-") {
+        return format!(
+            "{} {} — {} — {}; {owner}; participants: {} — last reported: {}",
+            m.id,
+            store::safe(&m.title, 120),
+            store.phase(m),
+            lead_line(m),
+            m.participants.join(", "),
+            m.updated_at
+        );
+    }
     format!(
-        "{} {} — {} — {}/{} tasks done; {} open; {} canceled; {} — last reported: {}",
+        "{} {} — {} — {}/{} tasks done; {} open; {} canceled; Atomics {}/{} done, {} open, {} canceled; {} — {owner}; last reported: {}",
         m.id,
         store::safe(&m.title, 120),
-        m.phase(),
+        store.phase(m),
         count(m, TaskState::Done),
         m.tasks.len(),
         count(m, TaskState::Open),
         count(m, TaskState::Canceled),
+        m.atomics
+            .iter()
+            .filter(|a| a.state == TaskState::Done)
+            .count(),
+        m.atomics.len(),
+        m.atomics
+            .iter()
+            .filter(|a| a.state == TaskState::Open)
+            .count(),
+        m.atomics
+            .iter()
+            .filter(|a| a.state == TaskState::Canceled)
+            .count(),
         lead_line(m),
         m.updated_at
     )
 }
-/// Compact task row retains reference/state and routes detailed evidence separately.
+/// Compact embedded work row preserves identity/state/checks and declared Atomic executor.
 fn task_brief(m: &Module, t: &Task) -> String {
+    let executor = t
+        .executor
+        .as_ref()
+        .map(|e| {
+            format!(
+                "; executor: {}{}",
+                store::safe(&e.name, 128),
+                e.handle
+                    .as_ref()
+                    .map(|h| format!("; handle (reported): {}", store::safe(h, 256)))
+                    .unwrap_or_default()
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "{}/{} {} — {} — checks: {} reported / {} required",
+        "{}/{} {} — {} — checks: {} reported / {} required{}",
         m.id,
         t.id,
         store::safe(&t.title, 120),
@@ -596,7 +788,8 @@ fn task_brief(m: &Module, t: &Task) -> String {
             TaskState::Canceled => "canceled",
         },
         t.checks.len(),
-        t.required_checks.len()
+        t.required_checks.len(),
+        executor
     )
 }
 /// Expand a target's current substance into real pageable rows.
@@ -698,11 +891,15 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
             .map(|id| format!("Scope: module {id}; project-wide totals are excluded."))
             .unwrap_or("Scope: all tracked project work within the disclosed read bounds.".into()),
     );
-    let modules = scan.modules.len();
+    let modules = scan
+        .modules
+        .iter()
+        .filter(|m| m.value.id.starts_with("M-"))
+        .count();
     let done = scan
         .modules
         .iter()
-        .filter(|m| m.value.phase() == "accepted")
+        .filter(|m| m.value.id.starts_with("M-") && store.phase(&m.value) == "accepted")
         .count();
     let tasks: usize = scan.modules.iter().map(|m| m.value.tasks.len()).sum();
     let counts = |s| {
@@ -713,6 +910,55 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
     };
     value.lines.push(format!("Modules: {done} accepted / {modules} readable. Tasks: {} done / {tasks} readable; {} open; {} canceled.{}",
         counts(TaskState::Done),counts(TaskState::Open),counts(TaskState::Canceled),if scan.complete {""}else{" Counts are lower bounds; unreadable work is unknown."}));
+    let epics = scan
+        .modules
+        .iter()
+        .filter(|m| m.value.id.starts_with("E-"))
+        .count();
+    let accepted_epics = scan
+        .modules
+        .iter()
+        .filter(|m| m.value.id.starts_with("E-") && store.phase(&m.value) == "accepted")
+        .count();
+    let root_atomics = scan
+        .modules
+        .iter()
+        .filter(|m| m.value.id.starts_with("A-"))
+        .count();
+    let embedded_atomics: usize = scan.modules.iter().map(|m| m.value.atomics.len()).sum();
+    let done_atomics = scan
+        .modules
+        .iter()
+        .filter(|m| m.value.id.starts_with("A-") && store.phase(&m.value) == "done")
+        .count()
+        + scan
+            .modules
+            .iter()
+            .map(|m| {
+                m.value
+                    .atomics
+                    .iter()
+                    .filter(|a| a.state == TaskState::Done)
+                    .count()
+            })
+            .sum::<usize>();
+    let canceled_atomics = scan
+        .modules
+        .iter()
+        .filter(|m| m.value.id.starts_with("A-") && m.value.state == ModuleState::Canceled)
+        .count()
+        + scan
+            .modules
+            .iter()
+            .map(|m| {
+                m.value
+                    .atomics
+                    .iter()
+                    .filter(|a| a.state == TaskState::Canceled)
+                    .count()
+            })
+            .sum::<usize>();
+    value.lines.push(format!("Epics: {accepted_epics} accepted / {epics} readable. Atomics: {done_atomics} done / {} readable; {canceled_atomics} canceled; {} unfinished/stale. Each item counted once.",root_atomics+embedded_atomics,root_atomics+embedded_atomics-done_atomics-canceled_atomics));
     value.lines.push(format!(
         "Purpose: {}",
         store::safe(&project.value.purpose, 240)
@@ -723,7 +969,7 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
     warnings(&mut value, &scan.unreadable);
     for snapshot in &scan.modules {
         let m = &snapshot.value;
-        value.rows.push(module_brief(m));
+        value.rows.push(module_brief(&store, m));
         value.rows.push(format!(
             "{} expected: {} — current summary: {}",
             m.id,
@@ -731,7 +977,7 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
             m.result
                 .as_ref()
                 .map(|r| store::safe(&r.summary, 160))
-                .unwrap_or_else(|| if m.tasks.iter().any(|t| t.result.is_some()) {
+                .unwrap_or_else(|| if m.children().any(|t| t.result.is_some()) {
                     "derived from task reports below".into()
                 } else {
                     "not reported".into()
@@ -763,7 +1009,7 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
             ));
         }
         let task_limit = if args.module.is_some() { MAX_TASKS } else { 4 };
-        for t in m.tasks.iter().take(task_limit) {
+        for t in m.children().take(task_limit) {
             value.rows.push(format!(
                 "{} — {}",
                 task_brief(m, t),
@@ -773,9 +1019,9 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
                     .unwrap_or("result not reported".into())
             ));
         }
-        if m.tasks.len() > task_limit {
+        if m.tasks.len() + m.atomics.len() > task_limit {
             value.detail_coverage = "PARTIAL".into();
-            value.rows.push(format!("{}: {} task details omitted; counts include them. Use module={} or get_context view=tasks.",m.id,m.tasks.len()-task_limit,m.id));
+            value.rows.push(format!("{}: {} task details omitted; counts include them. Use module={} or get_context view=tasks.",m.id,m.tasks.len() + m.atomics.len() - task_limit,m.id));
         }
         if let Err(e) = m.counters() {
             value
@@ -904,7 +1150,7 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
     }
     for snapshot in &scan.modules {
         let m = &snapshot.value;
-        let n = number(&m.id, "M-").map_err(store::invalid)?;
+        let n = work_number(&m.id).map(|(_, n)| n).map_err(store::invalid)?;
         let mut fields = vec![
             ("title", m.title.clone()),
             ("outcome", m.outcome.clone()),
@@ -925,6 +1171,17 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
         if let Some(c) = &m.cancellation {
             fields.push(("cancellation", c.reason.clone()));
         }
+        fields.push(("criteria", m.criteria.join(" ")));
+        fields.push((
+            "members",
+            m.modules
+                .iter()
+                .chain(&m.atomic_members)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" "),
+        ));
+        fields.push(("participants", m.participants.join(" ")));
         evidence_fields(&mut fields, &m.result, &m.checks);
         for r in &m.reviews {
             fields.push(("review", r.summary.clone()));
@@ -936,7 +1193,7 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
             fields.push(("reason", r.reason.clone()));
         }
         hit(&mut hits, m.id.clone(), &m.title, (n, 0), fields, &terms);
-        for t in &m.tasks {
+        for t in m.children() {
             let mut fields = vec![
                 ("title", t.title.clone()),
                 ("criterion", t.criterion.clone().unwrap_or_default()),
@@ -945,12 +1202,26 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
             if let Some(c) = &t.cancellation {
                 fields.push(("cancellation", c.reason.clone()));
             }
+            if let Some(executor) = &t.executor {
+                fields.push((
+                    "executor",
+                    format!(
+                        "{} {}",
+                        executor.name,
+                        executor.handle.as_deref().unwrap_or_default()
+                    ),
+                ));
+            }
             evidence_fields(&mut fields, &t.result, &t.checks);
             hit(
                 &mut hits,
                 format!("{}/{}", m.id, t.id),
                 &t.title,
-                (n, number(&t.id, "T-").map_err(store::invalid)?),
+                (
+                    n,
+                    number(&t.id, if t.id.starts_with("A-") { "A-" } else { "T-" })
+                        .map_err(store::invalid)?,
+                ),
                 fields,
                 &terms,
             );
