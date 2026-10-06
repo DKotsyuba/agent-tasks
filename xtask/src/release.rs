@@ -124,6 +124,10 @@ fn prepare(project: &Project, version: &str, apply: bool) -> Result<()> {
     );
     Ok(())
 }
+/// Publish one verified immutable CI payload after exact tag/source/run qualification and supply-chain checks.
+/// Protocol and core lifecycle suites execute the same canonical payload via MCP_TEST_BINARY;
+/// publication tokens are removed from those Cargo children and test servers clear inherited environments.
+/// Refuse mismatched identities, changed bytes, incomplete tools or failed acceptance before creating a release.
 fn publish(project: &Project, directory: PathBuf) -> Result<()> {
     let directory = fs::canonicalize(directory)?;
     let m = verify(&directory)?;
@@ -190,6 +194,8 @@ fn publish(project: &Project, directory: PathBuf) -> Result<()> {
             &project.name,
             "--test",
             "protocol",
+            "--test",
+            "core_protocol",
         ],
     ] {
         if !Command::new("cargo")

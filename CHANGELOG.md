@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## 0.9.0
+
+### Added
+
+- Epic business scope, Module membership, embedded Tasks and independently reviewed Atomics, with current integration and business-criterion coverage.
+- Persistent observed lead, reviewer and integrator bindings; explicit loss-only replacement preserves history and requires context recovery before continuation.
+- Lead-owned discovery and Task planning, reciprocal versioned contracts, agreement before coding, and meaningful correct/mutated/restored boundary-test observations.
+- Incremental integration of ready connected Modules without waiting for the whole Epic or requiring delivery first. Final business verification binds the actual affected composition.
+- Bounded read-only local Git report import, declared execution/dependency context and canonical orchestrator/Module-lead skills.
+
+### Changed
+
+- New work uses the Epic core workflow. Existing records remain readable without migration; explicit adopt_core activates the new rules and leaves earlier approvals historical.
+- New Modules start without preplanned Tasks. Launch the lead, bind its returned runtime ID, record discovery, agree boundaries and freeze the Epic roster before coding.
+- Module approval is pinned to the submitted candidate and affecting contract revisions. Delivery remains separate bookkeeping; Task completion belongs to the lead after tests or manual verification.
+- Integration records retain pending claims and exact current coverage. Pairwise AB and BC checks do not establish an ABC business outcome.
+
+### Fixed
+
+- Preserve canonical definition/revision history across removal, consumer changes and provider transfers; reject stale approvals and duplicate active integration jobs.
+- Keep review findings scoped to their actual target, prevent premature candidate-less review, and require an explicit assembly candidate for integration acceptance.
+- Release publishing runs protocol and core business tests against the exact packaged payload before making the release visible.
+
+### Compatibility
+
+- Stored data with expanded Epic/core fields requires this binary; rolling back the executable does not downgrade or erase work records.
+- Qualification remains limited to macOS arm64 and the named MCP Inspector client. Runtime launches, code correctness and owner installation are separate from durable reported facts.
+
 ## 0.8.0
 
 ### Added

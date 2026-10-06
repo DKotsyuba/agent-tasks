@@ -4,6 +4,18 @@
 
 Native target: aarch64-apple-darwin on macOS arm64. Independent host: MCP Inspector CLI 2.7.0, running with Node 24.4.0. Qualification is limited to that named target/client; it does not certify Linux/Windows, Codex/Claude, arbitrary filesystems or power-loss durability.
 
+## Epic core 0.9.0 — source debug checks on 2026-10-06
+
+The independently exercised native source debug binary identified itself as agent-tasks 0.9.0. These checks qualify the named native source/client interaction; they do not establish packaged-byte verification or owner installation.
+
+- MCP Inspector CLI 2.7.0 with Node 24.4.0 retained all ten tools through legacy and modern discovery. Strict catalog portability diagnostics reported zero errors and 66 warnings across nine schema-bearing tools, concerning legal nullable JSON Schema type arrays.
+- Fresh Inspector/server processes registered an isolated documentation alias and exercised a task-free core Module, explicitly synthetic fixture bindings, lead planning and Task creation, reported begin, manual Task completion, a definite fixture artifact, bound independent reviewer and positive Module readiness before delivery.
+- An isolated public mapping fixture passed its valid/invalid cases, failed the same check after a meaningful wrong-output implementation mutation, and passed after restoring the implementation. Current local/revision1 evidence was recorded through the independent client. These are controlled fixture observations and reported bindings, not proof of actual model-session execution or actor authentication.
+- A stale write version refused without replacing current work. Fresh-process context, search and one-call status retained the reviewed candidate and current results.
+- Documentation bootstrap retained the operator's SSH signing policy. When the host sandbox refused access to the existing signing agent, the operation disclosed partial file publication and retained staging; its inspected, unpublished alias state was recovered using normal authorized agent access. Signing was not disabled.
+
+The independent host scope remains macOS arm64/aarch64-apple-darwin and this named client. Packaged payload identity/discovery/persistence, payload SDK checks and disposable self-install verification are separate delivery gates.
+
 ## Registration release 0.8.0 — checks on 2026-10-05
 
 - Native 0.8.0 source passed cargo xtask check: 75 tests, formatting, Clippy, rustdoc, structural rules and exported/live discovery contract checks. cargo deny --locked check reported advisories, bans, licenses and sources OK.
