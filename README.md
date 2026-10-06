@@ -48,6 +48,13 @@ Live descriptions are mini documentation. Shapes are closed. Edit omission prese
 
 ## Workflow
 
+Role skills describe the current portable workflow and its limits:
+
+- [Orchestrator](skills/agent-tasks-orchestrator/SKILL.md): project discovery, planning, one lead per Module, status and independent acceptance.
+- [Module lead](skills/agent-tasks-module-lead/SKILL.md): assignment context, Task execution, evidence, blockers/handoffs and review corrections.
+
+Install each skill directory through the host's skill mechanism. These instructions do not add tools, initialize project records or implement deferred roadmap entities.
+
 ```text
 get_project_list()
 register_project(project="product", doc_dir="/absolute/project/documentation",
