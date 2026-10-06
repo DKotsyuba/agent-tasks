@@ -292,6 +292,12 @@ pub struct Task {
     /// Optional Atomic executor; Tasks preserve the original lead-through-Module policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<Lead>,
+    /// Modern embedded Atomic lifecycle/reviews; None preserves old whole-Module-only policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atomic_workflow: Option<AtomicWorkflow>,
+    /// Optional first reported Task/Atomic start; timestamps alone never complete work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
     /// Explicit required check labels; missing reports block module approval.
     pub required_checks: Vec<String>,
     /// Local completion lifecycle; no task review state.
@@ -422,6 +428,175 @@ pub struct Reason {
     pub actor: Option<String>,
 }
 
+/// Reported execution locations; filesystem/Git validity is inspected only during an explicit import.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Execution {
+    /// Absolute source repository location, at most 1024 bytes; no credential content.
+    pub repository: String,
+    /// Absolute working checkout used for local imports, at most 1024 bytes.
+    pub worktree: String,
+    /// Declared implementation branch, at most 128 bytes.
+    pub branch: String,
+    /// Declared delivery branch, at most 128 bytes; local delivery needs no hosting PR.
+    pub target_branch: String,
+}
+
+/// One declared obligation to a peer Module; data-flow links never imply a blocking wait.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Contract {
+    /// Canonical peer M- reference; dangling/self peers refuse.
+    pub peer: String,
+    /// Behavioral obligation, at most 1024 bytes, distinct from the owning work's outcome.
+    pub description: String,
+    /// Optional canonical artifact/document reference, at most 256 bytes.
+    pub reference: Option<String>,
+    /// Reported readiness of this required interface; no certificate engine is inferred.
+    pub ready: bool,
+}
+
+/// A Module explicitly declares provided/consumed obligations or that none are required.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Contracts {
+    /// True only when both lists are empty; absence is unknown, not a no-contract declaration.
+    pub not_required: bool,
+    /// At most eight obligations supplied by this Module, unique by peer.
+    #[serde(default)]
+    pub provides: Vec<Contract>,
+    /// At most eight obligations consumed by this Module, unique by peer.
+    #[serde(default)]
+    pub consumes: Vec<Contract>,
+}
+
+/// Fixed start condition on a named work result, independent of interface direction.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyCondition {
+    /// Require current accepted Epic/Module result.
+    Accepted,
+    /// Require current reported delivery of a Module result.
+    Delivered,
+}
+
+/// One explicit blocking start dependency; cyclic blocking references refuse.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Dependency {
+    /// E-/M- target reference; no Atomic or arbitrary path.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// Explicit condition; delivery applies only to a Module.
+    pub condition: DependencyCondition,
+    /// Why execution needs this result, at most 512 bytes.
+    pub reason: String,
+}
+
+/// Reported delivery of the independently reviewed implementation; bookkeeping is outside its digest.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Delivery {
+    /// Matching declared target branch.
+    pub target_branch: String,
+    /// Meaningful local merge/delivery report, at most 1024 bytes.
+    pub summary: String,
+    /// Optional reported commit/PR/artifact, at most 256 bytes.
+    pub artifact: Option<String>,
+    /// Implementation basis at delivery; no Git write or queried proof is implied.
+    pub basis: String,
+    /// Generated UTC observation time.
+    pub at: String,
+    /// Declared reporting actor.
+    pub actor: Option<String>,
+}
+
+/// Explicit opt-in lifecycle envelope; absence preserves legacy records without read migration.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Workflow {
+    /// Understood workflow revision 1.
+    pub schema_version: u32,
+    /// True for new records or explicit legacy begin; declared legacy additions alone do not opt in.
+    pub managed: bool,
+    /// Whether the current lifecycle has a reported begin; reopen clears it.
+    pub active: bool,
+    /// First reported start, preserved across reopening.
+    pub started_at: Option<String>,
+    /// Epic's immutable Module roster captured on first begin; not a second ownership list.
+    pub frozen_modules: Option<Vec<String>>,
+    /// Module/standalone Atomic execution declaration.
+    pub execution: Option<Execution>,
+    /// Module-only interface obligations.
+    pub contracts: Option<Contracts>,
+    /// Module-only blocking start conditions.
+    pub dependencies: Vec<Dependency>,
+    /// Module-only reviewed delivery bookkeeping.
+    pub delivery: Option<Delivery>,
+    /// Integration Atomic's declared real environment, at most 1024 bytes.
+    pub environment: Option<String>,
+    /// Integration Atomic's scenarios, at most eight 256-byte entries.
+    pub scenarios: Vec<String>,
+}
+impl Workflow {
+    /// Build a new inactive revision-1 workflow with no guessed preparation or delivery.
+    pub fn new() -> Self {
+        Self {
+            schema_version: 1,
+            managed: true,
+            active: false,
+            started_at: None,
+            frozen_modules: None,
+            execution: None,
+            contracts: None,
+            dependencies: Vec::new(),
+            delivery: None,
+            environment: None,
+            scenarios: Vec::new(),
+        }
+    }
+    /// Acceptance-related intent excludes dates and delivery bookkeeping.
+    pub fn basis(&self) -> serde_json::Value {
+        serde_json::json!({"managed":self.managed,"active":self.active,"frozen_modules":self.frozen_modules,"execution":self.execution,
+            "contracts":self.contracts,"dependencies":self.dependencies,"environment":self.environment,"scenarios":self.scenarios})
+    }
+}
+
+/// Embedded Atomic review history; Tasks deliberately have no corresponding review envelope.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AtomicWorkflow {
+    /// Current reported begin; reopening clears it.
+    pub active: bool,
+    /// First reported start, preserved as historical metadata.
+    pub started_at: Option<String>,
+    /// Monotonic Atomic review generation.
+    pub review_epoch: u64,
+    /// Independent Atomic verdicts retained within the single Module file.
+    pub reviews: Vec<Review>,
+}
+impl AtomicWorkflow {
+    /// Start an inactive independently reviewed Atomic without fabricated execution.
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            started_at: None,
+            review_epoch: 0,
+            reviews: Vec::new(),
+        }
+    }
+}
+
+/// Retained immutable local Git observation plus all owner-local targets referencing it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedCommit {
+    /// Parsed source observation; canonical repository identity and full SHA own deduplication.
+    pub commit: crate::git_reports::ObservedCommit,
+    /// Canonical owner/child references using this source, without duplicate Module-journal entries.
+    pub targets: Vec<String>,
+}
+
 /// Shared guarded evidence record: M owns embedded Tasks/Atomics, E owns references, A owns its result.
 /// Kind is determined by the canonical ID; validation rejects fields owned by another kind.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -475,6 +650,12 @@ pub struct Module {
     /// Standalone Atomic completion; Module/Epic acceptance continues to use independent review.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub completed: bool,
+    /// Modern start/contracts/delivery policy; absent legacy records remain usable without migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<Workflow>,
+    /// At most 64 immutable Git observations; capacity refuses rather than silently pruning history.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<ImportedCommit>,
     /// Current module report, optional when task reports establish the outcome.
     pub result: Option<Report>,
     /// Current module check evidence.
@@ -590,7 +771,7 @@ impl Module {
         if kind != "E-"
             && (!self.modules.is_empty()
                 || !self.atomic_members.is_empty()
-                || !self.criteria.is_empty())
+                || (!self.criteria.is_empty() && !(kind == "M-" && self.workflow.is_some())))
         {
             return Err("Only an Epic owns member references and Epic criteria.".into());
         }
@@ -613,6 +794,125 @@ impl Module {
                 || !basis.bytes().all(|c| c.is_ascii_hexdigit())
             {
                 return Err("Invalid integration basis.".into());
+            }
+        }
+        if let Some(w) = &self.workflow {
+            revision(w.schema_version)?;
+            if let Some(at) = &w.started_at {
+                dates(&[at])?;
+            }
+            optional(&w.environment, 1024)?;
+            strings(&w.scenarios, 256, true)?;
+            if kind != "E-" && w.frozen_modules.is_some() {
+                return Err("Only an Epic freezes a roster.".into());
+            }
+            if let Some(roster) = &w.frozen_modules
+                && roster != &self.modules
+            {
+                return Err("Frozen Epic Module roster changed.".into());
+            }
+            if kind != "M-"
+                && (w.contracts.is_some() || !w.dependencies.is_empty() || w.delivery.is_some())
+            {
+                return Err("Contracts/dependencies/delivery belong to Modules.".into());
+            }
+            if kind != "A-" && (w.environment.is_some() || !w.scenarios.is_empty()) {
+                return Err("Integration scenarios belong to standalone Atomics.".into());
+            }
+            if let Some(e) = &w.execution {
+                for path in [&e.repository, &e.worktree] {
+                    text(path, 1024)?;
+                    if !std::path::Path::new(path).is_absolute() {
+                        return Err("Execution paths must be absolute.".into());
+                    }
+                }
+                text(&e.branch, 128)?;
+                text(&e.target_branch, 128)?;
+            }
+            if let Some(c) = &w.contracts {
+                if c.not_required && (!c.provides.is_empty() || !c.consumes.is_empty()) {
+                    return Err("not_required cannot coexist with contracts.".into());
+                }
+                if !c.not_required && c.provides.is_empty() && c.consumes.is_empty() {
+                    return Err("Declare contracts or explicit not_required.".into());
+                }
+                for entries in [&c.provides, &c.consumes] {
+                    if entries.len() > 8 {
+                        return Err("At most eight contracts per direction.".into());
+                    }
+                    let mut seen = BTreeSet::new();
+                    for entry in entries {
+                        number(&entry.peer, "M-")?;
+                        text(&entry.description, 1024)?;
+                        optional(&entry.reference, 256)?;
+                        if entry.peer == self.id || !seen.insert(&entry.peer) {
+                            return Err("Self/duplicate contract peer.".into());
+                        }
+                    }
+                }
+            }
+            if w.dependencies.len() > 8 {
+                return Err("At most eight blocking dependencies.".into());
+            }
+            let mut seen = BTreeSet::new();
+            for d in &w.dependencies {
+                let (target, _) = work_number(&d.reference)?;
+                if target == "A-"
+                    || d.reference == self.id
+                    || !seen.insert(&d.reference)
+                    || (target != "M-" && d.condition == DependencyCondition::Delivered)
+                {
+                    return Err("Invalid/self/duplicate blocking dependency.".into());
+                }
+                text(&d.reason, 512)?;
+            }
+            if let Some(d) = &w.delivery {
+                text(&d.target_branch, 128)?;
+                text(&d.summary, 1024)?;
+                optional(&d.artifact, 256)?;
+                optional(&d.actor, 128)?;
+                dates(&[&d.at])?;
+                digest(&d.basis)?;
+            }
+        }
+        if self.imports.len() > 64 {
+            return Err("Git observation history is at capacity.".into());
+        }
+        let mut imported = BTreeSet::new();
+        for source in &self.imports {
+            let c = &source.commit;
+            text(&c.repository, 1024)?;
+            text(&c.worktree, 1024)?;
+            text(&c.author, 256)?;
+            dates(&[&c.authored_at])?;
+            text(&c.subject, 256)?;
+            text(&c.message, 8192)?;
+            text(&c.summary, 1024)?;
+            if !matches!(c.sha.len(), 40 | 64)
+                || !c.sha.bytes().all(|b| b.is_ascii_hexdigit())
+                || !imported.insert((&c.repository, &c.sha))
+            {
+                return Err("Invalid/duplicate Git source identity.".into());
+            }
+            strings(&c.gaps, 256, false)?;
+            strings(&c.followups, 256, false)?;
+            if c.checks.len() > 8 || source.targets.is_empty() || source.targets.len() > 64 {
+                return Err("Imported report/target limit exceeded.".into());
+            }
+            let mut labels = BTreeSet::new();
+            for check in &c.checks {
+                text(&check.label, 64)?;
+                optional(&check.detail, 256)?;
+                if !labels.insert(&check.label) {
+                    return Err("Duplicate imported check.".into());
+                }
+            }
+            let mut targets = BTreeSet::new();
+            for target in &source.targets {
+                self.target(target)?;
+                if !targets.insert(target) {
+                    return Err("Duplicate imported target.".into());
+                }
             }
         }
         text(&self.title, 256)?;
@@ -645,6 +945,25 @@ impl Module {
             }
             if !ids.insert(&t.id) {
                 return Err("Duplicate task ID.".into());
+            }
+            if let Some(at) = &t.started_at {
+                dates(&[at])?;
+            }
+            if let Some(w) = &t.atomic_workflow {
+                if prefix != "A-" {
+                    return Err("Tasks have no review policy.".into());
+                }
+                if let Some(at) = &w.started_at {
+                    dates(&[at])?;
+                }
+                for r in &w.reviews {
+                    review_fields(r, w.review_epoch)?;
+                    for u in &r.check_updates {
+                        if u.target != format!("{}/{}", self.id, t.id) {
+                            return Err("Atomic review update belongs to another target.".into());
+                        }
+                    }
+                }
             }
             text(&t.title, 256)?;
             optional(&t.criterion, 1024)?;
@@ -844,6 +1163,28 @@ impl Module {
                 "checks":check_basis(&t.checks),"cancellation":t.cancellation.as_ref().map(|c| &c.reason)
             })).collect());
         }
+        if let Some(w) = &self.workflow {
+            value["workflow"] = w.basis();
+            value["criteria"] = serde_json::json!(self.criteria);
+        }
+        if !self.imports.is_empty() {
+            value["import_sources"] = serde_json::json!(
+                self.imports
+                    .iter()
+                    .map(|i| (&i.commit.repository, &i.commit.sha, &i.targets))
+                    .collect::<Vec<_>>()
+            );
+        }
+        if let Some(atomics) = value
+            .get_mut("atomics")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for (v, t) in atomics.iter_mut().zip(&self.atomics) {
+                if let Some(w) = &t.atomic_workflow {
+                    v["atomic_workflow"] = serde_json::json!({"active":w.active,"epoch":w.review_epoch,"review":w.reviews.last().map(|r|(&r.verdict,&r.basis,r.epoch))});
+                }
+            }
+        }
         if self.id.starts_with("E-") {
             value["epic"] = serde_json::json!({"criteria":self.criteria,"modules":self.modules,"atomics":self.atomic_members});
         }
@@ -859,6 +1200,44 @@ impl Module {
         let mut missing = Vec::new();
         if self.state == ModuleState::Canceled {
             missing.push("Module is canceled.".into());
+        }
+        if self.modern() && self.workflow.as_ref().is_some_and(|w| !w.active) {
+            missing.push("Report begin before final review.".into());
+        }
+        for a in self
+            .atomics
+            .iter()
+            .filter(|a| a.state != TaskState::Canceled && a.atomic_workflow.is_some())
+        {
+            if a.atomic_phase() != "accepted" {
+                missing.push(format!(
+                    "{}/{}: independent Atomic review is not currently accepted.",
+                    self.id, a.id
+                ));
+            }
+        }
+        if self.id.starts_with("A-") && self.modern() && !self.completed {
+            missing.push("Complete the local Atomic outcome before review.".into());
+        }
+        if self.modern() && self.id.starts_with("M-") {
+            if self.lead.is_none()
+                || self.criteria.is_empty()
+                || self
+                    .workflow
+                    .as_ref()
+                    .and_then(|w| w.execution.as_ref())
+                    .is_none()
+            {
+                missing.push("Current Module lead/criteria/execution must remain declared.".into());
+            }
+            if self
+                .workflow
+                .as_ref()
+                .and_then(|w| w.contracts.as_ref())
+                .is_none_or(|c| c.provides.iter().chain(&c.consumes).any(|c| !c.ready))
+            {
+                missing.push("Current required contracts must be declared and ready.".into());
+            }
         }
         if self.blocker.is_some() {
             missing.push("Clear the active blocker.".into());
@@ -911,7 +1290,7 @@ impl Module {
         if self.state == ModuleState::Canceled {
             return "canceled";
         }
-        if self.id.starts_with("A-") {
+        if self.id.starts_with("A-") && !self.modern() {
             return if self.completed && self.acceptance().is_empty() {
                 "done"
             } else if self.completed {
@@ -927,7 +1306,11 @@ impl Module {
                 r.epoch == self.review_epoch && self.basis().is_ok_and(|b| b == r.basis);
             if applicable {
                 return if r.verdict == Verdict::Accepted {
-                    "accepted"
+                    if self.id.starts_with("M-") && self.modern() && !self.delivered() {
+                        "reviewed; delivery pending"
+                    } else {
+                        "accepted"
+                    }
                 } else {
                     "changes requested"
                 };
@@ -935,6 +1318,9 @@ impl Module {
             if r.verdict == Verdict::Accepted {
                 return "stale approval";
             }
+        }
+        if self.modern() && self.workflow.as_ref().is_some_and(|w| !w.active) {
+            return "planned";
         }
         if self.acceptance().is_empty() {
             "ready"
@@ -947,6 +1333,38 @@ impl Module {
         } else {
             "planned"
         }
+    }
+
+    /// Whether this owner explicitly follows modern start/review/delivery rules; reads never change it.
+    pub fn modern(&self) -> bool {
+        self.workflow.as_ref().is_some_and(|w| w.managed)
+    }
+
+    /// Obtain a mutable declaration envelope without silently opting a legacy owner into new rules.
+    pub fn workflow_mut(&mut self) -> &mut Workflow {
+        self.workflow.get_or_insert_with(|| {
+            let mut w = Workflow::new();
+            w.managed = false;
+            w
+        })
+    }
+
+    /// Test current delivery applicability; grandfathered records preserve their prior accepted closure.
+    pub fn delivered(&self) -> bool {
+        if !self.modern() {
+            return self.phase() == "accepted";
+        }
+        self.workflow
+            .as_ref()
+            .and_then(|w| w.delivery.as_ref())
+            .is_some_and(|d| {
+                self.basis().is_ok_and(|b| b == d.basis)
+                    && self
+                        .workflow
+                        .as_ref()
+                        .and_then(|w| w.execution.as_ref())
+                        .is_some_and(|e| e.target_branch == d.target_branch)
+            })
     }
 
     /// Append one generated event and evict only redundant machine tail entries.
@@ -993,4 +1411,108 @@ fn check_basis(checks: &[Check]) -> Vec<serde_json::Value> {
         .iter()
         .map(|c| serde_json::json!({"label":c.label,"status":c.status,"detail":c.detail}))
         .collect()
+}
+
+/// Validate a digest without decoding raw storage or inventing a provenance certificate.
+fn digest(value: &str) -> Result<(), String> {
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Err("Invalid semantic digest.".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate one retained verdict's bounds, provenance and monotonic owner epoch.
+fn review_fields(r: &Review, epoch: u64) -> Result<(), String> {
+    text(&r.summary, 1024)?;
+    optional(&r.reviewer, 128)?;
+    dates(&[&r.at])?;
+    digest(&r.basis)?;
+    if r.epoch > epoch || r.findings.len() > 8 || r.check_updates.len() > 8 {
+        return Err("Invalid review generation or item limit.".into());
+    }
+    for f in &r.findings {
+        text(&f.text, 256)?;
+    }
+    if r.verdict == Verdict::Accepted && r.findings.iter().any(|f| f.must_fix) {
+        return Err("Accepted review has required findings.".into());
+    }
+    for u in &r.check_updates {
+        if u.label != u.after.label || u.before.as_ref().is_some_and(|c| c.label != u.label) {
+            return Err("Review check labels disagree.".into());
+        }
+        checks(std::slice::from_ref(&u.after))?;
+        if let Some(c) = &u.before {
+            checks(std::slice::from_ref(c))?;
+        }
+    }
+    Ok(())
+}
+
+impl Task {
+    /// Atomic acceptance basis excludes dates, actors and review history; caller owns its Module version.
+    pub fn atomic_basis(&self) -> Result<String, String> {
+        let value = serde_json::json!({"title":self.title,"criterion":self.criterion,"executor":self.executor,"state":self.state,
+            "required_checks":self.required_checks,"result":report_basis(&self.result),"checks":check_basis(&self.checks),
+            "active":self.atomic_workflow.as_ref().map(|w|w.active),"cancellation":self.cancellation.as_ref().map(|c|&c.reason)});
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&value).map_err(|_| "Cannot encode Atomic basis.")?)
+        ))
+    }
+    /// Derived embedded Atomic state; legacy leaves preserve done while modern leaves require independent review.
+    pub fn atomic_phase(&self) -> &'static str {
+        if self.state == TaskState::Canceled {
+            return "canceled";
+        }
+        if let Some(w) = &self.atomic_workflow {
+            if let Some(r) = w.reviews.last() {
+                if r.epoch == w.review_epoch && self.atomic_basis().is_ok_and(|b| b == r.basis) {
+                    return if r.verdict == Verdict::Accepted {
+                        "accepted"
+                    } else {
+                        "changes requested"
+                    };
+                }
+                if r.verdict == Verdict::Accepted {
+                    return "stale approval";
+                }
+            }
+            if self.state == TaskState::Done {
+                return "ready";
+            }
+            if w.active {
+                return "working";
+            }
+            return "planned";
+        }
+        match self.state {
+            TaskState::Done => "done",
+            TaskState::Open => "open",
+            TaskState::Canceled => "canceled",
+        }
+    }
+    /// Conditions for independent Atomic acceptance; Task local completion never calls this gate.
+    pub fn atomic_acceptance(&self) -> Vec<String> {
+        let mut missing = Vec::new();
+        if self.state != TaskState::Done || self.result.is_none() {
+            missing.push("Complete the local Atomic outcome.".into());
+        }
+        if self.atomic_workflow.as_ref().is_some_and(|w| !w.active) {
+            missing.push("Report Atomic begin.".into());
+        }
+        if self.result.as_ref().is_some_and(|r| !r.gaps.is_empty()) {
+            missing.push("Resolve Atomic gaps.".into());
+        }
+        for label in &self.required_checks {
+            if !self
+                .checks
+                .iter()
+                .any(|c| c.label == *label && c.status == CheckStatus::Passed)
+            {
+                missing.push(format!("Atomic required check {label:?} has not passed."));
+            }
+        }
+        missing
+    }
 }

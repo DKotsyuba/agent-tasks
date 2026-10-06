@@ -1,8 +1,8 @@
 # agent-tasks
 
-Rust stdio MCP for portable strategic work: Projects, Epics, Modules, embedded Tasks and independently trackable Atomics. Agents plan work, report meaningful outcomes and independently accept whole Modules/Epics. The owner gets one compact English status. YAML is internal structured storage; strict embedded MiniJinja renders semantic text. Code/docstrings and Git retain their authority.
+Rust stdio MCP for portable strategic work. Projects own Epics, standalone Modules and Atomics; Modules own embedded Tasks and Atomics. Agents obtain an assignment by Module reference, record meaningful results once and independently review Modules, Atomics and Epics. One `project_status` call gives the tracked overview. Strict embedded MiniJinja renders compact semantic English text; YAML is structured internal storage.
 
-Track only work that benefits from planning, delegation, continuity or acceptance. A microfix can use zero records. Knowledge/document writers, automatic Git maintenance, scheduling, databases, daemons, semantic search and compaction remain deferred.
+Code/docstrings describe implementation, the tracker stores intent and reported work, and Git retains committed history. Track only work that benefits from planning, continuity or acceptance. A microfix may need zero records. Execution, tests, Git delivery and installation remain explicit external work.
 
 ## Configure and start
 
@@ -26,110 +26,123 @@ cargo fetch --locked
 cargo run --locked -- --config /absolute/config.toml mcp
 ```
 
-Precedence: --config, AGENT_TASKS_CONFIG, then $HOME/.agent-tasks/config.toml. The retired Linear config is not read. Identity/discovery/doctor/export need no valid config. Every business call takes project=<alias>; no global current project exists.
+Precedence: --config, AGENT_TASKS_CONFIG, then $HOME/.agent-tasks/config.toml. Every business call uses project=<alias>; no global current project exists. Identity/discovery/doctor/export do not require valid configuration. Reads never initialize or migrate roots.
 
 ## Purpose-based tools
 
 | Tool | Purpose |
 |---|---|
-| get_status | Product identity and declared qualification |
-| register_project | Explicit documentation creation, local Git bootstrap and alias publication |
-| get_project_list | Discover aliases and manifest-derived intent without paths |
-| get_context | Bounded assignment/parent intent, conditions, evidence and write versions |
-| project_status | One tracked overview: Epic acceptance, Module leads, Task/Atomic progress, results and attention |
-| search | Bounded lexical work search with references/excerpts |
-| plan_work | Create/edit Project, Epic, Module, Task and Atomic plans; edit Epic membership |
-| record_work | Current reports/checks/artifacts, blocker/handoff and reasoned cancel/reopen |
-| review_work | Independent whole-Module or whole-Epic acceptance |
+| get_status | Identity and declared qualification |
+| register_project | Explicit documentation creation, local Git bootstrap and alias registration |
+| get_project_list | Discover aliases and intent without paths |
+| get_context | Assignment, parent context, contracts/dependencies, execution, conditions, evidence and versions |
+| project_status | One complete tracked overview, with separate data/detail coverage |
+| search | Bounded lexical work search and exact references |
+| plan_work | Create/edit work, execution, contracts, dependencies and Epic membership |
+| record_work | Begin, current results, local completion, delivery, Git import, blockers/handoffs, cancel/reopen |
+| review_work | Independent whole-Epic/Module/Atomic verdict, including embedded Atomics |
 | review_module | Compatible Module-only review entrypoint |
 
-Live descriptions are mini documentation; argument shapes are closed. Plan omission preserves, null clears optional fields, [] clears lists. A result replaces the complete current report: omitted checks/artifacts/gaps/followups become empty.
+Live descriptions are mini documentation. Inputs are closed. Plan omission preserves; optional null/list clearing is explicit. A result replaces the complete current summary/checks/artifacts/gaps/followups, so include the current evidence to retain. Snapshot version is read continuation only.
 
-## Hierarchy and acceptance
+## Plan responsibilities and contracts
 
-Project owns Epics, standalone Modules and standalone Atomics. Epic membership is stored only in its own record and references Modules and standalone Atomics; each belongs to at most one Epic. A Module stays one YAML file with its embedded Tasks and Module Atomics. Tasks are leaves. References are E-001, M-001, A-001, M-001/T-001 and M-001/A-001.
-
-Create work first, then attach the returned exact reference through edit_epic. These are separate publications. A saved child whose attachment failed remains visible as standalone work. Membership is editable while the Epic is open; it invalidates previous acceptance. There is no frozen membership or manual start ceremony imported from the retired workflow.
-
-| Work | Completion policy |
-|---|---|
-| Task | Meaningful result/state=done; no individual review |
-| Module Atomic | Meaningful result/state=done; required evidence is covered by whole-Module review |
-| Standalone Project/Epic Atomic | result/state=done requires meaningful result, required checks passed and no gaps/blocker; no mandatory reviewer |
-| Module | Independent review after all children terminal, delivery evidence, required checks passed, no blocker/gaps |
-| Epic | Independent review after noncanceled Modules currently accepted, Atomics currently done and fresh, own result/criteria/checks satisfied, no blocker/gaps |
-
-Canceled children are excluded from remaining work. Parent cancellation does not cascade and requires terminal children. Reopen explicitly with a reason. Semantic changes/reopen make prior acceptance historical; handoff alone does not. Required checks are local to their owner: parent intent/criteria are context, not implicit inherited check labels. not_applicable never waives a required check.
-
-An integration Atomic declares participating Module references. Its recorded scenarios/check results capture their semantic bases and current review generations. Changes or a new review of a participant mark evidence stale; refresh the actual verification report before relying on completion. A check that changes no code needs no invented commit. The MCP does not inspect source, GitHub or live agents.
-
-## Example
-
-Use actual returned versions:
+Epic owns the business outcome and criteria. Module owns a coherent responsibility, its own criteria, declared lead and execution `{repository, worktree, branch, target_branch}`. Contracts record who provides/consumes what; they are separate from actual blocking dependencies.
 
 ```text
-get_context(project="product")
-plan_work(project="product", op="create_epic", version="<Allocation version>",
-          title="Portable release", outcome="Components work together",
-          criteria=["Storage and reporting work after restart"])
-get_context(project="product")
-plan_work(project="product", op="create_module", version="<Allocation version>",
-          title="Portable storage", outcome="Guarded file updates",
-          lead={name:"Storage lead"}, tasks=[{title:"Protect stale writes"}])
-get_context(project="product", ref="E-001")
-plan_work(project="product", op="edit_epic", epic="E-001",
-          version="<Epic Version>", modules=["M-001"])
-get_context(project="product", ref="M-001")
-record_work(project="product", op="result", ref="M-001/T-001",
-            version="<Module Version>", state="done",
-            summary="Stale replacement refuses without overwriting")
-review_module(project="product", module="M-001", version="<new Module Version>",
-              verdict="accepted", summary="Outcome independently checked", actor="Reviewer")
-project_status(project="product")
+contracts={not_required:false,
+  provides:[{peer:"M-002",description:"Supply guarded record operations",
+             reference:"docs/storage-interface.md",ready:true}],
+  consumes:[]}
+dependencies=[{ref:"M-003",condition:"accepted",reason:"Requires the migrated store"}]
 ```
 
-Use create_atomic for standalone work, add_atomic for Module-owned work. Create an integration Atomic with participants=["M-001", "M-002"] and explicit required_checks; report real scenarios in checks/detail. review_work(ref="E-001") records final Epic acceptance; it does not manufacture member results.
+A contract entry names a Module peer, behavior and an optional canonical reference; its readiness is a declared fact. Use not_required=true with empty lists when no contracts apply. One entry per peer/direction can describe a bundle of boundary obligations. Reciprocal provides/consumes links are allowed and do not automatically serialize implementation. Dependencies explicitly wait for accepted Epic/Module work, or delivered Module work; each needs a reason. Invalid/dangling/duplicate/self/impossible cyclic waits refuse. This is a trusted work protocol, not a certificate or automated code-verification platform.
 
-## Storage, versions and recovery
+## Start, complete and accept
+
+New records opt into the full workflow. Plan first, then report `record_work op=begin`; this records a start and checks conditions without launching an agent.
+
+- First Epic begin freezes its Module roster permanently, including through reopen. Atomics remain addable. Create later Modules standalone under Project; an explicit dependency can wait for a named Epic.
+- Module begin requires an assigned lead, declared execution and criteria, necessary ready contracts, satisfied dependencies and an active parent Epic when owned.
+- Task completion is the Module lead's explicit decision after tests or manual verification. No separate Task review exists, and a commit/test result never closes it automatically.
+- Atomic result/state=done is local completion. Every new Atomic requires independent review, including `M-001/A-001`; Module acceptance waits for its owned Atomics' current approval.
+- Module acceptance requires current whole-Module review and reported delivery/merge into its declared target branch. Local merge counts; a hosting PR is optional. Delivery after review does not demand a second unchanged-code review.
+- Integration Atomic under Project/Epic names participating Modules, environment and scenarios. Begin waits for accepted/delivered participants. Record actual joint checks, then obtain independent Atomic review. No-code verification needs no invented commit.
+- Epic final acceptance requires the frozen scope's accepted/delivered Modules, current reviewed Atomics, own meaningful result and explicit required checks.
+
+Required checks remain owner-declared; parent intent/criteria are useful background, not implicitly inherited labels. not_applicable never waives an explicit requirement. Gaps block acceptance; followups are outside the current scope. Semantic edits/reopen stale approvals and invalidate delivery/integration applicability; handoff and bookkeeping do not establish implementation changes. Cancel/reopen require reasons, canceled work is excluded from remaining scope, and cancellation never cascades through unfinished children. Identities are declared, not authenticated; known self-review refuses.
+
+## Record a code result once
+
+Declare the Module execution context, then use `record_work op=import_commits` with actual local commit selectors. The helper reads local Git only; it does not push, fetch, checkout, merge or inspect code correctness.
+
+```text
+feat(storage): guard replacements
+
+Result:
+Stale replacements refuse without overwriting the current record.
+
+Checks:
+passed | stale write | cargo test core_store_stale
+passed | manual check | Verified recovery text in the local client
+
+Gaps:
+
+Followups:
+```
+
+Result: is required; Checks:/Gaps:/Followups: are optional. Check lines use `status | label | optional detail`; detail may contain further separators. Status is passed/failed/not_run/not_applicable. These are lead reports, not independent proof.
+
+```text
+record_work(project="product", op="import_commits", ref="M-001/T-001",
+            version="<owning Module Version>", commits=["<actual commit hash>"],
+            actor="Storage lead")
+record_work(project="product", op="complete", ref="M-001/T-001",
+            version="<new Module Version>", actor="Storage lead")
+```
+
+Import alone preserves completion state; explicit state=done or complete records the lead's decision. Multiple commit Results combine in input order, later checks replace equal labels, and canonical Git repository identity/full SHA prevent duplicate history. The observed message, full identity, author/date and actual worktree remain stored even after Git history or the worktree changes. Failed/oversized/malformed reads refuse rather than publish a partial report. Noncode work, reviews and integration use ordinary semantic reports.
+
+## One assignment and one overview
+
+Delegate a role, project alias, Module reference and permitted checkout. The lead calls get_context and reads addressed detail views instead of receiving another manually maintained copy of the assignment. Context includes relevant parent intent, actual requirements, contracts, dependency waits, execution and review/correction state. Runtime permission is configured by the launcher; a document does not grant access.
+
+project_status includes Epic/standalone Module progress, assigned leads, Task/Atomic counts, current result summaries, blockers and review/delivery attention. Imported commit reports supply result substance. Canceled work, unreadable work and omitted detail are distinct. Partial totals are lower bounds, not zero. A lead handle and last report do not prove a live process. Narrow by Module or read an entity view when detail exceeds the output budget.
+
+## Storage, compatibility and recovery
 
 | Owned path | Authority |
 |---|---|
-| project.yaml | Project title/purpose, optional reported remote, generated dates |
-| epics/E-001.yaml | Epic intent/criteria, authoritative member references, own evidence and review |
-| modules/M-001.yaml | One Module, embedded Tasks/Atomics, reports, blocker/handoff, reviews/history |
-| atomics/A-001.yaml | Standalone Atomic intent, executor, reports and integration participant evidence |
-| .agent-tasks/state.yaml | Durable monotonic top-level counters |
+| project.yaml | Project intent and generated dates |
+| epics/E-001.yaml | Epic intent, authoritative member refs, frozen roster and own evidence/review |
+| modules/M-001.yaml | One Module, embedded Tasks/Atomics, workflow/contracts/dependencies, reports/import sources and reviews |
+| atomics/A-001.yaml | Standalone Atomic, execution/integration and independent review |
+| .agent-tasks/state.yaml | Independent monotonic top-level counters |
 | .agent-tasks/write.lock | Root coordination |
-| .agent-tasks/backups/ | Exact originals preserved before normalization |
+| .agent-tasks/backups/ | Exact originals before normalization |
 
-Creation uses Project Allocation version. Project edits use manifest Version. Epic/standalone Atomic writes use returned owner Version bound to current member/participant observations, including transitive integration participants; Task/Module Atomic writes use the whole Module Version. Snapshot version is read continuation only. Keep unchanged scope/view/query/review selection and actual returned next offsets. Ordinary work writes do not commit or push.
+Existing 0.8.0 and pre-workflow records remain readable and preserve legacy semantic approval digests. Missing or unmanaged workflow means legacy behavior; explicit begin opts the owning record into current rules. Reads never rewrite or invent old agreements/start/delivery. Work-record schema remains closed; allocator revision 2 requires complete counters. Restore lost allocator state, never guess reserved IDs. New fields require this binary; binary rollback is not a data downgrade.
 
-Existing 0.8.0 schema-1 roots remain readable, with defaulted record fields and no rewrite on reads. New/rewritten allocators use revision 2 with required independent counters; missing/null new counters refuse even when publication left an empty inventory. Only legacy revision-1 allocators may start an unused new kind at one after proving its inventory empty. Lost counters are never reconstructed by guessing. New writes may emit expanded schema-1 fields even on existing records. Older binaries may reject these rewritten records and cannot operate on new Epic/Atomic records; binary rollback does not roll back stored data.
+Creation uses Project Allocation version; project edits use manifest Version; embedded Task/Atomic writes use whole Module Version. Epic/Atomic/dependency observations bind relevant decision versions. Use returned versions after confirmed writes. Continue reads with exact Snapshot version and unchanged selection/actual next offset.
 
-Writes lock/reload/compare root-bound versions. Reserve IDs before no-clobber publication; a failure can leave a retained gap. Lost/partial/uncertain replies require current context/log/inventory inspection before another mutation. No automatic rollback, cross-file transaction or replay idempotency is claimed. Counter, setup and backup effects are disclosed.
+Root locking, bounded files, no-clobber publication, exact normalization backups and retained closing headroom protect writes. Creation/attachment are separate operations. Reservations, setup, backups and partial/unknown publication effects are explicit. Inspect current context/results/review/inventory after lost or uncertain replies before another mutation; versions are not request identities. No automatic rollback or replay idempotency is claimed.
 
-Context/search pages and project_status distinguish data coverage from omitted detail. Unreadable work is unknown, not zero; partial counts are lower bounds. Narrow by Module or open entity details when needed. Status is tracked work, not live agent presence or all untracked microfixes.
+register_project explicitly creates and commits bootstrap documentation before alias publication; ordinary work writes do not commit. Optional documentation origin is not contacted. Conflicts never overwrite/retarget. Existing0.7 inline aliases require an explicit operator configuration migration.
 
-register_project explicitly creates storage, README/.gitignore and local Git bootstrap before publishing the alias. Identical completed registration is a no-op; conflicts never overwrite/retarget. Optional docs_remote adds a separate origin without contacting it. Partial failures retain files/staging and disclose effects. For 0.7.0 inline settings aliases, explicitly move [aliases] into sibling projects.toml; reads do not migrate configuration.
+## Roles and verification
 
-## Roles and development
-
-Update/install the canonical [orchestrator](skills/agent-tasks-orchestrator/SKILL.md) and [Module lead](skills/agent-tasks-module-lead/SKILL.md) skills through the host mechanism. These describe real workflow and proportional tracking; they do not schedule agents or initialize projects implicitly.
+Canonical [orchestrator](skills/agent-tasks-orchestrator/SKILL.md) and [Module lead](skills/agent-tasks-module-lead/SKILL.md) skills describe the implemented workflow. Update those files through the repository; installed symlinks share their content.
 
 ```bash
 cargo xtask check
 cargo test --frozen -p agent-tasks core_
 cargo xtask contract update
 cargo xtask contract check
-cargo deny fetch
-cargo deny check
-cargo run --locked -- doctor --json
 ```
 
-Rust registry definitions are authoritative; schemas/tools.json is a reviewed export. Source documentation changes with behavior. The [implemented architecture](docs/architecture.md) describes limits and filesystem boundaries; the [Epic/Atomic implementation plan](docs/epic-atomic-implementation-plan.md) records policy choices. The wider [proposal](docs/architecture-proposal.md) remains a discussion roadmap.
+The [architecture](docs/architecture.md) is implemented truth. The [unified implementation plan](docs/unified-workflow-implementation-plan.md) records schema and compatibility choices. Rust registry definitions own the contract; schemas/tools.json is its reviewed export. Tests use disposable documentation/Git roots, including real stdio and cold restart.
 
 ## Delivery
 
-Template baseline is pinned in .family/origin.json. Updates are dry-run three-way plans followed by Git review. Runtime/build needs no private template access. Qualification in docs/RELEASE_ACCEPTANCE.md covers the recorded macOS arm64/MCP Inspector acceptance, not untested hosts or power-loss durability.
-
-Package only committed source. Release preparation defaults to preview and never pushes. Installation never restarts services, modifies host configuration or migrates portable roots. A binary rollback does not undo stored work.
+Package committed source only. Release preparation is preview by default and never pushes. Existing recorded macOS/Inspector qualification does not certify a new release, another host or power-loss durability. Installation never restarts services, changes host configuration or migrates data implicitly. Knowledge writers, ongoing automatic Git, scheduling, databases, daemons, semantic search, runtime polling and compaction remain deferred.

@@ -1,5 +1,7 @@
 //! Closed semantic arguments. Presence-aware edits never erase omitted fields.
-use crate::model::{CheckInput, CheckStatus, Finding, Lead, Verdict};
+use crate::model::{
+    CheckInput, CheckStatus, Contracts, Dependency, Execution, Finding, Lead, Verdict,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -90,6 +92,8 @@ pub enum View {
     Review,
     /// Recent generated activity and explicit omitted history.
     Log,
+    /// Retained local commit observations/messages without rescanning Git.
+    Commits,
 }
 
 /// Read one Project/Epic/Module/Task/Atomic scope with snapshot-bound pagination.
@@ -206,6 +210,16 @@ pub enum Plan {
         /// Initial semantic tasks, at most 32; defaults empty.
         #[serde(default)]
         tasks: Vec<TaskInput>,
+        /// Explicit Module acceptance criteria; empty planning records cannot begin.
+        #[serde(default)]
+        criteria: Vec<String>,
+        /// Reported source/checkout/implementation/delivery branches; required before Module begin.
+        execution: Option<Execution>,
+        /// Declared provides/consumes or explicit not_required; no implicit dependency.
+        contracts: Option<Contracts>,
+        /// Actual blocking start conditions, distinct from contract direction.
+        #[serde(default)]
+        dependencies: Vec<Dependency>,
     },
     /// Allocate one Epic using the Project Allocation version; attach existing members separately.
     CreateEpic {
@@ -268,6 +282,13 @@ pub enum Plan {
         /// Participating Modules for integration evidence; at most 32, default empty.
         #[serde(default)]
         participants: Vec<String>,
+        /// Optional execution context for explicit local Git report import.
+        execution: Option<Execution>,
+        /// Real integration environment, required before participant-based Atomic begin.
+        environment: Option<String>,
+        /// Integration scenarios, required before begin when participants are declared.
+        #[serde(default)]
+        scenarios: Vec<String>,
     },
     /// Allocate an Atomic embedded in the single owning Module file.
     AddAtomic {
@@ -308,6 +329,18 @@ pub enum Plan {
         #[serde(default, deserialize_with = "required_patch")]
         #[schemars(with = "Vec<String>")]
         participants: Patch<Vec<String>>,
+        /// Standalone only; omit preserves, null clears.
+        #[serde(default)]
+        #[schemars(with = "Option<Execution>")]
+        execution: Patch<Execution>,
+        /// Standalone integration environment; omit preserves, null clears.
+        #[serde(default)]
+        #[schemars(with = "Option<String>")]
+        environment: Patch<String>,
+        /// Standalone integration scenarios; [] clears, null refuses.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "Vec<String>")]
+        scenarios: Patch<Vec<String>>,
     },
     /// Partially edit a module plan; semantic changes make old approval historical.
     EditModule {
@@ -329,6 +362,22 @@ pub enum Plan {
         #[serde(default, deserialize_with = "required_patch")]
         #[schemars(with = "Vec<String>")]
         required_checks: Patch<Vec<String>>,
+        /// Omission preserves; explicit list replaces Module criteria.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "Vec<String>")]
+        criteria: Patch<Vec<String>>,
+        /// Omission preserves; null clears execution and blocks begin/import.
+        #[serde(default)]
+        #[schemars(with = "Option<Execution>")]
+        execution: Patch<Execution>,
+        /// Omission preserves; null makes contract readiness unknown.
+        #[serde(default)]
+        #[schemars(with = "Option<Contracts>")]
+        contracts: Patch<Contracts>,
+        /// Omission preserves; [] clears explicit waits; blocking cycles refuse.
+        #[serde(default, deserialize_with = "required_patch")]
+        #[schemars(with = "Vec<Dependency>")]
+        dependencies: Patch<Vec<Dependency>>,
     },
     /// Allocate one task inside its module using the module file version.
     AddTask {
@@ -368,7 +417,7 @@ pub enum Plan {
 pub enum Completion {
     /// Keep this Task/Atomic open.
     Open,
-    /// Complete this Task/Atomic with a meaningful result; standalone Atomic completion enforces acceptance.
+    /// Complete a meaningful local Task/Atomic result; modern Atomic final acceptance still needs independent review.
     Done,
 }
 
@@ -376,11 +425,31 @@ pub enum Completion {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Work {
+    /// Report execution start; never launches agents. First Epic begin permanently freezes its Module roster.
+    Begin {},
+    /// Explicitly complete a Task/Atomic using its already-recorded meaningful result; never reviews a Task.
+    Complete {},
+    /// Report delivery of a currently reviewed Module to its declared target; local merge is sufficient.
+    Deliver {
+        /// Must match execution.target_branch.
+        target_branch: String,
+        /// Meaningful reported delivery/merge outcome.
+        summary: String,
+        /// Optional reported commit/PR/artifact reference.
+        artifact: Option<String>,
+    },
+    /// Read explicit local commits and import reports once; no Git writes and no automatic completion.
+    ImportCommits {
+        /// One to eight hex commit selectors; helper returns full SHA and canonical repository identity.
+        commits: Vec<String>,
+        /// Omission preserves current lifecycle; explicit done is the lead's local completion decision.
+        state: Option<Completion>,
+    },
     /// Replace the target's current complete report and check set.
     Result {
         /// Meaningful outcome, at most 1024 UTF-8 bytes.
         summary: String,
-        /// Tasks/Atomics only; omission preserves completion. Standalone Atomic done enforces its checks.
+        /// Tasks/Atomics only; omission preserves local completion. Modern Atomic done remains pending independent review.
         state: Option<Completion>,
         /// Current check reports; omission means an empty set, not a partial edit.
         #[serde(default)]
@@ -471,13 +540,13 @@ pub struct ReviewArgs {
     pub actor: Option<String>,
 }
 
-/// Independent whole-Epic/Module review; Atomic completion has no separate ceremony.
+/// Independent whole-Epic/Module and standalone/embedded Atomic review; Tasks have no review.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewWorkArgs {
     /// Configured portable root alias.
     pub project: String,
-    /// E-001 or M-001; Task and Atomic review is deliberately absent.
+    /// E-001, M-001, A-001 or M-001/A-001; individual Task references refuse.
     #[serde(rename = "ref")]
     pub reference: String,
     /// Exact current owning record Version, including Epic child observations.

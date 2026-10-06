@@ -279,6 +279,127 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
     );
     value.snapshot_version = read_version;
     diagnostics(&mut value, &snapshot);
+    let child = index.map(|i| m.child(i));
+    let reviews = child
+        .and_then(|a| a.atomic_workflow.as_ref().map(|w| &w.reviews))
+        .unwrap_or(&m.reviews);
+    if let Some(w) = &m.workflow {
+        value.lines.push(format!(
+            "Lifecycle: {}; reported begin: {}; first start: {}.",
+            if w.managed {
+                "modern"
+            } else {
+                "legacy declarations; explicit begin opts in"
+            },
+            w.active,
+            w.started_at.as_deref().unwrap_or("not reported")
+        ));
+        if let Some(e) = &w.execution {
+            value.lines.push(format!(
+                "Execution (reported): repo={} worktree={} branch={} target={}",
+                store::safe(&e.repository, 1024),
+                store::safe(&e.worktree, 1024),
+                store::safe(&e.branch, 128),
+                store::safe(&e.target_branch, 128)
+            ));
+        }
+        if let Some(d) = &w.delivery {
+            value.rows.push(format!(
+                "Delivery [{}] to {}: {} — {} at {}",
+                if m.delivered() { "current" } else { "stale" },
+                store::safe(&d.target_branch, 128),
+                store::safe(&d.summary, 1024),
+                d.actor.as_deref().unwrap_or("unknown"),
+                d.at
+            ));
+        }
+        if let Some(roster) = &w.frozen_modules {
+            value.lines.push(format!(
+                "Frozen Module roster: {}; reopening never unlocks it.",
+                roster.join(", ")
+            ));
+        }
+        if let Some(c) = &w.contracts {
+            if c.not_required {
+                value
+                    .lines
+                    .push("Contracts: explicitly not required.".into());
+            }
+            for (direction, items) in [("provides", &c.provides), ("consumes", &c.consumes)] {
+                for contract in items {
+                    value.rows.push(format!(
+                        "{direction} {} [{}]: {}{}",
+                        contract.peer,
+                        if contract.ready {
+                            "ready (reported)"
+                        } else {
+                            "not ready"
+                        },
+                        store::safe(&contract.description, 1024),
+                        contract
+                            .reference
+                            .as_ref()
+                            .map(|r| format!(" — {}", store::safe(r, 256)))
+                            .unwrap_or_default()
+                    ));
+                }
+            }
+        }
+        for id in w.dependencies.iter().map(|d| &d.reference).chain(
+            w.contracts
+                .iter()
+                .flat_map(|c| c.provides.iter().chain(&c.consumes))
+                .map(|c| &c.peer),
+        ) {
+            if let Err(e) = store.module(id) {
+                value.coverage = "PARTIAL".into();
+                value.rows.push(format!(
+                    "UNREADABLE requirement {id}: {}",
+                    store::safe(&e.message, 240)
+                ));
+            }
+        }
+        for d in &w.dependencies {
+            value.rows.push(format!(
+                "Start dependency {} {:?}: {}",
+                d.reference,
+                d.condition,
+                store::safe(&d.reason, 512)
+            ));
+        }
+        if let Some(environment) = &w.environment {
+            value.rows.push(format!(
+                "Integration environment: {}",
+                store::safe(environment, 1024)
+            ));
+        }
+        for scenario in &w.scenarios {
+            value.rows.push(format!(
+                "Integration scenario: {}",
+                store::safe(scenario, 256)
+            ));
+        }
+        if matches!(args.view, View::Summary) {
+            for condition in store.readiness(m) {
+                value
+                    .rows
+                    .push(format!("Before begin: {}", store::safe(&condition, 512)));
+            }
+        }
+    } else {
+        value.lines.push(
+            "Lifecycle: grandfathered legacy; explicit begin opts into modern conditions.".into(),
+        );
+    }
+    if let Some(a) = child
+        && a.id.starts_with("A-")
+    {
+        value.lines.push(format!(
+            "Atomic phase: {}. Independent Atomic review is separate from Module review.",
+            a.atomic_phase()
+        ));
+    }
+
     for id in m
         .modules
         .iter()
@@ -357,7 +478,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                 "Atomic counts (embedded): {} done, {} open, {} canceled.",
                 m.atomics
                     .iter()
-                    .filter(|a| a.state == TaskState::Done)
+                    .filter(|a| matches!(a.atomic_phase(), "done" | "accepted"))
                     .count(),
                 m.atomics
                     .iter()
@@ -429,7 +550,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                     .rows
                     .push(format!("Needs: {}", store::safe(&condition, 320)));
             }
-            if let Some(review) = m.reviews.last() {
+            if let Some(review) = reviews.last() {
                 value.rows.push(format!(
                     "Latest review: {} by {} — {} (history: {}). Use view=review.",
                     verdict(review.verdict),
@@ -439,7 +560,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                         .map(|s| store::safe(s, 128))
                         .unwrap_or("unknown".into()),
                     store::safe(&review.summary, 180),
-                    m.reviews.len()
+                    reviews.len()
                 ));
             }
             value.lines.push("Next: view=tasks/results/checks/review/log for detail; record_work result for current evidence; review_module for a whole-module verdict.".into());
@@ -537,15 +658,17 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             }
         }
         View::Review => {
-            if index.is_some() || m.id.starts_with("A-") {
+            if child.is_some_and(|a| a.id.starts_with("T-"))
+                || m.id.starts_with("A-") && !m.modern()
+            {
                 return Err(Error::new(
                     "invalid_arguments",
                     "Tasks/Atomics have no separate review; read their module with view=review.",
                 ));
             }
-            let selected = args.review_index.or_else(|| m.reviews.len().checked_sub(1));
+            let selected = args.review_index.or_else(|| reviews.len().checked_sub(1));
             if let Some(i) = selected {
-                let r = m.reviews.get(i).ok_or_else(|| {
+                let r = reviews.get(i).ok_or_else(|| {
                     Error::new(
                         "invalid_arguments",
                         "Review index is outside retained history.",
@@ -553,7 +676,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                 })?;
                 value.lines.push(format!(
                     "Review {i} of {}: {} at {} by {}.",
-                    m.reviews.len(),
+                    reviews.len(),
                     verdict(r.verdict),
                     r.at,
                     r.reviewer
@@ -566,8 +689,15 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                     .push(format!("Conclusion: {}", store::safe(&r.summary, 1024)));
                 value.lines.push(format!(
                     "Applicability: {}; older reports remain history.",
-                    if r.epoch == m.review_epoch && store.work_basis(m).is_ok_and(|b| b == r.basis)
-                    {
+                    if child.map_or_else(
+                        || r.epoch == m.review_epoch
+                            && store.work_basis(m).is_ok_and(|b| b == r.basis),
+                        |a| a
+                            .atomic_workflow
+                            .as_ref()
+                            .is_some_and(|w| r.epoch == w.review_epoch)
+                            && a.atomic_basis().is_ok_and(|b| b == r.basis)
+                    ) {
                         "current"
                     } else {
                         "historical/stale"
@@ -618,6 +748,24 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                 value.lines.push("No review recorded.".into());
             }
         }
+        View::Commits => {
+            for source in &m.imports {
+                if index.is_some() && !source.targets.iter().any(|t| t == reference) {
+                    continue;
+                }
+                let c = &source.commit;
+                value.rows.push(format!("Commit {} — {} — author {} at {} — targets {} — repository {} — observed checkout {}",c.sha,store::safe(&c.subject,256),store::safe(&c.author,256),c.authored_at,source.targets.join(", "),store::safe(&c.repository,1024),store::safe(&c.worktree,1024)));
+                value.rows.push(format!(
+                    "Imported Result: {}",
+                    store::safe(&c.summary, 1024)
+                ));
+                for part in message_chunks(&c.message) {
+                    value
+                        .rows
+                        .push(format!("Original message: {}", store::safe(part, 768)));
+                }
+            }
+        }
         View::Log => {
             value.lines.push(format!("Recent generated log: {} retained; {} earlier machine events omitted; retained range {} to {}. Human reports/reviews/reasons are not evicted.",
                 m.log.len(),m.omitted_log_entries,m.log.first().map(|e|e.id.as_str()).unwrap_or("none"),m.log.last().map(|e|e.id.as_str()).unwrap_or("none")));
@@ -651,6 +799,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             View::Checks => "No required or reported checks in this scope.",
             View::Log => "No retained generated events in this scope.",
             View::Results => "No result-detail rows in this scope.",
+            View::Commits => "No retained imported commit observations in this scope.",
         };
         value.lines.push(empty.into());
     }
@@ -710,7 +859,7 @@ fn module_brief(store: &Store, m: &Module) -> String {
             .filter(|id| {
                 store
                     .module(id)
-                    .is_ok_and(|c| store.phase(&c.value) == "done")
+                    .is_ok_and(|c| matches!(store.phase(&c.value), "done" | "accepted"))
             })
             .count();
         return format!(
@@ -735,8 +884,40 @@ fn module_brief(store: &Store, m: &Module) -> String {
             m.updated_at
         );
     }
+    let obligations = m
+        .workflow
+        .as_ref()
+        .map(|w| {
+            format!(
+                "; provides {}; consumes {}; waits {}",
+                w.contracts
+                    .as_ref()
+                    .map(|c| c
+                        .provides
+                        .iter()
+                        .map(|c| format!("{}: {}", c.peer, store::safe(&c.description, 80)))
+                        .collect::<Vec<_>>()
+                        .join("; "))
+                    .unwrap_or_else(|| "unknown".into()),
+                w.contracts
+                    .as_ref()
+                    .map(|c| c
+                        .consumes
+                        .iter()
+                        .map(|c| format!("{}: {}", c.peer, store::safe(&c.description, 80)))
+                        .collect::<Vec<_>>()
+                        .join("; "))
+                    .unwrap_or_else(|| "unknown".into()),
+                w.dependencies
+                    .iter()
+                    .map(|d| d.reference.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "{} {} — {} — {}/{} tasks done; {} open; {} canceled; Atomics {}/{} done, {} open, {} canceled; {} — {owner}; last reported: {}",
+        "{} {} — {} — {}/{} tasks done; {} open; {} canceled; Atomics {}/{} done, {} open, {} canceled; {} — {owner}; last reported: {}{}",
         m.id,
         store::safe(&m.title, 120),
         store.phase(m),
@@ -758,7 +939,8 @@ fn module_brief(store: &Store, m: &Module) -> String {
             .filter(|a| a.state == TaskState::Canceled)
             .count(),
         lead_line(m),
-        m.updated_at
+        m.updated_at,
+        obligations
     )
 }
 /// Compact embedded work row preserves identity/state/checks and declared Atomic executor.
@@ -784,6 +966,7 @@ fn task_brief(m: &Module, t: &Task) -> String {
         store::safe(&t.title, 120),
         match t.state {
             TaskState::Open => "open",
+            TaskState::Done if t.id.starts_with("A-") => t.atomic_phase(),
             TaskState::Done => "done",
             TaskState::Canceled => "canceled",
         },
@@ -929,7 +1112,25 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
     let done_atomics = scan
         .modules
         .iter()
-        .filter(|m| m.value.id.starts_with("A-") && store.phase(&m.value) == "done")
+        .filter(|m| {
+            m.value.id.starts_with("A-") && matches!(store.phase(&m.value), "done" | "accepted")
+        })
+        .count()
+        + scan
+            .modules
+            .iter()
+            .map(|m| {
+                m.value
+                    .atomics
+                    .iter()
+                    .filter(|a| matches!(a.atomic_phase(), "done" | "accepted"))
+                    .count()
+            })
+            .sum::<usize>();
+    let local_atomics = scan
+        .modules
+        .iter()
+        .filter(|m| m.value.id.starts_with("A-") && m.value.completed)
         .count()
         + scan
             .modules
@@ -942,6 +1143,7 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
                     .count()
             })
             .sum::<usize>();
+    value.lines.push(format!("Atomic local outcomes: {local_atomics} done; final current closure: {done_atomics}. Local completion alone is not modern Atomic acceptance."));
     let canceled_atomics = scan
         .modules
         .iter()
@@ -1182,6 +1384,54 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
                 .join(" "),
         ));
         fields.push(("participants", m.participants.join(" ")));
+        if let Some(w) = &m.workflow {
+            if let Some(e) = &w.execution {
+                fields.push((
+                    "execution",
+                    format!(
+                        "{} {} {} {}",
+                        e.repository, e.worktree, e.branch, e.target_branch
+                    ),
+                ));
+            }
+            if let Some(c) = &w.contracts {
+                for contract in &c.provides {
+                    fields.push((
+                        "provides",
+                        format!(
+                            "{} {} {}",
+                            contract.peer,
+                            contract.description,
+                            contract.reference.as_deref().unwrap_or_default()
+                        ),
+                    ));
+                }
+                for contract in &c.consumes {
+                    fields.push((
+                        "consumes",
+                        format!(
+                            "{} {} {}",
+                            contract.peer,
+                            contract.description,
+                            contract.reference.as_deref().unwrap_or_default()
+                        ),
+                    ));
+                }
+            }
+            for d in &w.dependencies {
+                fields.push((
+                    "dependency",
+                    format!("{} {:?} {}", d.reference, d.condition, d.reason),
+                ));
+            }
+            if let Some(d) = &w.delivery {
+                fields.push(("delivery", format!("{} {}", d.target_branch, d.summary)));
+            }
+            if let Some(e) = &w.environment {
+                fields.push(("environment", e.clone()));
+            }
+            fields.push(("scenarios", w.scenarios.join(" ")));
+        }
         evidence_fields(&mut fields, &m.result, &m.checks);
         for r in &m.reviews {
             fields.push(("review", r.summary.clone()));
@@ -1211,6 +1461,11 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
                         executor.handle.as_deref().unwrap_or_default()
                     ),
                 ));
+            }
+            if let Some(w) = &t.atomic_workflow {
+                for review in &w.reviews {
+                    fields.push(("review", review.summary.clone()));
+                }
             }
             evidence_fields(&mut fields, &t.result, &t.checks);
             hit(
@@ -1263,4 +1518,19 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
         ));
     }
     render_page(value, args.start, args.limit, true, templates)
+}
+
+/// Split retained human commit text at UTF-8 boundaries so exact source can be paged under response budgets.
+fn message_chunks(message: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while start < message.len() {
+        let mut end = (start + 768).min(message.len());
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        parts.push(&message[start..end]);
+        start = end;
+    }
+    parts
 }

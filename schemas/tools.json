@@ -116,7 +116,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Purpose: Read enough current context to choose the next action and obtain the correct write precondition.\nInput: project is a configured alias. Omit ref for Project; otherwise use E-001, M-001, A-001, M-001/T-001 or M-001/A-001. Do not pass ref=\"Project\".\nViews: summary is the default. Project supports summary only. Epic/Module supports summary, tasks (children/members), results, checks, review and log. Atomic supports summary/results/checks/log; embedded Atomics are reviewed with their Module. Task supports summary, results, checks and log; review belongs to its Module.\nsummary returns orientation, phase/counts, lead, blockers/handoff and remaining acceptance conditions; it is not the full task list or result body. Use tasks for the Module's children, results for current reports/artifacts, checks for reported/required evidence, review for a retained verdict, and log for recent generated activity. A Module results view previews Task results; read the Task ref for its full result.\nOutput is compact English text with separate Data coverage and Detail coverage. Version is the editable manifest/whole-Module version. Allocation version is the Project creation precondition for init_project/create_module/create_epic/create_atomic. Epic/standalone Atomic Version also binds current member/participant observations; owning Module Version guards embedded Atomics. Snapshot version is for READ continuation, never a write token.\nPages: start defaults 0; limit defaults 20 and must be 1-20. When Next supplies start/version, continue with Snapshot version and unchanged project/ref/view/review_index. review_index is zero-based; omission selects latest. A changed selection or snapshot refuses. Narrow scope/view after capacity limits.\nEffects: read only; never creates, repairs or finishes initialization. An absent configured root returns orientation and a creation precondition. Unknown aliases/missing config refuse safely.",
+    "description": "Purpose: Obtain a bounded start/resume pack, actual conditions and correct write Version.\nInput: project alias; omit ref for Project, otherwise E-001/M-001/A-001/M-001/T-001/M-001/A-001. Default view=summary; work views tasks/results/checks/review/log/commits. Project supports summary; Tasks have no review. Module-ref delegation uses this pack plus addressed detail pages, without copying a second launch brief.\nOutput: intent, relevant parent background, own criteria, declared execution, provides/consumes peers, explicit waits/readiness, lead/executor, local progress, independent review, delivery and current/stale integration. Parent criteria are background; only owner-declared checks are requirements. Missing/unreadable requirements remain named PARTIAL data, not zero work. Actor/runtime/artifact facts are reported.\nVersion guards the owning record; embedded children share Module Version. Relevant dependency observations bind modern writes; Allocation version only creates top-level work. Snapshot version is READ continuation only. start=0 and limit=1-20; continue returned start/Snapshot version with unchanged project/ref/view/review_index. review_index selects retained verdict history.\ncommits reads retained source metadata/original messages without querying Git. Effects: read only, no migration/repair/runtime polling. After stale/partial/unknown outcomes inspect current scope, then reconcile; do not replay a write to fix presentation.",
     "inputSchema": {
       "$defs": {
         "View": {
@@ -150,6 +150,11 @@
             {
               "const": "log",
               "description": "Recent generated activity and explicit omitted history.",
+              "type": "string"
+            },
+            {
+              "const": "commits",
+              "description": "Retained local commit observations/messages without rescanning Git.",
               "type": "string"
             }
           ]
@@ -220,7 +225,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Purpose: Produce the tracked-work overview that the orchestrator can present to the owner in one call.\nInput: project is a configured alias; optional module=M-001 (also E-001/A-001 work scope) narrows both displayed work and totals to that Module. Omit module for project-wide totals.\nOutput: compact English text with project purpose, readable Epic/Module/Task/Atomic counts and phases, declared leads/handles, current result summaries, blockers, latest review information and last reported activity. This is not live agent monitoring or independent artifact verification.\nData coverage reports unreadable/unscanned work; PARTIAL counts are lower bounds, not zero. Detail coverage separately reports omitted text. Project-wide status shows at most four Task details per Module before response-budget limits; counts still include readable Tasks. Use module narrowing or get_context view=tasks/results/checks/review for detail.\nEffects: read only. No version is needed. Does not save a status document, change lifecycle, start agents or inspect Git. The project must have a valid manifest.",
+    "description": "Purpose: Present one complete bounded overview of tracked project activity to the owner.\nInput: project alias; optional module=E-001/M-001/A-001 narrows work and totals.\nOutput: readable Epic/Module/Task/Atomic counts, active/standalone scope, declared leads/executors, local results/checks, peer obligations/waits, review/delivery/integration attention, blockers and imported report summaries. Tasks are counted separately; Atomic local done is distinct from current reviewed closure. Canceled work is separate. Existing intrinsic approvals/delivery do not become implementation drift merely because parent ownership is unknown; new decisions still refuse uncertain requirements.\nData coverage names unreadable work; partial totals are lower bounds. Detail coverage separately discloses omitted rows; use narrowing or get_context detail pages. Handles are reported references, not live-process proof.\nEffects: read only; no saved status document, Git query, agent launch or automatic cascade. Requires a readable Project manifest.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -312,9 +317,138 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Create or partially edit the work plan, not report completion.\nInput: project alias, op and the correct current version; actor is optional declared attribution, not authentication. Do not supply generated IDs, dates or raw YAML.\nOperations:\n- init_project: explicitly create missing owned project storage; requires title/purpose, optional reported remote. Obtain Project Allocation version first. Root parent must already exist; reads do not create it.\n- edit_project: optional title/purpose/remote patch; use Project Version.\n- create_module: required title/outcome, optional lead={name,handle}, required_checks and initial semantic tasks; use Project Allocation version. Returns the generated M-001 reference. Maximum 32 Tasks per Module.\n- edit_module: module plus optional title/outcome/lead/required_checks; use that Module Version.\n- add_task: module/title, optional criterion/required_checks; use Module Version. MCP allocates the next Task ID.\n- create_epic: title/outcome/criteria (1-8), optional lead/required_checks; Project Allocation version allocates E-001.\n- edit_epic: epic=E-001, optional title/outcome/criteria/lead/required_checks/modules/atomics; Epic Version. modules/atomics are complete replacement reference lists, at most 32 each; ownership is exclusive and dangling/duplicate/unknown membership refuses. Creation and attachment are separate writes; no multi-file transaction is claimed.\n- create_atomic: title/outcome, optional executor={name,handle}/required_checks/participants (M refs); Project Allocation version allocates standalone A-001. Attach to Epic using edit_epic.\n- add_atomic: module/title/outcome, optional executor/required_checks; Module Version allocates embedded M-001/A-001.\n- edit_atomic: ref=A-001|M-001/A-001, optional title/outcome/executor/required_checks/participants (standalone only); owning Version. Meaningful standalone plan edits reset completion; current evidence remains reported history.\n- edit_task: ref=M-001/T-001 and optional title/criterion/required_checks; use the owning Module Version.\nEdit omission preserves existing data; null clears only optional remote/lead/criterion; [] clears a list. Required fields cannot be cleared. Plan edits preserve unrelated results/history but semantic changes make old Module approval historical. Canceled work must be reopened explicitly.\nOutput: SAVED or UNCHANGED, generated target/current owning record Version and Epic/Module/Atomic phase, and disclosed filesystem effects. After init_project, read Project context again for fresh Allocation version before create_module. Do not treat the returned manifest Version as an allocation token.\nEffects: explicit local storage writes with generated IDs/UTC dates/activity. No status setter/cascade, Git action, agent launch or document writer. On stale/busy/validation refusal follow the diagnostic. A partial/uncertain publication or lost reply requires inspecting current context/log/inventory before another mutation; never blindly replay.",
+    "description": "Purpose: Create/edit intent and relationships; never start agents or set arbitrary status.\nInput: project, op, current Version and optional actor. init_project(title,purpose,remote?) and create_module/create_epic/create_atomic use Project Allocation version. edit_project uses manifest Version.\ncreate_module(title,outcome,lead?,criteria[],required_checks[],tasks[],execution?,contracts?,dependencies[]) creates standalone M-001. execution={repository,worktree,branch,target_branch}; contracts={not_required,provides[],consumes[]} entries={peer:M-001,description,reference?,ready}. Bundle obligations per peer/direction; reciprocal contract links are allowed and do not imply waits. dependencies={ref:E/M,condition:accepted|delivered,reason}; delivered is Module-only. Reject dangling/duplicate/self/cyclic blocking refs including parent closure cycles.\nedit_module(module, optional matching fields) uses Module Version. add_task(module,title,criterion?,required_checks[]) / edit_task(ref,...) preserve Task leaf ownership.\ncreate_epic(title,outcome,criteria[],lead?,required_checks[]) creates E-001; edit_epic(epic,intent/checks/lead?,modules[],atomics[]) replaces supplied member lists. First reported Epic begin freezes the Module roster forever through reopen; later Module changes/moves refuse. Atomics remain attachable. Creation and attachment are separate writes with disclosed independent outcomes.\ncreate_atomic(title,outcome,executor?,required_checks[],participants[],execution?,environment?,scenarios[]) creates A-001; add_atomic(module,title,outcome,executor?,required_checks[]) embeds M-001/A-001. edit_atomic(ref, optional matching fields) preserves omission; embedded Atomics inherit execution and cannot declare standalone participants/environment.\nOmission preserves; null clears optional fields, [] clears lists. Semantic edits stale approval and modern Module delivery. New records follow explicit workflow; legacy records remain grandfathered until explicit begin. Adding declarations alone does not opt legacy lifecycle in.\nOutput: saved/unchanged target, owning Version/phase and effects. Effects: local guarded YAML writes with allocated IDs/dates; no Git write, runner or document writer. Lost/partial/uncertain creation retains reserved gaps; inspect context/inventory before another mutation.",
     "inputSchema": {
       "$defs": {
+        "Contract": {
+          "additionalProperties": false,
+          "description": "One declared obligation to a peer Module; data-flow links never imply a blocking wait.",
+          "properties": {
+            "description": {
+              "description": "Behavioral obligation, at most 1024 bytes, distinct from the owning work's outcome.",
+              "type": "string"
+            },
+            "peer": {
+              "description": "Canonical peer M- reference; dangling/self peers refuse.",
+              "type": "string"
+            },
+            "ready": {
+              "description": "Reported readiness of this required interface; no certificate engine is inferred.",
+              "type": "boolean"
+            },
+            "reference": {
+              "description": "Optional canonical artifact/document reference, at most 256 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "peer",
+            "description",
+            "ready"
+          ],
+          "type": "object"
+        },
+        "Contracts": {
+          "additionalProperties": false,
+          "description": "A Module explicitly declares provided/consumed obligations or that none are required.",
+          "properties": {
+            "consumes": {
+              "default": [],
+              "description": "At most eight obligations consumed by this Module, unique by peer.",
+              "items": {
+                "$ref": "#/$defs/Contract"
+              },
+              "type": "array"
+            },
+            "not_required": {
+              "description": "True only when both lists are empty; absence is unknown, not a no-contract declaration.",
+              "type": "boolean"
+            },
+            "provides": {
+              "default": [],
+              "description": "At most eight obligations supplied by this Module, unique by peer.",
+              "items": {
+                "$ref": "#/$defs/Contract"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "not_required"
+          ],
+          "type": "object"
+        },
+        "Dependency": {
+          "additionalProperties": false,
+          "description": "One explicit blocking start dependency; cyclic blocking references refuse.",
+          "properties": {
+            "condition": {
+              "$ref": "#/$defs/DependencyCondition",
+              "description": "Explicit condition; delivery applies only to a Module."
+            },
+            "reason": {
+              "description": "Why execution needs this result, at most 512 bytes.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "E-/M- target reference; no Atomic or arbitrary path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "ref",
+            "condition",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "DependencyCondition": {
+          "description": "Fixed start condition on a named work result, independent of interface direction.",
+          "oneOf": [
+            {
+              "const": "accepted",
+              "description": "Require current accepted Epic/Module result.",
+              "type": "string"
+            },
+            {
+              "const": "delivered",
+              "description": "Require current reported delivery of a Module result.",
+              "type": "string"
+            }
+          ]
+        },
+        "Execution": {
+          "additionalProperties": false,
+          "description": "Reported execution locations; filesystem/Git validity is inspected only during an explicit import.",
+          "properties": {
+            "branch": {
+              "description": "Declared implementation branch, at most 128 bytes.",
+              "type": "string"
+            },
+            "repository": {
+              "description": "Absolute source repository location, at most 1024 bytes; no credential content.",
+              "type": "string"
+            },
+            "target_branch": {
+              "description": "Declared delivery branch, at most 128 bytes; local delivery needs no hosting PR.",
+              "type": "string"
+            },
+            "worktree": {
+              "description": "Absolute working checkout used for local imports, at most 1024 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repository",
+            "worktree",
+            "branch",
+            "target_branch"
+          ],
+          "type": "object"
+        },
         "Lead": {
           "additionalProperties": false,
           "description": "Reported lead identity, never proof of session liveness or authentication.",
@@ -473,6 +607,44 @@
                 "string",
                 "null"
               ]
+            },
+            "contracts": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Contracts"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Declared provides/consumes or explicit not_required; no implicit dependency."
+            },
+            "criteria": {
+              "default": [],
+              "description": "Explicit Module acceptance criteria; empty planning records cannot begin.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dependencies": {
+              "default": [],
+              "description": "Actual blocking start conditions, distinct from contract direction.",
+              "items": {
+                "$ref": "#/$defs/Dependency"
+              },
+              "type": "array"
+            },
+            "execution": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Execution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reported source/checkout/implementation/delivery branches; required before Module begin."
             },
             "lead": {
               "anyOf": [
@@ -692,6 +864,24 @@
                 "null"
               ]
             },
+            "environment": {
+              "description": "Real integration environment, required before participant-based Atomic begin.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "execution": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Execution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional execution context for explicit local Git report import."
+            },
             "executor": {
               "anyOf": [
                 {
@@ -726,6 +916,14 @@
             "required_checks": {
               "default": [],
               "description": "Explicit required check labels, which also name integration scenarios when useful.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "scenarios": {
+              "default": [],
+              "description": "Integration scenarios, required before begin when participants are declared.",
               "items": {
                 "type": "string"
               },
@@ -825,6 +1023,24 @@
                 "null"
               ]
             },
+            "environment": {
+              "description": "Standalone integration environment; omit preserves, null clears.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "execution": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Execution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Standalone only; omit preserves, null clears."
+            },
             "executor": {
               "anyOf": [
                 {
@@ -866,6 +1082,13 @@
               },
               "type": "array"
             },
+            "scenarios": {
+              "description": "Standalone integration scenarios; [] clears, null refuses.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "title": {
               "description": "Omission preserves; null refuses.",
               "type": "string"
@@ -893,6 +1116,42 @@
                 "string",
                 "null"
               ]
+            },
+            "contracts": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Contracts"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Omission preserves; null makes contract readiness unknown."
+            },
+            "criteria": {
+              "description": "Omission preserves; explicit list replaces Module criteria.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dependencies": {
+              "description": "Omission preserves; [] clears explicit waits; blocking cycles refuse.",
+              "items": {
+                "$ref": "#/$defs/Dependency"
+              },
+              "type": "array"
+            },
+            "execution": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Execution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Omission preserves; null clears execution and blocks begin/import."
             },
             "lead": {
               "anyOf": [
@@ -1068,7 +1327,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Record current outcome, an actionable obstacle/resume point, or an explicit lifecycle decision.\nInput: project alias, op, ref and current owning record Version; actor is optional declared attribution.\nOperations:\n- result: required summary; optional checks/gaps/followups/artifacts constitute a COMPLETE current report replacement. Omitted lists become empty and erase the prior current lists; include every current check/artifact you intend to retain. Task state may be open or done; omission PRESERVES its current state, so reporting a result alone does not complete an open Task. Module/Epic results must omit state; acceptance uses independent review_work (review_module stays compatible). Standalone Atomic state=done is lightweight acceptance: meaningful result, no gaps/blocker, all explicit checks passed and current integration participant bases. A fresh result captures participant semantic basis and review generation; new reviews/semantic changes/reopen invalidate integration evidence. Module Atomic state=done follows Task evidence policy; required checks are enforced at whole-Module review.\n- blocker: top-level Epic/Module/standalone Atomic only; problem/needed_action, optional resolver.\n- handoff: top-level Epic/Module/standalone Atomic only; stopping_point/next_action. Handoff does not invalidate current approval.\n- clear_blocker/clear_handoff: top-level Epic/Module/standalone Atomic only, required reason; absent data is a no-op.\n- cancel: required reason; Module/Epic children must already be terminal/current accepted or canceled. Never cascades.\n- reopen: required reason; resumes the same target and makes old Module approval historical.\nCanceled targets accept reopen only; canceled parents block child writes. Done Tasks need a meaningful result. Failed/missing check reports can coexist with Task done; explicit required checks must pass before Module acceptance.\nOutput: SAVED or UNCHANGED, target, current owning Epic/Module/Atomic phase and owning record Version, plus effects. For a Task or embedded Atomic receipt, ready/accepted/etc. is the owning MODULE phase, not a Task state; inspect Task context/status for its state. Current report and reviewer updates retain declared attribution.\nEffects: local writes, generated dates and activity. Artifact/commit/PR references are reported strings; no Git/GitHub verification, commit, PR operation or agent launch occurs. Semantic changes invalidate old approval. Inspect context after stale/partial/uncertain outcomes; do not replay blindly.",
+    "description": "Purpose: Report actual progress, local decisions, start, delivery or explicit local Git report import.\nInput: project, op, ref, owning Version, optional declared actor. Embedded children share Module Version.\nbegin reports lifecycle start only; never launches agents. First Epic begin freezes its Module roster. Module begin needs known lead/criteria, declared repository/worktree/branch/target_branch, declared ready contracts and resolved blocking waits plus open/begun parent. Integration Atomic begin needs executor, real environment/scenarios and currently accepted/delivered participating Modules. Explicit legacy begin opts into modern policy.\nresult replaces the COMPLETE summary/checks/gaps/followups/artifacts report; omitted lists clear current data. Task/Atomic state=open|done is explicit local state, omission preserves. Task done is the known Module lead's decision after tests OR manual verification; no Task review. Modern Atomic local done remains pending independent review. Module/Epic results omit state. complete decides local Task/Atomic completion using its existing meaningful report, avoiding duplicate narration. Modern undo uses reasoned reopen.\ndeliver(ref=M,target_branch,summary,artifact?) reports the current independently reviewed Module's delivery to the declared target. Local merge counts; hosting PR optional. No second review is needed for delivery bookkeeping; semantic changes/reopen invalidate it.\nimport_commits(commits:[1-8 hex selectors],state?) resolves declared execution and uses ONE bounded five-second/80-KiB read-only Git inspection. Repository/worktree identity and actual branch must match declarations; selectors must name commit objects. Retain canonical repository/full SHA/author/date/subject/original message and parsed Result/Checks/Gaps/Followups. Dedup repository+SHA across owner targets. All reads/validation finish before publication; capacity or late failure leaves current report unchanged. Import alone never closes work; explicit done remains a local decision. Duplicate imports never refresh integration evidence. view=commits reads retained history after Git changes.\nblocker/handoff/clear_* target top-level work; clear requires reason. Handoff/date metadata does not stale evidence. cancel/reopen require reasons; parents resolve children first, no cascade, canceled parents block writes. Every modern Atomic has independent review.\nOutput: saved/unchanged target, owning phase/Version and exact effects; embedded receipts label Module phase. Imported facts remain reported assertions, not certificates. No Git commit/merge/push, GitHub API, credential reading or agent launch. After stale/lost/partial/unknown outcomes inspect context/history before retrying.",
     "inputSchema": {
       "$defs": {
         "CheckInput": {
@@ -1132,7 +1391,7 @@
             },
             {
               "const": "done",
-              "description": "Complete this Task/Atomic with a meaningful result; standalone Atomic completion enforces acceptance.",
+              "description": "Complete a meaningful local Task/Atomic result; modern Atomic final acceptance still needs independent review.",
               "type": "string"
             }
           ]
@@ -1141,6 +1400,186 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Record current substance or lifecycle, never supplied timestamps or raw patches.",
       "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Report execution start; never launches agents. First Epic begin permanently freezes its Module roster.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "begin",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Explicitly complete a Task/Atomic using its already-recorded meaningful result; never reviews a Task.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "complete",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Report delivery of a currently reviewed Module to its declared target; local merge is sufficient.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "artifact": {
+              "description": "Optional reported commit/PR/artifact reference.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "deliver",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "summary": {
+              "description": "Meaningful reported delivery/merge outcome.",
+              "type": "string"
+            },
+            "target_branch": {
+              "description": "Must match execution.target_branch.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "target_branch",
+            "summary",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Read explicit local commits and import reports once; no Git writes and no automatic completion.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "commits": {
+              "description": "One to eight hex commit selectors; helper returns full SHA and canonical repository identity.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "import_commits",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Module or owned task reference.",
+              "type": "string"
+            },
+            "state": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Completion"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Omission preserves current lifecycle; explicit done is the lead's local completion decision."
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "commits",
+            "project",
+            "version",
+            "ref"
+          ],
+          "type": "object"
+        },
         {
           "additionalProperties": false,
           "description": "Replace the target's current complete report and check set.",
@@ -1205,7 +1644,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Tasks/Atomics only; omission preserves completion. Standalone Atomic done enforces its checks."
+              "description": "Tasks/Atomics only; omission preserves local completion. Modern Atomic done remains pending independent review."
             },
             "summary": {
               "description": "Meaningful outcome, at most 1024 UTF-8 bytes.",
@@ -1501,7 +1940,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Independently accept or return corrections for a WHOLE Epic or Module. Tasks and Atomics have no separate review ceremony.\nInput: project, ref=E-001|M-001, current Version, verdict=accepted|changes_requested, summary; optional actor, findings={text,must_fix}, checks={target,label,status,detail}. Check updates belong to this record or embedded Module children, never another file. Known lead self-review refuses.\nEpic accepted requires current accepted noncanceled Modules, done/current noncanceled standalone Atomics, own meaningful result, passed required checks, no blocker/gaps and complete authoritative membership coverage. Module accepted also includes embedded Atomics in its whole implementation. Canceled children are excluded. Parent criteria are background; checks are explicit and never inherited.\nVersion is dependency-bound for Epic: concurrent child changes refuse stale reviews. Later child semantic/generation changes make accepted Epic history stale. Read get_context view=review for retained verdicts/findings/provenance.\nEffects: one local guarded record/check/history write, no Git, cascade, source inspection or external merge gate. A negative verdict is a successful saved call. Inspect context/review after stale, lost, partial or uncertain outcome before another mutation.",
+    "description": "Purpose: Independently review a whole Epic/Module or ANY Atomic, including embedded M-001/A-001. Tasks refuse.\nInput: project, ref=E/M/A/M/A, current owning Version, verdict=accepted|changes_requested, summary, optional actor/findings={text,must_fix}/checks={target,label,status,detail}. Known lead/executor/result author cannot self-review Atomics; known Module/Epic lead cannot self-review. Declared identities are not authentication.\nAtomic accepted needs reported begin, meaningful local completion, passed required checks and no gaps; integration evidence must be current. Embedded Atomic review writes only its owning Module and may update only that Atomic's checks. Whole Module review requires terminal Tasks and independently accepted/canceled Atomics, meaningful outcome, passed required checks and no blocker/gaps. Positive Module review yields reviewed; delivery pending until explicit matching reported delivery.\nEpic accepted needs begun frozen roster, current accepted/delivered noncanceled Modules, currently reviewed noncanceled Atomics, own result/checks/criteria and current independently reviewed integration whose participant set EXACTLY matches the active frozen roster with environment/scenarios. A zero-Module Epic needs no invented integration. Missing/unreadable decision requirements refuse.\nUpdates retain before/after check provenance; accepted forbids must_fix findings. changes_requested is a saved successful call. Semantic changes/reopen stale approval; delivery/handoff/date bookkeeping alone does not.\nOutput: saved owning Version/phase; get_context view=review provides retained verdicts. Effects: guarded local review/history/check writes, no external merge, runner or proof engine. Inspect after lost/partial/stale/unknown replies; never replay blindly.",
     "inputSchema": {
       "$defs": {
         "CheckStatus": {
@@ -1597,7 +2036,7 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "Independent whole-Epic/Module review; Atomic completion has no separate ceremony.",
+      "description": "Independent whole-Epic/Module and standalone/embedded Atomic review; Tasks have no review.",
       "properties": {
         "actor": {
           "description": "Declared independent reviewer; unknown remains unknown.",
@@ -1626,7 +2065,7 @@
           "type": "string"
         },
         "ref": {
-          "description": "E-001 or M-001; Task and Atomic review is deliberately absent.",
+          "description": "E-001, M-001, A-001 or M-001/A-001; individual Task references refuse.",
           "type": "string"
         },
         "summary": {
@@ -1661,7 +2100,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Purpose: Save an independent verdict on the WHOLE Module, not review or close a Task separately.\nInput: project alias, module=M-001, current Module Version, verdict=accepted|changes_requested and summary; optional findings={text,must_fix}, checks={target,label,status,detail} and actor. Supply reviewer attribution when known. A known lead matching actor by name/handle cannot self-review; unknown identities remain unknown rather than authenticated.\naccepted requires an open Module with no open Tasks or embedded Atomics, blocker or in-scope gaps; all explicitly required Module/Task/embedded Atomic check labels must have passed. Canceled children are excluded. If no Task or embedded Atomic is done, the Module needs its own meaningful result. not_applicable does not waive required checks. accepted cannot contain must_fix findings.\nchanges_requested saves a negative conclusion without requiring acceptance readiness. It is a successful call with isError=false, not a tool failure.\nOptional check updates replace canonical Module/owned Task check reports BEFORE validation/verdict capture. They retain before/after provenance without changing the lead result-summary author/date. Canceled Task checks cannot be changed by review.\nOutput: a saved receipt with current Module Version and derived phase. accepted immediately yields accepted while current; no separate status move/merge gate is required. Read get_context ref=M-001 view=review for conclusion/findings/check updates/history, using zero-based review_index if needed.\nEffects: local review/history/check/activity writes, no Git merge or artifact verification. Later semantic changes/reopen make approval historical; handoff alone does not. Retained reviews are not silently pruned. On a lost/partial/uncertain reply inspect current review/context before another write.",
+    "description": "Purpose: Compatible Module-only independent review entrypoint; use review_work for Epic or Atomic.\nInput: project, module=M-001, current Module Version, verdict, summary and optional actor/findings/check updates. Same whole-Module gates/provenance as review_work; no individual Task review and no Atomic bypass.\nFor modern work positive review is separate from reported delivery: reviewed; delivery pending becomes accepted after record_work deliver to declared target. Legacy records retain their original closure policy until explicit begin.\nOutput: saved owning Version/phase and effects. Known lead self-review refuses; negative verdict is successful. Semantic changes/reopen make approval historical; ordinary delivery/handoff/date bookkeeping does not require repeated review.\nEffects: one guarded Module write, no Git/GitHub action or runner. Retained review is readable via get_context view=review; inspect uncertain/lost outcomes before another mutation.",
     "inputSchema": {
       "$defs": {
         "CheckStatus": {

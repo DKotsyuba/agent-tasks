@@ -1,4 +1,6 @@
 //! Rust MCP application; protocol, presentation and deployment have separate boundaries.
+/// Bounded read-only local Git report import; declared commits never imply Task completion.
+mod git_reports;
 mod model;
 mod response;
 mod store;

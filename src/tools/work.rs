@@ -247,6 +247,8 @@ fn make_task(input: TaskInput, n: u64, at: &str) -> Task {
         title: input.title,
         criterion: input.criterion,
         executor: None,
+        atomic_workflow: None,
+        started_at: None,
         required_checks: input.required_checks,
         state: TaskState::Open,
         result: None,
@@ -307,10 +309,44 @@ fn save_module(
             false,
         ));
     }
+    for i in 0..value.tasks.len() + value.atomics.len() {
+        if value.child(i).atomic_workflow.is_some() && action != "Atomic review recorded" {
+            let Some(old) = before
+                .value
+                .children()
+                .find(|old| old.id == value.child(i).id)
+            else {
+                continue;
+            };
+            if action == "reopened" && target == format!("{}/{}", value.id, value.child(i).id)
+                || value.child(i).atomic_basis().map_err(arguments)?
+                    != old.atomic_basis().map_err(arguments)?
+            {
+                let a = value
+                    .child_mut(i)
+                    .atomic_workflow
+                    .as_mut()
+                    .ok_or_else(|| arguments("Missing Atomic lifecycle."))?;
+                a.review_epoch = a
+                    .review_epoch
+                    .checked_add(1)
+                    .ok_or_else(|| arguments("Atomic review epoch exhausted."))?;
+            }
+        }
+    }
     let semantic_change =
         value.basis().map_err(store::invalid)? != before.value.basis().map_err(store::invalid)?;
-    if value.id.starts_with("A-") && semantic_change && action != "result reported" {
+    if value.id.starts_with("A-")
+        && semantic_change
+        && !matches!(
+            action,
+            "result reported" | "local outcome completed" | "commits imported"
+        )
+    {
         value.completed = false;
+    }
+    if value.modern() && value.id.starts_with("M-") && (action == "reopened" || semantic_change) {
+        value.workflow_mut().delivery = None;
     }
     if action == "reopened" || semantic_change {
         value.review_epoch = value
@@ -326,7 +362,7 @@ fn save_module(
         &work_path(&value.id).map_err(arguments)?,
         &value,
         Some(&before.bytes),
-        action == "canceled",
+        action == "canceled" || action == "delivery reported",
         effects,
     )?;
     let version = store.work_version(&value, &store::encode(&value)?)?;
@@ -462,12 +498,21 @@ fn plan(
             lead,
             required_checks,
             tasks,
+            criteria,
+            execution,
+            contracts,
+            dependencies,
         } => {
             if tasks.len() > MAX_TASKS {
                 return Err(arguments("At most 32 initial tasks."));
             }
             let at = store::now();
             let mut value = new_record("M-001", title, outcome, lead, required_checks, &at);
+            value.criteria = criteria;
+            let w = value.workflow_mut();
+            w.execution = execution;
+            w.contracts = contracts;
+            w.dependencies = dependencies;
             value.next_task = Some(tasks.len() as u64 + 1);
             value.tasks = tasks
                 .into_iter()
@@ -500,6 +545,9 @@ fn plan(
             executor,
             required_checks,
             participants,
+            execution,
+            environment,
+            scenarios,
         } => {
             let mut value = new_record(
                 "A-001",
@@ -510,6 +558,10 @@ fn plan(
                 &store::now(),
             );
             value.participants = participants;
+            let w = value.workflow_mut();
+            w.execution = execution;
+            w.environment = environment;
+            w.scenarios = scenarios;
             value.validate().map_err(arguments)?;
             store.participant_basis(&value.participants)?;
             create_record(&store, common, value, effects)
@@ -541,6 +593,17 @@ fn plan(
                 .map_err(arguments)?;
             value.validate().map_err(arguments)?;
             store.membership(&value)?;
+            let adds_edges = value
+                .modules
+                .iter()
+                .any(|id| !before.value.modules.contains(id))
+                || value
+                    .atomic_members
+                    .iter()
+                    .any(|id| !before.value.atomic_members.contains(id));
+            if adds_edges {
+                store.links(&value)?;
+            }
             for id in value.modules.iter().chain(&value.atomic_members) {
                 if !before.value.modules.contains(id) && !before.value.atomic_members.contains(id) {
                     store.open_parent(id)?;
@@ -584,6 +647,7 @@ fn plan(
             );
             atomic.id = format!("A-{n:03}");
             atomic.executor = executor;
+            atomic.atomic_workflow = Some(AtomicWorkflow::new());
             let target = format!("{module}/{}", atomic.id);
             value.next_atomic = Some(
                 n.checked_add(1)
@@ -607,6 +671,9 @@ fn plan(
             executor,
             required_checks,
             participants,
+            execution,
+            environment,
+            scenarios,
         } => {
             let before = current(&store, module_id(&reference)?, &common.version)?;
             let mut value = before.value.clone();
@@ -615,6 +682,14 @@ fn plan(
             if let Some(i) = index {
                 if !value.child(i).id.starts_with("A-") {
                     return Err(arguments("edit_atomic requires an Atomic."));
+                }
+                if !matches!(execution, input::Patch::Absent)
+                    || !matches!(environment, input::Patch::Absent)
+                    || !matches!(scenarios, input::Patch::Absent)
+                {
+                    return Err(arguments(
+                        "Execution/integration belong to standalone Atomics; embedded work inherits its Module.",
+                    ));
                 }
                 if !matches!(participants, input::Patch::Absent) {
                     return Err(arguments(
@@ -650,6 +725,15 @@ fn plan(
                 participants
                     .required(&mut value.participants)
                     .map_err(arguments)?;
+                if !matches!(execution, input::Patch::Absent)
+                    || !matches!(environment, input::Patch::Absent)
+                    || !matches!(scenarios, input::Patch::Absent)
+                {
+                    let w = value.workflow_mut();
+                    execution.optional(&mut w.execution);
+                    environment.optional(&mut w.environment);
+                    scenarios.required(&mut w.scenarios).map_err(arguments)?;
+                }
                 value.validate().map_err(arguments)?;
                 store.participant_basis(&value.participants)?;
                 if value.basis().map_err(arguments)? != before.value.basis().map_err(arguments)? {
@@ -673,6 +757,10 @@ fn plan(
             outcome,
             lead,
             required_checks,
+            criteria,
+            execution,
+            contracts,
+            dependencies,
         } => {
             number(&module, "M-").map_err(arguments)?;
             let before = current(&store, &module, &common.version)?;
@@ -684,6 +772,20 @@ fn plan(
             required_checks
                 .required(&mut value.required_checks)
                 .map_err(arguments)?;
+            criteria.required(&mut value.criteria).map_err(arguments)?;
+            if !matches!(execution, input::Patch::Absent)
+                || !matches!(contracts, input::Patch::Absent)
+                || !matches!(dependencies, input::Patch::Absent)
+                || (!value.criteria.is_empty() && value.workflow.is_none())
+            {
+                let w = value.workflow_mut();
+                execution.optional(&mut w.execution);
+                contracts.optional(&mut w.contracts);
+                dependencies
+                    .required(&mut w.dependencies)
+                    .map_err(arguments)?;
+            }
+            store.links(&value)?;
             save_module(
                 &store,
                 &before,
@@ -814,6 +916,8 @@ fn new_record(
         participants: Vec::new(),
         participant_basis: std::collections::BTreeMap::new(),
         completed: false,
+        workflow: Some(Workflow::new()),
+        imports: Vec::new(),
         result: None,
         checks: Vec::new(),
         blocker: None,
@@ -860,6 +964,7 @@ fn create_record(
     value.id = format!("{prefix}{counter:03}");
     *counter += 1;
     let id = value.id.clone();
+    store.links(&value)?;
     value
         .event(&id, "created", &store::now(), &common.actor)
         .map_err(arguments)?;
@@ -967,6 +1072,115 @@ fn record(
     }
     let at = store::now();
     let action = match operation {
+        Work::Begin {} => {
+            if let Some(i) = index {
+                if value.modern() && !value.workflow.as_ref().is_some_and(|w| w.active) {
+                    return Err(arguments("Begin the Module before child execution."));
+                }
+                if value.child(i).id.starts_with("A-") {
+                    let a = value.child_mut(i);
+                    let w = a.atomic_workflow.get_or_insert_with(AtomicWorkflow::new);
+                    if w.active {
+                        return Ok(ack(reference, before.version, store.phase(&value), false));
+                    }
+                    w.active = true;
+                    w.started_at.get_or_insert(at.clone());
+                    a.started_at.get_or_insert(at.clone());
+                } else {
+                    value.child_mut(i).started_at.get_or_insert(at.clone());
+                }
+            } else {
+                let w = value.workflow_mut();
+                w.managed = true;
+                let missing = store.readiness(&value);
+                if !missing.is_empty() {
+                    return Err(Error::new(
+                        "not_ready",
+                        missing.into_iter().take(4).collect::<Vec<_>>().join(" "),
+                    ));
+                }
+                if value.workflow.as_ref().is_some_and(|w| w.active) {
+                    return Ok(ack(reference, before.version, store.phase(&value), false));
+                }
+                let roster = value.modules.clone();
+                let epic = value.id.starts_with("E-");
+                let w = value.workflow_mut();
+                w.active = true;
+                w.started_at.get_or_insert(at.clone());
+                if epic {
+                    w.frozen_modules.get_or_insert(roster);
+                }
+                if value.id.starts_with("M-") {
+                    for a in &mut value.atomics {
+                        a.atomic_workflow.get_or_insert_with(AtomicWorkflow::new);
+                    }
+                }
+            }
+            "begun"
+        }
+        Work::Complete {} => {
+            running(&store, &value, index)?;
+            complete_local(&mut value, index, &common.actor)?;
+            "local outcome completed"
+        }
+        Work::Deliver {
+            target_branch,
+            summary,
+            artifact,
+        } => {
+            module_only(index)?;
+            number(&value.id, "M-").map_err(arguments)?;
+            running(&store, &value, index)?;
+            text(&target_branch, 128).map_err(arguments)?;
+            text(&summary, 1024).map_err(arguments)?;
+            optional(&artifact, 256).map_err(arguments)?;
+            if !value.modern() {
+                return Err(arguments(
+                    "Begin this Module to opt into reported delivery.",
+                ));
+            }
+            let basis = value.basis().map_err(arguments)?;
+            let reviewed = value.reviews.last().is_some_and(|r| {
+                r.verdict == Verdict::Accepted && r.epoch == value.review_epoch && r.basis == basis
+            });
+            if !reviewed || !store.acceptance(&value).is_empty() {
+                return Err(Error::new(
+                    "acceptance",
+                    "Independently review the current complete Module before delivery.",
+                ));
+            }
+            if value
+                .workflow
+                .as_ref()
+                .and_then(|w| w.execution.as_ref())
+                .is_none_or(|e| e.target_branch != target_branch)
+            {
+                return Err(arguments(
+                    "Delivery target must match execution.target_branch.",
+                ));
+            }
+            value.workflow_mut().delivery = Some(Delivery {
+                target_branch,
+                summary,
+                artifact,
+                basis,
+                at: at.clone(),
+                actor: common.actor.clone(),
+            });
+            "delivery reported"
+        }
+        Work::ImportCommits { commits, state } => {
+            running(&store, &value, index)?;
+            let imported =
+                import_commits(&mut value, index, reference, &commits, &common.actor, &at)?;
+            if imported && value.id.starts_with("A-") {
+                value.participant_basis = store.participant_basis(&value.participants)?;
+            }
+            if let Some(state) = state {
+                set_completion(&mut value, index, state, &common.actor)?;
+            }
+            "commits imported"
+        }
         Work::Result {
             summary,
             state,
@@ -975,6 +1189,7 @@ fn record(
             followups,
             artifacts,
         } => {
+            running(&store, &value, index)?;
             let report = Report {
                 summary,
                 gaps,
@@ -992,10 +1207,7 @@ fn record(
                 task.result = Some(report);
                 task.checks = current_checks;
                 if let Some(state) = state {
-                    task.state = match state {
-                        Completion::Open => TaskState::Open,
-                        Completion::Done => TaskState::Done,
-                    };
+                    set_completion(&mut value, index, state, &common.actor)?;
                 }
             } else {
                 if state.is_some() && !value.id.starts_with("A-") {
@@ -1007,10 +1219,10 @@ fn record(
                 value.checks = current_checks;
                 if value.id.starts_with("A-") {
                     if let Some(state) = state {
-                        value.completed = matches!(state, Completion::Done);
+                        set_completion(&mut value, index, state, &common.actor)?;
                     }
                     value.participant_basis = store.participant_basis(&value.participants)?;
-                    if value.completed {
+                    if value.completed && !value.modern() {
                         let missing = store.acceptance(&value);
                         if !missing.is_empty() {
                             return Err(Error::new(
@@ -1116,12 +1328,19 @@ fn record(
             if let Some(i) = index {
                 let task = value.child_mut(i);
                 task.state = TaskState::Open;
+                if let Some(w) = &mut task.atomic_workflow {
+                    w.active = false;
+                }
                 if let Some(c) = task.cancellation.take() {
                     task.cancellation_history.push(c);
                 }
             } else {
                 value.state = ModuleState::Open;
                 value.completed = false;
+                if let Some(w) = &mut value.workflow {
+                    w.active = false;
+                    w.delivery = None;
+                }
                 if let Some(c) = value.cancellation.take() {
                     value.cancellation_history.push(c);
                 }
@@ -1136,7 +1355,9 @@ fn record(
             "reopened"
         }
     };
-    if let Some(i) = index {
+    if let Some(i) = index
+        && value.child(i) != before.value.child(i)
+    {
         value.child_mut(i).updated_at = at;
     }
     save_module(
@@ -1146,6 +1367,305 @@ fn record(
         reference,
         action,
         &common.actor,
+        effects,
+    )
+}
+
+/// Require a current reported lifecycle before semantic outcome writes, without launching anything.
+fn running(store: &Store, m: &Module, index: Option<usize>) -> Result<()> {
+    if m.modern() {
+        if !m.workflow.as_ref().is_some_and(|w| w.active) {
+            return Err(Error::new(
+                "not_started",
+                "Report begin before recording execution outcomes.",
+            ));
+        }
+        if let Some(parent) = store.parent(&m.id)?
+            && parent.modern()
+            && !parent.workflow.as_ref().is_some_and(|w| w.active)
+        {
+            return Err(Error::new(
+                "not_started",
+                "Begin the Epic parent before child outcomes.",
+            ));
+        }
+    }
+    if let Some(i) = index
+        && m.child(i)
+            .atomic_workflow
+            .as_ref()
+            .is_some_and(|w| !w.active)
+    {
+        return Err(Error::new(
+            "not_started",
+            "Report Atomic begin before its outcome.",
+        ));
+    }
+    Ok(())
+}
+
+/// Apply an explicit local state decision; imported commits and successful tests never invoke it implicitly.
+fn set_completion(
+    m: &mut Module,
+    index: Option<usize>,
+    state: Completion,
+    actor: &Option<String>,
+) -> Result<()> {
+    if matches!(state, Completion::Done) {
+        return complete_local(m, index, actor);
+    }
+    if let Some(i) = index {
+        if m.modern() && m.child(i).state == TaskState::Done {
+            return Err(arguments("Use reasoned reopen to undo local completion."));
+        }
+        m.child_mut(i).state = TaskState::Open;
+    } else if m.id.starts_with("A-") {
+        if m.modern() && m.completed {
+            return Err(arguments("Use reasoned reopen to undo local completion."));
+        }
+        m.completed = false;
+    } else {
+        return Err(arguments(
+            "Only Task/Atomic results have local completion state.",
+        ));
+    }
+    Ok(())
+}
+
+/// Mark a meaningful local result done; modern Task decisions must be declared by their Module lead.
+fn complete_local(m: &mut Module, index: Option<usize>, actor: &Option<String>) -> Result<()> {
+    if let Some(i) = index {
+        if m.child(i).result.is_none() {
+            return Err(arguments(
+                "Record a meaningful result before local completion.",
+            ));
+        }
+        if m.modern()
+            && m.child(i).id.starts_with("T-")
+            && !actor.as_ref().is_some_and(|a| {
+                m.lead
+                    .as_ref()
+                    .is_some_and(|l| l.name == *a || l.handle.as_ref() == Some(a))
+            })
+        {
+            return Err(Error::new(
+                "lead_required",
+                "The declared Module lead decides Task done after tests or manual verification.",
+            ));
+        }
+        m.child_mut(i).state = TaskState::Done;
+    } else {
+        number(&m.id, "A-").map_err(arguments)?;
+        if m.result.is_none() {
+            return Err(arguments(
+                "Record a meaningful Atomic result before local completion.",
+            ));
+        }
+        m.completed = true;
+    }
+    Ok(())
+}
+
+/// Import a complete explicit commit set after all reads succeed; owner history deduplicates immutable sources.
+fn import_commits(
+    m: &mut Module,
+    index: Option<usize>,
+    reference: &str,
+    commits: &[String],
+    actor: &Option<String>,
+    at: &str,
+) -> Result<bool> {
+    let e = m
+        .workflow
+        .as_ref()
+        .and_then(|w| w.execution.as_ref())
+        .ok_or_else(|| {
+            arguments("Declare repository/worktree/branch execution before importing commits.")
+        })?;
+    let observed = crate::git_reports::read_verified_commits(
+        std::path::Path::new(&e.repository),
+        std::path::Path::new(&e.worktree),
+        &e.branch,
+        commits,
+    )?;
+    let changed = observed.iter().any(|c| {
+        !m.imports.iter().any(|i| {
+            i.commit.repository == c.repository
+                && i.commit.sha == c.sha
+                && i.targets.iter().any(|t| t == reference)
+        })
+    });
+    if !changed {
+        return Ok(false);
+    }
+    let summary = observed
+        .iter()
+        .map(|c| c.summary.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    text(&summary, 1024).map_err(arguments)?;
+    let mut checks = std::collections::BTreeMap::new();
+    let mut gaps = Vec::new();
+    let mut followups = Vec::new();
+    for c in &observed {
+        for check in &c.checks {
+            checks.insert(check.label.clone(), check.clone());
+        }
+        gaps.extend(c.gaps.clone());
+        followups.extend(c.followups.clone());
+    }
+    strings(&gaps, 256, false).map_err(arguments)?;
+    strings(&followups, 256, false).map_err(arguments)?;
+    if checks.len() > 8 {
+        return Err(arguments(
+            "Combined imported check set exceeds eight labels; import a bounded complete report.",
+        ));
+    }
+    let artifacts = observed
+        .iter()
+        .map(|c| format!("commit:{}", c.sha))
+        .collect::<Vec<_>>();
+    let report = Report {
+        summary,
+        gaps,
+        followups,
+        artifacts,
+        reported_at: at.into(),
+        actor: actor.clone(),
+    };
+    let checks = checks
+        .into_values()
+        .map(|c| Check::from_input(c, at, actor))
+        .collect();
+    for commit in observed {
+        if let Some(existing) = m
+            .imports
+            .iter_mut()
+            .find(|i| i.commit.repository == commit.repository && i.commit.sha == commit.sha)
+        {
+            if !existing.targets.iter().any(|t| t == reference) {
+                existing.targets.push(reference.into());
+            }
+        } else {
+            m.imports.push(ImportedCommit {
+                commit,
+                targets: vec![reference.into()],
+            });
+        }
+    }
+    if let Some(i) = index {
+        m.child_mut(i).result = Some(report);
+        m.child_mut(i).checks = checks;
+    } else {
+        m.result = Some(report);
+        m.checks = checks;
+    }
+    m.validate().map_err(arguments)?;
+    Ok(true)
+}
+
+/// Independently review one embedded Atomic and publish only its owning Module file.
+fn review_atomic(
+    store: &Store,
+    before: &Snapshot<Module>,
+    args: ReviewArgs,
+    index: usize,
+    effects: &mut Vec<String>,
+) -> Result<Ack> {
+    let mut value = before.value.clone();
+    running(store, &value, Some(index))?;
+    let a = value.child(index);
+    if a.state == TaskState::Canceled {
+        return Err(arguments("Reopen canceled Atomic before review."));
+    }
+    if a.atomic_workflow.is_none() {
+        return Err(arguments("Report Atomic begin before independent review."));
+    }
+    if args.actor.as_ref().is_some_and(|actor| {
+        a.executor
+            .iter()
+            .chain(value.lead.iter())
+            .any(|l| l.name == *actor || l.handle.as_ref() == Some(actor))
+            || a.result.as_ref().and_then(|r| r.actor.as_ref()) == Some(actor)
+    }) {
+        return Err(Error::new(
+            "self_review",
+            "Known Atomic executor/author cannot review their own result.",
+        ));
+    }
+    text(&args.summary, 1024).map_err(arguments)?;
+    if args.findings.len() > 8
+        || args.checks.len() > 8
+        || args.verdict == Verdict::Accepted && args.findings.iter().any(|f| f.must_fix)
+    {
+        return Err(arguments("Invalid Atomic review findings/check limits."));
+    }
+    let at = store::now();
+    let mut updates = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for input in args.checks {
+        if input.target != args.module || !seen.insert(input.label.clone()) {
+            return Err(arguments(
+                "Atomic review updates must target only this Atomic, with unique labels.",
+            ));
+        }
+        let after = Check::from_input(
+            CheckInput {
+                label: input.label.clone(),
+                status: input.status,
+                detail: input.detail,
+            },
+            &at,
+            &args.actor,
+        );
+        let checks = &mut value.child_mut(index).checks;
+        let previous = checks.iter().position(|c| c.label == input.label);
+        let original = previous.map(|i| checks[i].clone());
+        if let Some(i) = previous {
+            checks[i] = after.clone();
+        } else {
+            checks.push(after.clone());
+        }
+        updates.push(CheckUpdate {
+            target: input.target,
+            label: input.label,
+            before: original,
+            after,
+        });
+    }
+    if args.verdict == Verdict::Accepted {
+        let missing = value.child(index).atomic_acceptance();
+        if !missing.is_empty() {
+            return Err(Error::new("acceptance", missing.join(" ")));
+        }
+    }
+    let basis = value.child(index).atomic_basis().map_err(arguments)?;
+    let w = value
+        .child_mut(index)
+        .atomic_workflow
+        .as_mut()
+        .ok_or_else(|| arguments("Missing Atomic lifecycle."))?;
+    w.review_epoch = w
+        .review_epoch
+        .checked_add(1)
+        .ok_or_else(|| arguments("Atomic review generation exhausted."))?;
+    w.reviews.push(Review {
+        verdict: args.verdict,
+        summary: args.summary,
+        findings: args.findings,
+        basis,
+        epoch: w.review_epoch,
+        at,
+        reviewer: args.actor.clone(),
+        check_updates: updates,
+    });
+    save_module(
+        store,
+        before,
+        value,
+        &args.module,
+        "Atomic review recorded",
+        &args.actor,
         effects,
     )
 }
@@ -1168,20 +1688,29 @@ fn review(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Resul
     })?;
     let store = config.resolve(&args.project)?;
     let _lock = store.lock(true, effects)?;
-    let (kind, _) = work_number(&args.module).map_err(arguments)?;
-    if kind == "A-" {
-        return Err(arguments(
-            "Atomics use lightweight result completion; review belongs to Modules/Epics.",
-        ));
-    }
-    let before = current(&store, &args.module, &args.version)?;
+    let id = module_id(&args.module)?.to_owned();
+    let before = current(&store, &id, &args.version)?;
     let mut value = before.value.clone();
     open_module(&value)?;
+    let target_index = value.target(&args.module).map_err(arguments)?;
+    if let Some(i) = target_index {
+        if !value.child(i).id.starts_with("A-") {
+            return Err(arguments("Tasks have no individual review."));
+        }
+        return review_atomic(&store, &before, args, i, effects);
+    }
+    if value.id.starts_with("A-") && !value.modern() {
+        return Err(arguments(
+            "Report Atomic begin before opting into independent review.",
+        ));
+    }
     if args.actor.as_ref().is_some_and(|a| {
         value
             .lead
             .as_ref()
             .is_some_and(|l| &l.name == a || l.handle.as_ref() == Some(a))
+            || value.id.starts_with("A-")
+                && value.result.as_ref().and_then(|r| r.actor.as_ref()) == Some(a)
     }) {
         return Err(Error::new(
             "self_review",

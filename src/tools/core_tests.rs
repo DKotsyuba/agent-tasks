@@ -26,6 +26,8 @@ struct Fixture {
     templates: Templates,
     /// Identity renderer used by the actual registry router.
     identity: Renderer,
+    /// Existing core regressions explicitly exercise pre-workflow records; modern suites opt in.
+    modern: bool,
 }
 impl Fixture {
     /// Build aliases alpha/same for the same root without creating that root.
@@ -49,17 +51,59 @@ impl Fixture {
             config: Config::new(Some(config_path)),
             templates: Templates::new(&super::templates()).unwrap(),
             identity: Renderer::new().unwrap(),
+            modern: false,
         }
     }
-    /// Execute the real tool route, asserting bounded single text and expected isError.
+    /// Create a modern workflow fixture without grandfathering generated records.
+    fn modern() -> Self {
+        let mut f = Self::new();
+        f.modern = true;
+        f
+    }
+
+    /// Execute the real route; legacy fixtures strip only new optional policy from disposable generated records.
+    /// This preserves c936 regression semantics while modern tests exercise the full current production lifecycle.
     async fn call(&self, name: &str, args: Value, error: bool) -> String {
+        let request = args.clone();
         let reply = super::call(name, args, &self.identity, &self.templates, &self.config)
             .await
             .unwrap();
         assert_eq!(reply.is_error, Some(error), "{reply:?}");
         let wire = serde_json::to_value(reply).unwrap();
         assert_eq!(wire["content"].as_array().unwrap().len(), 1);
-        let text = wire["content"][0]["text"].as_str().unwrap().to_owned();
+        let mut text = wire["content"][0]["text"].as_str().unwrap().to_owned();
+        if !self.modern
+            && !error
+            && name == "plan_work"
+            && request["op"].as_str().is_some_and(|op| {
+                matches!(
+                    op,
+                    "create_module" | "create_epic" | "create_atomic" | "add_atomic"
+                )
+            })
+        {
+            let target = text
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .split('/')
+                .next()
+                .unwrap();
+            let before = self.store().module(target).unwrap();
+            let mut old = before.value;
+            old.workflow = None;
+            for a in &mut old.atomics {
+                a.atomic_workflow = None;
+            }
+            let path = work_path(&old.id).unwrap();
+            let bytes = store::encode(&old).unwrap();
+            fs::write(self.root.join(&path), &bytes).unwrap();
+            let current = self.store().version(&path, Some(&bytes));
+            text = text.replace(&before.version, &current);
+        }
         assert!(text.len() <= 8192, "{}", text.len());
         assert!(
             !text.contains("schema_version:"),
@@ -895,6 +939,7 @@ fn core_contract_all_operation_shapes() {
         json!({"op":"edit_module","module":"M-001","lead":null,"required_checks":[]}),
         json!({"op":"add_task","module":"M-001","title":"Task"}),
         json!({"op":"edit_task","ref":"M-001/T-001","criterion":null}),
+        json!({"op":"edit_module","module":"M-001","criteria":["Observe"],"execution":{"repository":"/source","worktree":"/checkout","branch":"feature","target_branch":"main"},"contracts":{"not_required":true},"dependencies":[{"ref":"E-001","condition":"accepted","reason":"Named Epic wait"}]}),
     ];
     let valid_work = vec![
         json!({"op":"result","summary":"Delivered","state":"done","checks":[{"label":"native","status":"passed"}]}),
@@ -904,6 +949,10 @@ fn core_contract_all_operation_shapes() {
         json!({"op":"clear_handoff","reason":"Resumed"}),
         json!({"op":"cancel","reason":"Out of scope"}),
         json!({"op":"reopen","reason":"Scope restored"}),
+        json!({"op":"begin"}),
+        json!({"op":"complete"}),
+        json!({"op":"deliver","target_branch":"main","summary":"Local target delivery"}),
+        json!({"op":"import_commits","commits":["abcdef0"]}),
     ];
     for (name, operations) in [("plan_work", valid_plan), ("record_work", valid_work)] {
         let schema = &catalog.iter().find(|t| t["name"] == name).unwrap()["inputSchema"];
@@ -1934,4 +1983,569 @@ async fn core_epic_atomic_partial_publication_recovery() {
         f.call("record_work",json!({"project":"alpha","ref":second,"version":version,"op":"result","summary":"Never blindly replay"}),true).await;
         assert_eq!(f.store().module(second).unwrap().bytes, current.bytes);
     }
+}
+
+/// Prepare one modern Module using reported fixture paths; this helper never claims those paths are Git proof.
+async fn unified_module(f: &Fixture, tasks: Vec<Value>, checks: Vec<&str>) -> String {
+    core_create_kind(f,"create_module",json!({"title":"Modern Module","outcome":"Deliver a coherent result","lead":{"name":"lead","handle":"session-lead"},
+        "criteria":["Outcome is locally verified"],"required_checks":checks,"tasks":tasks,"contracts":{"not_required":true},
+        "execution":{"repository":f.directory.path(),"worktree":f.directory.path(),"branch":"feature","target_branch":"main"}})).await
+}
+
+/// Record a modern reported begin with a fresh owning Version.
+async fn unified_begin(f: &Fixture, reference: &str) {
+    f.record(reference, json!({"op":"begin","actor":"lead"}), false)
+        .await;
+}
+
+/// Independently review complete modern work using current context.
+async fn unified_review(f: &Fixture, reference: &str, error: bool) -> String {
+    f.call("review_work",json!({"project":"alpha","ref":reference,"version":f.version(reference.split('/').next().unwrap()).await,
+        "verdict":"accepted","summary":"Current whole result independently checked","actor":"reviewer"}),error).await
+}
+
+/// Record local Module delivery after review; no hosting PR or Git mutation is invented.
+async fn unified_deliver(f: &Fixture, reference: &str) {
+    f.record(reference,json!({"op":"deliver","target_branch":"main","summary":"Locally merged into the declared target","actor":"lead"}),false).await;
+}
+
+/// Modern Tasks remain the lead's local decision; positive Module review and delivery are separate closure gates.
+#[tokio::test]
+async fn core_unified_task_authority_review_and_delivery() {
+    let f = Fixture::modern();
+    f.init().await;
+    let m = unified_module(
+        &f,
+        vec![json!({"title":"Manual observation","criterion":"Observe the expected result"})],
+        vec!["whole"],
+    )
+    .await;
+    f.record(
+        "M-001/T-001",
+        json!({"op":"result","summary":"Before begin","state":"done","actor":"lead"}),
+        true,
+    )
+    .await;
+    unified_begin(&f, &m).await;
+    f.record("M-001/T-001",json!({"op":"result","summary":"Manually observed behavior","checks":[{"label":"manual","status":"passed","detail":"Lead checked the visible scenario"}]}),false).await;
+    assert_eq!(
+        f.store().module(&m).unwrap().value.tasks[0].state,
+        TaskState::Open
+    );
+    f.record(
+        "M-001/T-001",
+        json!({"op":"complete","actor":"helper"}),
+        true,
+    )
+    .await;
+    f.record(
+        "M-001/T-001",
+        json!({"op":"complete","actor":"lead"}),
+        false,
+    )
+    .await;
+    f.call("review_work",json!({"project":"alpha","ref":"M-001/T-001","version":f.version(&m).await,"verdict":"accepted","summary":"No Task review","actor":"reviewer"}),true).await;
+    unified_review(&f, &m, true).await;
+    f.record(&m,json!({"op":"result","summary":"Whole outcome verified","checks":[{"label":"whole","status":"passed"}],"actor":"lead"}),false).await;
+    unified_review(&f, &m, false).await;
+    let before = f.store().module(&m).unwrap();
+    assert_eq!(f.store().phase(&before.value), "reviewed; delivery pending");
+    f.record(
+        &m,
+        json!({"op":"deliver","target_branch":"other","summary":"Wrong target"}),
+        true,
+    )
+    .await;
+    unified_deliver(&f, &m).await;
+    let delivered = f.store().module(&m).unwrap();
+    assert_eq!(f.store().phase(&delivered.value), "accepted");
+    assert_eq!(before.value.review_epoch, delivered.value.review_epoch);
+    assert_eq!(before.value.reviews.len(), delivered.value.reviews.len());
+    f.record(
+        &m,
+        json!({"op":"handoff","stopping_point":"Preserved","next_action":"Observe"}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        f.store().phase(&f.store().module(&m).unwrap().value),
+        "accepted"
+    );
+    f.plan(
+        &m,
+        json!({"op":"edit_module","module":m,"outcome":"Changed implementation obligation"}),
+        false,
+    )
+    .await;
+    let changed = f.store().module(&m).unwrap();
+    assert!(changed.value.workflow.as_ref().unwrap().delivery.is_none());
+    assert_eq!(f.store().phase(&changed.value), "stale approval");
+}
+
+/// Reciprocal obligations are valid; only explicit waits and parent closure edges form blocking cycles.
+#[tokio::test]
+async fn core_unified_contracts_waits_roster_and_unknowns() {
+    let f = Fixture::modern();
+    f.init().await;
+    let m1 = unified_module(&f, vec![], vec![]).await;
+    let m2 = unified_module(&f, vec![], vec![]).await;
+    for (m, peer) in [(&m1, &m2), (&m2, &m1)] {
+        f.plan(m,json!({"op":"edit_module","module":m,"contracts":{"not_required":false,
+            "provides":[{"peer":peer,"description":"Supplies event and error behavior","reference":"docs/contract.md","ready":true}],
+            "consumes":[{"peer":peer,"description":"Consumes the peer response","ready":true}]}}),false).await;
+    }
+    unified_begin(&f, &m1).await;
+    unified_begin(&f, &m2).await;
+    let context = f
+        .call("get_context", json!({"project":"alpha","ref":m1}), false)
+        .await;
+    assert!(
+        context.contains("provides M-002") && context.contains("consumes M-002"),
+        "{context}"
+    );
+    f.plan(&m1,json!({"op":"edit_module","module":m1,"dependencies":[{"ref":m2,"condition":"accepted","reason":"Need result"}]}),false).await;
+    f.plan(&m2,json!({"op":"edit_module","module":m2,"dependencies":[{"ref":m1,"condition":"accepted","reason":"Would deadlock"}]}),true).await;
+    f.plan(
+        &m1,
+        json!({"op":"edit_module","module":m1,"dependencies":[]}),
+        false,
+    )
+    .await;
+    let e=core_create_kind(&f,"create_epic",json!({"title":"Frozen delivery","outcome":"Compose the Module","criteria":["Combined outcome"]})).await;
+    f.plan(&e, json!({"op":"edit_epic","epic":e,"modules":[m1]}), false)
+        .await;
+    f.plan(&m1,json!({"op":"edit_module","module":m1,"dependencies":[{"ref":e,"condition":"accepted","reason":"Impossible own-parent wait"}]}),true).await;
+    unified_begin(&f, &e).await;
+    f.plan(&e, json!({"op":"edit_epic","epic":e,"modules":[]}), true)
+        .await;
+    f.record(&e, json!({"op":"reopen","reason":"New round"}), false)
+        .await;
+    f.plan(
+        &e,
+        json!({"op":"edit_epic","epic":e,"modules":[m1,m2]}),
+        true,
+    )
+    .await;
+    let m3 = unified_module(&f, vec![], vec![]).await;
+    f.plan(&m3,json!({"op":"edit_module","module":m3,"dependencies":[{"ref":e,"condition":"accepted","reason":"Explicit later Epic dependency"}]}),false).await;
+    f.record(&m3, json!({"op":"begin"}), true).await;
+    assert!(f.store().parent(&m3).unwrap().is_none());
+    let original = fs::read(f.root.join("modules/M-002.yaml")).unwrap();
+    fs::write(f.root.join("modules/M-002.yaml"), "broken: fields").unwrap();
+    let healthy = f
+        .call("get_context", json!({"project":"alpha","ref":m1}), false)
+        .await;
+    assert!(
+        healthy.contains("PARTIAL") && healthy.contains("M-002") && healthy.contains("Version:"),
+        "{healthy}"
+    );
+    f.record(&m1, json!({"op":"begin"}), true).await;
+    fs::write(f.root.join("modules/M-002.yaml"), original).unwrap();
+}
+
+/// Every embedded Atomic has current independent approval; both the Module lead and distinct executor cannot self-review.
+#[tokio::test]
+async fn core_unified_atomic_independence_counts_and_basis() {
+    let f = Fixture::modern();
+    f.init().await;
+    let m = unified_module(&f, vec![], vec![]).await;
+    unified_begin(&f, &m).await;
+    f.plan(&m,json!({"op":"add_atomic","module":m,"title":"Atomic outcome","outcome":"Observed check","executor":{"name":"executor"},"required_checks":["check"]}),false).await;
+    unified_begin(&f, "M-001/A-001").await;
+    f.record("M-001/A-001",json!({"op":"result","summary":"Actual outcome","state":"done","actor":"executor","checks":[{"label":"check","status":"failed"}]}),false).await;
+    let pending = f
+        .call("project_status", json!({"project":"alpha"}), false)
+        .await;
+    assert!(
+        pending.contains("Atomics: 0 done / 1") && pending.contains("1 unfinished/stale"),
+        "{pending}"
+    );
+    for actor in ["lead", "executor"] {
+        f.call("review_work",json!({"project":"alpha","ref":"M-001/A-001","version":f.version(&m).await,"verdict":"accepted","summary":"Self review","actor":actor}),true).await;
+    }
+    unified_review(&f, "M-001/A-001", true).await;
+    f.record("M-001/A-001",json!({"op":"result","summary":"Corrected outcome","state":"done","actor":"executor","checks":[{"label":"check","status":"passed"}]}),false).await;
+    unified_review(&f, "M-001/A-001", false).await;
+    assert_eq!(
+        f.store().module(&m).unwrap().value.atomics[0].atomic_phase(),
+        "accepted"
+    );
+    let page = f
+        .call(
+            "get_context",
+            json!({"project":"alpha","ref":"M-001/A-001","view":"review"}),
+            false,
+        )
+        .await;
+    assert!(
+        page.contains("Current whole result independently checked")
+            && page.contains("Applicability: current"),
+        "{page}"
+    );
+    unified_review(&f, &m, false).await;
+    unified_deliver(&f, &m).await;
+    f.record(
+        "M-001/A-001",
+        json!({"op":"reopen","reason":"New obligation"}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        f.store().module(&m).unwrap().value.atomics[0].atomic_phase(),
+        "stale approval"
+    );
+    assert_eq!(
+        f.store().phase(&f.store().module(&m).unwrap().value),
+        "stale approval"
+    );
+}
+
+/// Modern Epic acceptance needs an independently reviewed integration whose participants exactly match its active frozen roster.
+#[tokio::test]
+async fn core_unified_exact_epic_composition() {
+    let f = Fixture::modern();
+    f.init().await;
+    let m1 = unified_module(&f, vec![], vec![]).await;
+    let m2 = unified_module(&f, vec![], vec![]).await;
+    let m3 = unified_module(&f, vec![], vec![]).await;
+    let e=core_create_kind(&f,"create_epic",json!({"title":"Composition","outcome":"Real joined outcome","criteria":["Both Modules interact"]})).await;
+    f.plan(
+        &e,
+        json!({"op":"edit_epic","epic":e,"modules":[m1,m2]}),
+        false,
+    )
+    .await;
+    unified_begin(&f, &e).await;
+    for m in [&m1, &m2, &m3] {
+        unified_begin(&f, m).await;
+        f.record(
+            m,
+            json!({"op":"result","summary":"Whole Module outcome","actor":"lead"}),
+            false,
+        )
+        .await;
+        unified_review(&f, m, false).await;
+        unified_deliver(&f, m).await;
+    }
+    f.record(
+        &e,
+        json!({"op":"result","summary":"Business criteria observed"}),
+        false,
+    )
+    .await;
+    unified_review(&f, &e, true).await;
+    for participants in [
+        vec![],
+        vec![m1.clone()],
+        vec![m1.clone(), m2.clone(), m3.clone()],
+    ] {
+        let a=core_create_kind(&f,"create_atomic",json!({"title":"Insufficient composition","outcome":"Reported scenario","executor":{"name":"integrator"},
+            "participants":participants,"environment":"actual fixture","scenarios":["joint scenario"]})).await;
+        unified_begin(&f, &a).await;
+        f.record(&a,json!({"op":"result","summary":"Scenario observed","state":"done","actor":"integrator"}),false).await;
+        unified_review(&f, &a, false).await;
+        f.plan(&e, json!({"op":"edit_epic","epic":e,"atomics":[a]}), false)
+            .await;
+        unified_review(&f, &e, true).await;
+    }
+    let a=core_create_kind(&f,"create_atomic",json!({"title":"Exact composition","outcome":"Joined scenario","executor":{"name":"integrator"},
+        "participants":[m1,m2],"environment":"actual fixture","scenarios":["real interaction"]})).await;
+    f.plan(&e, json!({"op":"edit_epic","epic":e,"atomics":[a]}), false)
+        .await;
+    unified_begin(&f, &a).await;
+    f.record(&a,json!({"op":"result","summary":"Real combined outcome","state":"done","actor":"integrator"}),false).await;
+    unified_review(&f, &a, false).await;
+    unified_review(&f, &e, false).await;
+    assert_eq!(
+        f.store().phase(&f.store().module(&e).unwrap().value),
+        "accepted"
+    );
+    let snapshot = f
+        .store()
+        .participant_basis(&[m1.clone(), m2.clone()])
+        .unwrap();
+    f.record(
+        &m1,
+        json!({"op":"handoff","stopping_point":"Same implementation","next_action":"Observe"}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        f.store()
+            .participant_basis(&[m1.clone(), m2.clone()])
+            .unwrap(),
+        snapshot
+    );
+    f.record(
+        &m1,
+        json!({"op":"reopen","reason":"Implementation changed"}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        f.store().phase(&f.store().module(&a).unwrap().value),
+        "stale approval"
+    );
+    assert_eq!(
+        f.store().phase(&f.store().module(&e).unwrap().value),
+        "stale approval"
+    );
+}
+
+/// Legacy fields remain grandfathered until explicit begin; a modern Epic cannot count an unreviewed legacy Atomic as accepted.
+#[tokio::test]
+async fn core_unified_legacy_declarations_and_opt_in() {
+    let old = Fixture::new();
+    old.init().await;
+    let a = core_create_kind(
+        &old,
+        "create_atomic",
+        json!({"title":"Legacy Atomic","outcome":"Legacy result"}),
+    )
+    .await;
+    old.record(
+        &a,
+        json!({"op":"result","summary":"Legacy done","state":"done"}),
+        false,
+    )
+    .await;
+    let e = core_create_kind(
+        &old,
+        "create_epic",
+        json!({"title":"Legacy parent","outcome":"Own outcome","criteria":["Own criterion"]}),
+    )
+    .await;
+    old.plan(&e, json!({"op":"edit_epic","epic":e,"atomics":[a]}), false)
+        .await;
+    old.plan(&a,json!({"op":"edit_atomic","ref":a,"executor":{"name":"executor"},"execution":{"repository":old.directory.path(),"worktree":old.directory.path(),"branch":"main","target_branch":"main"}}),false).await;
+    assert!(!old.store().module(&a).unwrap().value.modern());
+    assert_eq!(
+        old.store().phase(&old.store().module(&a).unwrap().value),
+        "working"
+    ); // meaningful plan change resets old completion
+    old.record(
+        &a,
+        json!({"op":"result","summary":"Legacy done after declarations","state":"done"}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        old.store().phase(&old.store().module(&a).unwrap().value),
+        "done"
+    );
+    old.record(
+        &e,
+        json!({"op":"result","summary":"Own parent outcome"}),
+        false,
+    )
+    .await;
+    unified_review(&old, &e, false).await;
+    old.record(&e, json!({"op":"begin"}), false).await;
+    unified_review(&old, &e, true).await;
+    old.record(&a, json!({"op":"begin"}), false).await;
+    old.record(&a, json!({"op":"complete"}), false).await;
+    unified_review(&old, &a, false).await;
+    unified_review(&old, &e, false).await;
+    assert!(old.store().module(&a).unwrap().value.modern());
+}
+
+/// Actual local Git import captures integration basis only on a new observation and cannot erase reports after a late failure.
+#[tokio::test]
+async fn core_unified_git_integration_import_and_author() {
+    let f = Fixture::modern();
+    f.init().await;
+    let m = unified_module(&f, vec![], vec![]).await;
+    unified_begin(&f, &m).await;
+    f.record(
+        &m,
+        json!({"op":"result","summary":"Delivered participant"}),
+        false,
+    )
+    .await;
+    unified_review(&f, &m, false).await;
+    unified_deliver(&f, &m).await;
+    let repo = f.directory.path().join("source");
+    fs::create_dir(&repo).unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Author")
+            .env("GIT_AUTHOR_EMAIL", "author@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Author")
+            .env("GIT_COMMITTER_EMAIL", "author@example.invalid")
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["init", "-b", "feature"]).status.success());
+    fs::write(repo.join("file"), "source").unwrap();
+    assert!(run(&["add", "file"]).status.success());
+    assert!(
+        run(&[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "test: integration",
+            "-m",
+            "Result:\nActual combined behavior\nChecks:\npassed | scenario | Locally observed"
+        ])
+        .status
+        .success()
+    );
+    let sha = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let a=core_create_kind(&f,"create_atomic",json!({"title":"Imported integration","outcome":"Actual composition","executor":{"name":"executor"},"participants":[m],
+        "environment":"local temporary Git","scenarios":["scenario"],"required_checks":["scenario"],
+        "execution":{"repository":repo,"worktree":repo,"branch":"feature","target_branch":"main"}})).await;
+    unified_begin(&f, &a).await;
+    f.record(
+        &a,
+        json!({"op":"import_commits","commits":[sha],"state":"done","actor":"reporter"}),
+        false,
+    )
+    .await;
+    assert!(
+        !f.store()
+            .module(&a)
+            .unwrap()
+            .value
+            .participant_basis
+            .is_empty()
+    );
+    f.call("review_work",json!({"project":"alpha","ref":a,"version":f.version(&a).await,"verdict":"accepted","summary":"Self review","actor":"reporter"}),true).await;
+    unified_review(&f, &a, false).await;
+    let before = f.store().module(&a).unwrap().bytes;
+    f.record(
+        &a,
+        json!({"op":"import_commits","commits":[sha,"deadbee"],"actor":"reporter"}),
+        true,
+    )
+    .await;
+    assert_eq!(f.store().module(&a).unwrap().bytes, before);
+    let old = f.version(&a).await;
+    let noop = f
+        .record(
+            &a,
+            json!({"op":"import_commits","commits":[sha],"actor":"reporter"}),
+            false,
+        )
+        .await;
+    assert!(noop.starts_with("UNCHANGED"));
+    assert_eq!(f.version(&a).await, old);
+    let view = f
+        .call(
+            "get_context",
+            json!({"project":"alpha","ref":a,"view":"commits"}),
+            false,
+        )
+        .await;
+    assert!(
+        view.contains("Original message") && view.contains("Actual combined behavior"),
+        "{view}"
+    );
+    f.record(
+        &m,
+        json!({"op":"reopen","reason":"New participant scope"}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        f.store().phase(&f.store().module(&a).unwrap().value),
+        "stale approval"
+    );
+    f.record(
+        &a,
+        json!({"op":"import_commits","commits":[sha],"actor":"reporter"}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        f.store().phase(&f.store().module(&a).unwrap().value),
+        "stale approval",
+        "Duplicate import cannot fake new integration evidence"
+    );
+}
+
+/// Parent cancellation and unrelated unknown ownership block decisions without fabricating intrinsic implementation drift.
+#[tokio::test]
+async fn core_unified_intrinsic_approval_survives_parent_and_unknown_scope() {
+    let f = Fixture::modern();
+    f.init().await;
+    let m = unified_module(&f, vec![], vec![]).await;
+    let e = core_create_kind(
+        &f,
+        "create_epic",
+        json!({"title":"Parent","outcome":"Organize scope","criteria":["Organized"]}),
+    )
+    .await;
+    f.plan(&e, json!({"op":"edit_epic","epic":e,"modules":[m]}), false)
+        .await;
+    unified_begin(&f, &e).await;
+    unified_begin(&f, &m).await;
+    f.record(
+        &m,
+        json!({"op":"result","summary":"Reviewed implementation"}),
+        false,
+    )
+    .await;
+    unified_review(&f, &m, false).await;
+    unified_deliver(&f, &m).await;
+    let before = f.store().module(&m).unwrap();
+    f.record(
+        &e,
+        json!({"op":"cancel","reason":"Business scope withdrawn"}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        f.store().phase(&f.store().module(&m).unwrap().value),
+        "accepted"
+    );
+    assert!(f.store().module(&m).unwrap().value.delivered());
+    assert_eq!(
+        before.bytes,
+        f.store().module(&m).unwrap().bytes,
+        "Parent transition is not a child cascade"
+    );
+    f.record(
+        &m,
+        json!({"op":"handoff","stopping_point":"Same","next_action":"Resume"}),
+        true,
+    )
+    .await;
+    f.record(&e, json!({"op":"reopen","reason":"Parent resumed"}), false)
+        .await;
+    f.record(
+        &m,
+        json!({"op":"result","summary":"No implicit parent begin"}),
+        true,
+    )
+    .await;
+    unified_begin(&f, &e).await;
+    fs::write(
+        f.root.join("epics/E-009.yaml"),
+        "invalid: unrelated ownership",
+    )
+    .unwrap();
+    let status = f
+        .call("project_status", json!({"project":"alpha"}), false)
+        .await;
+    assert!(
+        status.contains("PARTIAL")
+            && status.contains("Modules: 1 accepted / 1 readable")
+            && status.contains("ownership unknown"),
+        "{status}"
+    );
+    assert_eq!(
+        f.store().phase(&f.store().module(&m).unwrap().value),
+        "accepted"
+    );
+    f.record(&m, json!({"op":"begin"}), true).await;
+    assert_eq!(before.bytes, f.store().module(&m).unwrap().bytes);
 }

@@ -557,19 +557,36 @@ impl Store {
         if value.modules.is_empty()
             && value.atomic_members.is_empty()
             && value.participants.is_empty()
+            && value.workflow.as_ref().is_none_or(|w| {
+                w.dependencies.is_empty()
+                    && w.contracts
+                        .as_ref()
+                        .is_none_or(|c| c.provides.is_empty() && c.consumes.is_empty())
+            })
         {
             return Ok(own);
         }
         let mut digest = Sha256::new();
         digest.update(own.as_bytes());
         let mut remaining = SCAN_CAP;
+        let mut visited = std::collections::BTreeSet::new();
         for id in value
             .modules
             .iter()
             .chain(&value.atomic_members)
             .chain(&value.participants)
         {
-            self.dependency_digest(id, &mut digest, &mut remaining)?;
+            self.dependency_digest(id, &mut digest, &mut remaining, &mut visited)?;
+        }
+        if let Some(w) = &value.workflow {
+            for id in w.dependencies.iter().map(|d| &d.reference).chain(
+                w.contracts
+                    .iter()
+                    .flat_map(|c| c.provides.iter().chain(&c.consumes))
+                    .map(|c| &c.peer),
+            ) {
+                self.dependency_digest(id, &mut digest, &mut remaining, &mut visited)?;
+            }
         }
         Ok(format!("{:x}", digest.finalize()))
     }
@@ -581,7 +598,11 @@ impl Store {
         id: &str,
         digest: &mut Sha256,
         remaining: &mut usize,
+        visited: &mut std::collections::BTreeSet<String>,
     ) -> Result<()> {
+        if !visited.insert(id.into()) {
+            return Ok(());
+        }
         let relative = model::work_path(id).map_err(invalid)?;
         digest.update(id.as_bytes());
         let path = match self.path(&relative) {
@@ -597,14 +618,33 @@ impl Store {
                 digest.update(self.version(&relative, bytes.as_deref()).as_bytes());
                 if let Some(bytes) = bytes {
                     *remaining = remaining.saturating_sub(bytes.len());
-                    if id.starts_with("A-") {
+                    if id.starts_with("A-") || id.starts_with("E-") || id.starts_with("M-") {
                         match decode::<Module>(&bytes).and_then(|m| {
                             m.validate().map_err(invalid)?;
                             Ok(m)
                         }) {
                             Ok(m) => {
-                                for participant in m.participants {
-                                    self.dependency_digest(&participant, digest, remaining)?;
+                                for related in m
+                                    .participants
+                                    .iter()
+                                    .chain(&m.modules)
+                                    .chain(&m.atomic_members)
+                                {
+                                    self.dependency_digest(related, digest, remaining, visited)?;
+                                }
+                                if let Some(w) = &m.workflow {
+                                    for related in
+                                        w.dependencies.iter().map(|d| &d.reference).chain(
+                                            w.contracts
+                                                .iter()
+                                                .flat_map(|c| c.provides.iter().chain(&c.consumes))
+                                                .map(|c| &c.peer),
+                                        )
+                                    {
+                                        self.dependency_digest(
+                                            related, digest, remaining, visited,
+                                        )?;
+                                    }
                                 }
                             }
                             Err(e) => digest.update(e.code.as_bytes()),
@@ -625,11 +665,18 @@ impl Store {
     pub fn participant_basis(&self, participants: &[String]) -> Result<BTreeMap<String, String>> {
         let mut result = BTreeMap::new();
         for id in participants {
-            model::work_number(id).map_err(invalid)?;
+            model::number(id, "M-").map_err(invalid)?;
             let m = self.module(id)?.value;
             let mut digest = Sha256::new();
             digest.update(m.basis().map_err(invalid)?.as_bytes());
             digest.update(m.review_epoch.to_le_bytes());
+            if let Some(w) = &m.workflow {
+                digest.update([u8::from(m.delivered())]);
+                if let Some(d) = &w.delivery {
+                    digest.update(d.target_branch.as_bytes());
+                    digest.update(d.basis.as_bytes());
+                }
+            }
             result.insert(id.clone(), format!("{:x}", digest.finalize()));
         }
         Ok(result)
@@ -665,7 +712,8 @@ impl Store {
                     Ok(child) if child.value.state == model::ModuleState::Canceled => (),
                     Ok(child) => {
                         let phase = self.phase(&child.value);
-                        let expected = if id.starts_with("M-") {
+                        let expected = if id.starts_with("M-") || child.value.modern() || m.modern()
+                        {
                             "accepted"
                         } else {
                             "done"
@@ -679,7 +727,66 @@ impl Store {
                 }
             }
         }
+        if m.id.starts_with("E-") && m.modern() {
+            let active = m
+                .modules
+                .iter()
+                .filter(|id| {
+                    self.module(id)
+                        .is_ok_and(|s| s.value.state != model::ModuleState::Canceled)
+                })
+                .collect::<Vec<_>>();
+            if !active.is_empty() {
+                let complete = m.atomic_members.iter().any(|id| {
+                    self.module(id).is_ok_and(|s| {
+                        s.value.modern()
+                            && !s.value.participants.is_empty()
+                            && s.value.participants.len() == active.len()
+                            && active
+                                .iter()
+                                .all(|member| s.value.participants.contains(member))
+                            && s.value
+                                .workflow
+                                .as_ref()
+                                .is_some_and(|w| w.environment.is_some() && !w.scenarios.is_empty())
+                            && self.phase(&s.value) == "accepted"
+                    })
+                });
+                if !complete {
+                    missing.push("Independently accept a current integration Atomic covering every noncanceled frozen Module, with environment/scenarios.".into());
+                }
+            }
+        }
+
+        if m.modern() {
+            if let Err(e) = self.links(m) {
+                missing.push(format!("Requirements unknown/invalid: {}", e.message));
+            }
+            if m.id.starts_with("E-")
+                && m.workflow
+                    .as_ref()
+                    .is_some_and(|w| w.frozen_modules.is_none())
+            {
+                missing.push("Report Epic begin to freeze its Module roster.".into());
+            }
+        }
         if m.id.starts_with("A-") && !m.participants.is_empty() {
+            if m.modern() {
+                for id in &m.participants {
+                    match self.module(id) {
+                        Ok(participant)
+                            if self.phase(&participant.value) == "accepted"
+                                && participant.value.delivered() => {}
+                        Ok(_) => missing.push(format!(
+                            "{id}: integration requires current accepted/delivered Module."
+                        )),
+                        Err(e) => missing.push(format!(
+                            "{id}: unknown integration participant ({})",
+                            e.message
+                        )),
+                    }
+                }
+            }
             match self.participant_basis(&m.participants) {
                 Ok(basis) if basis == m.participant_basis => (),
                 Ok(_) => missing.push("Integration evidence is stale; report a fresh result against current participants.".into()),
@@ -695,23 +802,47 @@ impl Store {
             return "canceled";
         }
         if m.id.starts_with("A-") {
-            return if m.completed {
-                if self.acceptance(m).is_empty() {
-                    "done"
+            if !m.modern() {
+                return if m.completed {
+                    if self.acceptance(m).is_empty() {
+                        "done"
+                    } else {
+                        "stale completion"
+                    }
                 } else {
-                    "stale completion"
+                    m.phase()
+                };
+            }
+            if let Some(r) = m.reviews.last() {
+                if r.epoch == m.review_epoch && m.basis().is_ok_and(|b| b == r.basis) {
+                    if r.verdict == model::Verdict::ChangesRequested {
+                        return "changes requested";
+                    }
+                    return if self.acceptance(m).is_empty() {
+                        "accepted"
+                    } else {
+                        "stale approval"
+                    };
                 }
-            } else {
-                m.phase()
-            };
+                if r.verdict == model::Verdict::Accepted {
+                    return "stale approval";
+                }
+            }
+            if m.completed {
+                return if self.acceptance(m).is_empty() {
+                    "ready"
+                } else {
+                    "working"
+                };
+            }
+            return m.phase();
         }
         if m.id.starts_with("E-") {
             if let Some(r) = m.reviews.last() {
                 let applicable =
                     r.epoch == m.review_epoch && self.work_basis(m).is_ok_and(|b| b == r.basis);
                 if applicable {
-                    return if r.verdict == model::Verdict::Accepted && self.acceptance(m).is_empty()
-                    {
+                    return if r.verdict == model::Verdict::Accepted && m.acceptance().is_empty() {
                         "accepted"
                     } else if r.verdict == model::Verdict::ChangesRequested {
                         "changes requested"
@@ -744,6 +875,14 @@ impl Store {
         if !inventory.complete {
             return Err(invalid("Epic ownership inventory is incomplete."));
         }
+        if let Some(roster) = candidate
+            .workflow
+            .as_ref()
+            .and_then(|w| w.frozen_modules.as_ref())
+            && roster != &candidate.modules
+        {
+            return Err(invalid("Epic Module roster is frozen permanently."));
+        }
         for id in candidate.modules.iter().chain(&candidate.atomic_members) {
             self.module(id)?;
         }
@@ -765,6 +904,166 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    /// Validate declared peers and waits against healthy records; only blocking edges participate in cycle checks.
+    pub fn links(&self, candidate: &Module) -> Result<()> {
+        candidate.validate().map_err(invalid)?;
+        if let Some(w) = &candidate.workflow {
+            for peer in w
+                .contracts
+                .iter()
+                .flat_map(|c| c.provides.iter().chain(&c.consumes))
+                .map(|c| &c.peer)
+            {
+                self.module(peer)?;
+            }
+            for dependency in &w.dependencies {
+                self.module(&dependency.reference)?;
+            }
+        }
+        if (candidate.id.starts_with("E-")
+            && candidate.modules.is_empty()
+            && candidate.atomic_members.is_empty())
+            || !candidate.id.starts_with("E-")
+                && candidate
+                    .workflow
+                    .as_ref()
+                    .is_none_or(|w| w.dependencies.is_empty())
+        {
+            return Ok(());
+        }
+        let scan = self.scan(None)?;
+        if !scan.complete {
+            return Err(invalid(
+                "Blocking dependency graph has unreadable or incomplete work.",
+            ));
+        }
+        let mut graph = BTreeMap::<String, Vec<String>>::new();
+        for m in scan
+            .modules
+            .iter()
+            .map(|s| &s.value)
+            .filter(|m| m.id != candidate.id)
+            .chain(std::iter::once(candidate))
+        {
+            let edges = m
+                .modules
+                .iter()
+                .chain(&m.atomic_members)
+                .chain(&m.participants)
+                .cloned()
+                .chain(
+                    m.workflow
+                        .iter()
+                        .flat_map(|w| w.dependencies.iter().map(|d| d.reference.clone())),
+                )
+                .collect();
+            graph.insert(m.id.clone(), edges);
+        }
+        let mut visiting = std::collections::BTreeSet::new();
+        let mut done = std::collections::BTreeSet::new();
+        for id in graph.keys() {
+            blocking_cycle(id, &graph, &mut visiting, &mut done)?;
+        }
+        Ok(())
+    }
+
+    /// Return actual reported-start requirements; contract data flow never becomes a hidden wait.
+    pub fn readiness(&self, m: &Module) -> Vec<String> {
+        let mut missing = Vec::new();
+        if m.state == model::ModuleState::Canceled {
+            missing.push("Reopen canceled work.".into());
+        }
+        if let Err(e) = self.links(m) {
+            missing.push(e.message);
+            return missing;
+        }
+        match self.parent(&m.id) {
+            Ok(Some(parent))
+                if parent.state == model::ModuleState::Canceled
+                    || parent.workflow.as_ref().is_some_and(|w| !w.active) =>
+            {
+                missing.push(format!("Parent {} must be begun/open.", parent.id))
+            }
+            Err(e) => missing.push(format!("Parent ownership unknown: {}", e.message)),
+            _ => (),
+        }
+        if let Some(w) = &m.workflow {
+            if m.id.starts_with("M-") {
+                if m.lead.is_none() {
+                    missing.push("Declare a known Module lead.".into());
+                }
+                if m.criteria.is_empty() {
+                    missing.push("Declare Module criteria.".into());
+                }
+                if w.execution.is_none() {
+                    missing
+                        .push("Declare repository/worktree/branch/target_branch execution.".into());
+                }
+                match &w.contracts {
+                    None => {
+                        missing.push("Declare provides/consumes or explicit not_required.".into())
+                    }
+                    Some(c) => {
+                        for contract in c.provides.iter().chain(&c.consumes) {
+                            if !contract.ready {
+                                missing
+                                    .push(format!("Contract with {} is not ready.", contract.peer));
+                            }
+                        }
+                    }
+                }
+                for dependency in &w.dependencies {
+                    match self.module(&dependency.reference) {
+                        Ok(target) => {
+                            let met = match dependency.condition {
+                                model::DependencyCondition::Accepted => {
+                                    self.phase(&target.value) == "accepted"
+                                }
+                                model::DependencyCondition::Delivered => {
+                                    self.phase(&target.value) == "accepted"
+                                        && target.value.delivered()
+                                }
+                            };
+                            if !met {
+                                missing.push(format!(
+                                    "Wait for {} {:?}: {}",
+                                    dependency.reference, dependency.condition, dependency.reason
+                                ));
+                            }
+                        }
+                        Err(e) => missing.push(format!(
+                            "{}: unknown prerequisite ({})",
+                            dependency.reference, e.message
+                        )),
+                    }
+                }
+            }
+            if m.id.starts_with("A-") {
+                if m.lead.is_none() {
+                    missing.push("Declare an Atomic executor.".into());
+                }
+                if !m.participants.is_empty() {
+                    if w.environment.is_none() || w.scenarios.is_empty() {
+                        missing.push("Declare real integration environment and scenarios.".into());
+                    }
+                    for id in &m.participants {
+                        match self.module(id) {
+                            Ok(target)
+                                if self.phase(&target.value) == "accepted"
+                                    && target.value.delivered() => {}
+                            Ok(_) => missing.push(format!(
+                                "{id}: requires accepted and delivered before integration begin."
+                            )),
+                            Err(e) => missing
+                                .push(format!("{id}: unreadable participant ({})", e.message)),
+                        }
+                    }
+                }
+            }
+        }
+        missing
     }
 
     /// Find an authoritative Epic parent; malformed ownership refuses rather than guessing standalone.
@@ -1321,4 +1620,28 @@ pub fn safe(value: &str, cap: usize) -> String {
     }
     result.push('"');
     result
+}
+
+/// Detect only blocking dependency cycles, including owning container closure edges; contract links are excluded.
+fn blocking_cycle(
+    id: &str,
+    graph: &BTreeMap<String, Vec<String>>,
+    visiting: &mut std::collections::BTreeSet<String>,
+    done: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    if done.contains(id) {
+        return Ok(());
+    }
+    if !visiting.insert(id.into()) {
+        return Err(invalid(format!("Blocking dependency cycle at {id}.")));
+    }
+    for next in graph.get(id).into_iter().flatten() {
+        if !graph.contains_key(next) {
+            return Err(invalid(format!("Dangling blocking reference {next}.")));
+        }
+        blocking_cycle(next, graph, visiting, done)?;
+    }
+    visiting.remove(id);
+    done.insert(id.into());
+    Ok(())
 }

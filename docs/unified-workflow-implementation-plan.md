@@ -1,0 +1,47 @@
+# Unified portable workflow
+
+Extend the existing guarded YAML evidence engine, purpose-based MCP tools and strict compact renderer. Keep one file per Module, including Tasks and Atomics. New records opt into `workflow` revision 1 with managed=true; legacy declarations use managed=false until explicit begin. Absence preserves pre-existing behavior and semantic approval digests. Reads never migrate. Explicit `record_work begin` opts a legacy owner into the new rules; existing approval remains historical only after that explicit semantic change. IDs, root allocator revision 2, no-clobber reservations, backup-before-normalization, root locks, closing reserve and disclosed partial outcomes remain.
+
+## Data and ownership
+
+- Module `workflow` owns reported start, execution `{repository,worktree,branch,target_branch}`, contracts and blocking dependencies. `contracts={not_required,provides[],consumes[]}`; each entry `{peer,description,reference?,ready}` names a canonical Module and declared behavior/artifact. `not_required=true` requires empty lists. Contracts are obligations, not implicit waits or attestation certificates. A peer may occur once per direction; reciprocal contracts are allowed.
+- `dependencies=[{ref,condition,reason}]` uses E-/M- refs and `condition=accepted|delivered` (delivered only for Module). Dependencies gate reported start. Reject dangling/duplicate/self/cyclic blocking relationships, including impossible waits through owning Epic completion; do not reject reciprocal nonblocking contract links.
+- New Module/Epic records have explicit criteria. Module readiness requires a known lead, declared execution, criteria, declared contracts with required entries ready, resolved dependencies and an active parent Epic. Begin reports a lifecycle event; it never launches a process.
+- Epic first begin saves its immutable Module roster. Subsequent edits/reopen cannot change that roster or move its Modules. Atomics remain attachable/detachable through existing Epic-owned membership lists. New Modules are standalone until attached to an unstarted Epic; optional dependencies can wait for a named Epic.
+- New standalone and embedded Atomics carry independent review policy/history. Their completed report is a local outcome, not final acceptance. Task local completion remains the Module lead's explicit decision after tests or manual verification; no Task review and no automatic commit/test closure.
+- Module final phase becomes accepted only with applicable independent whole-Module approval and a reported delivery to its declared target branch. Delivery fields `{target_branch,summary,artifact?,basis,at,actor}` are bookkeeping outside the implementation digest; reporting delivery after approval needs no second review. Reopen or semantic changes clear delivery and stale approval. Local merge is sufficient; PR/hosting is optional.
+- Standalone integration Atomic `participants` are Module refs, plus `environment` and `scenarios`. Begin requires all participants currently accepted and delivered. Results capture participant semantic/review/delivery generations; handoff/dates/unrelated metadata do not stale evidence. Atomic independent review is required. Epic final acceptance requires its active frozen roster, currently accepted/delivered members and currently reviewed Atomic composition whose participant set exactly matches the active noncanceled frozen roster.
+
+## Purpose-based inputs
+
+- `plan_work create_module/edit_module`: existing intent/lead/check fields plus `criteria`, `execution`, `contracts`, `dependencies`. Edit omission preserves; lists replace completely; optional execution can be cleared but start then refuses.
+- `create_atomic/edit_atomic`: existing fields plus optional execution, environment and scenarios. `add_atomic/edit_atomic` retains embedded ownership and adds independent review policy by default.
+- `record_work begin(ref,version,actor?)`: explicit reported start; first Epic begin freezes roster; legacy begin opts in without read migration.
+- `record_work result`: existing complete report replacement. Task/Atomic `state=done` is explicit local completion; Task done must be attributed to the known Module lead in modern workflow. Failed/missing optional evidence is honest and does not invent a Task review.
+- `record_work complete`: explicit local completion from the existing meaningful report, allowing the lead to decide after an import without copying its content.
+- `record_work deliver(ref=M,version,target_branch,summary,artifact?,actor?)`: record reviewed Module delivery/merge; matching declared target required. No Git write or external API.
+- `record_work import_commits(ref,version,commits[],state?,actor?)`: explicit local Git report import. Imported report never closes work unless the caller explicitly selects completion. Resolve owning declared execution; no arbitrary revisions/shell or credential reads.
+- `review_work` extends to A-/M-/E- and M-/A-; Tasks refuse. Embedded Atomic review is one owning Module write. Known author/executor/lead self-review refuses. `review_module` remains compatible.
+- Existing context, search and one-call status project start conditions, peer obligations, dependency direction, execution, current approval/delivery/integration, imported report summaries and explicit omissions. Versions remain root-bound owning-file tokens with relevant dependency observations; snapshots bind the selected context and parents.
+
+## Local Git helper boundary
+
+`src/git_reports.rs` provides `read_verified_commits(repository, worktree, branch, commits) -> store::Result<Vec<ObservedCommit>>` with one shared deadline/output budget across execution preflight and commit reads. `ObservedCommit` contains canonical Git common-dir `repository` identity, actual canonical `worktree`, full 40/64-hex `sha`, `author`, UTC `authored_at`, `subject`, retained original `message`, parsed `summary`, `checks`, `gaps`, `followups`. The helper owns read-only bounded Git/parsing; core owns locking, validation, target history and dedup by repository+full SHA. At most eight explicit 7..64-hex selectors; total deadline five seconds; message 8 KiB, summary 1024 bytes, existing eight-item/check/text limits. Retain imported source/messages after Git history changes; refuse capacity rather than silently prune.
+
+Message sections: required `Result:`, optional `Checks:` (`status | label | detail` lines), `Gaps:`, `Followups:`. These are reported assertions, not certificate proof. Multiple commits merge their Result summaries in input order and current check labels use the later imported report; source observations remain distinct and duplicates have no additional history effect. Task source and completion authority remain separate.
+
+## Verification and delivery
+
+Focused tests cover new workflow and legacy records, contracts versus waits, roster freeze/reopen, declared startup, local Task authority, every Atomic review, review-before-delivery, integration freshness, imports/dedup/restart/stale tokens, unknown ownership and partial publication. Real stdio tests use isolated temporary roots. Explicitly export/check tools after coherent code. Root runs `cargo xtask check` from this worktree with its own target, then owns the coherent local commit. No push, release, install, real/demo data mutation or revived Linear workflow.
+
+## Observed local evidence
+
+Core implementation compiles clean through Agent IDE. Seven new focused lifecycle/contract/Atomic/delivery/integration/import/legacy/uncertainty tests passed; the combined core regression run passed 33 tests. Expanded closed-operation schema/serde shape check passed. Actual directory-sync and publication/allocator recovery regressions from the preceding core remain exercised, and retained Git observations are read without rescanning the source. Worker evidence reports nine native Git-helper tests and seven real SDK/stdio flows passed, including SHA-256 repositories, strict commit object selectors, shared deadline/output budget, no automatic Task closure, cold persistence and independent Atomic review. Root owns the final full gate and coherent local commit.
+
+Parent cancellation and unrelated unknown ownership do not alter unchanged intrinsic child review/delivery. They still block new starts/writes/acceptance decisions where current authority or requirements cannot be established. Pure dependency removal can recover healthy owner records without pretending an incomplete global graph was verified. Duplicate imports retain their exact source history and never refresh integration evidence.
+
+## Verified local outcome — 2026-10-06
+
+The complete workspace gate passed: `cargo xtask check` ran structural checks, formatter, all-target Clippy with warnings denied, 106 tests, rustdoc and frozen product build. Counts: 44 product unit tests (including nine local Git cases), seven real work SDK/stdio cases, five transport cases, nine delivery cases, 26 presentation cases and 15 xtask cases. An explicit final `cargo xtask contract check` passed after export.
+
+Both canonical role skills passed skill-creator validation. Independent source and skill-scenario review accepted the corrected lifecycle, legacy/applicability, Atomic review, complete integration roster and read-only bounded Git import. Tests used disposable documentation/Git roots; no real/demo data, release, installed binary or host service was changed. These checks do not extend release/host qualification or certify power-loss durability.

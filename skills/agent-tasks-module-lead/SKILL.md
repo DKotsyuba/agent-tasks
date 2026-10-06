@@ -1,137 +1,76 @@
 ---
 name: agent-tasks-module-lead
-description: "Implement one assigned Module using the portable agent-tasks MCP: recover its context, work through Tasks, report outcomes/checks/artifacts, maintain blockers and handoffs, and return corrections for independent whole-Module review. Use for a Module assignment or lead resumption; not for coordinating other Modules or reviewing your own implementation."
+description: "Implement one assigned portable Module with a persistent lead: load its assignment, execute Tasks, import meaningful results once, maintain blockers/handoffs and return corrections for independent acceptance. Not for project coordination or self-review."
 ---
 
-# Lead one portable Module
+# Lead one Module
 
-## Your assignment and the tracker
+Your assignment is a project alias, Module reference and permitted checkout. Obtain the work through `get_context(project,ref=M-001)` rather than requiring a second full delegation brief. One persistent lead owns the Module through Tasks, helpers and review corrections.
 
-Your entry point is a **project alias + Module reference**, for example
-`project="product", ref="M-001"`, plus the assigned implementation checkout.
-One persistent lead owns one Module. Read the stored assignment instead of
-requiring the orchestrator to repeat it in a launch prompt.
+Every business call uses the alias. Keep stored content English; MCP generates references/dates/activity. Source/docstrings own implementation; tracked reports own intent/results; Git retains committed history. Follow the repository's coding/testing/Git rules. The MCP does not run your tests or authenticate declared identity.
 
-agent-tasks preserves intent, current results, check reports, blockers,
-handoffs and independent Module reviews. Project metadata and each Module's
-embedded Tasks and Atomics use machine-managed YAML; responses are compact English text.
-Use the alias on every business call, keep tracked content English, and let
-MCP generate IDs, UTC dates and activity. Do not edit generated fields manually.
+## Recover the actual assignment
 
-Code/docstrings describe implementation; tracked reports describe outcomes;
-Git holds committed history. The MCP does not run tests, agents or Git for
-ordinary work, and does not verify artifact strings. Follow the assigned
-repository's implementation, testing and Git instructions. Keep useful technical
-Markdown alongside the project code without duplicating it into task narration.
+Read outcome/criteria, parent intent, provides/consumes obligations, dependency waits, execution `{repository,worktree,branch,target_branch}`, start conditions, current reports/review and owning Module Version. Parent criteria are background; explicit requirements/check labels belong to their owner and are not automatically inherited.
 
-The model is **Project → Epic or standalone Module/Atomic; Epic → Module/Atomic; Module → Task/Atomic**. Your Module remains one file. Its Tasks and Atomics have no individual review. Markdown/document search and document-writing tools remain unavailable. Tiny fixes may
-need no tracked record; do not manufacture tracking work outside your assignment.
+Use the tasks view for the full child plan; results/checks/review for addressed evidence/corrections. Summary may omit details. Contracts describe who supplies/uses which behavior; they do not automatically make every neighbor a prerequisite. Report missing/conflicting obligations or scope to the orchestrator rather than silently designing neighbor internals.
 
-## Enter and choose the next action
+New workflow Modules use `record_work begin` after conditions hold. It records reported start, not runtime permission or an agent launch. Your checkout/tool access comes from the actual launch configuration. Legacy absent/unmanaged-workflow records retain previous semantics until explicit begin opts in; use actual live descriptions and returned conditions.
 
-1. Call `get_context(project=<alias>, ref=<Module>)` for the outcome, parent intent/criteria, lead,
-   derived phase, blockers/handoff, remaining acceptance conditions and Version.
-2. Read `get_context` with `view="tasks"` for the actual child work list. Summary is
-   not a complete Task list. Read a Task's `results` or `checks` when needed;
-   Module results show previews. Use `view="review"` for correction findings.
-3. Continue the next meaningful Task or Module outcome in the assigned checkout.
-   Surface an unclear criterion or missing dependency to the orchestrator rather
-   than silently expanding scope. Use `search` only to locate tracked work whose
-   reference is unknown; it is lexical, not Markdown or source-code search.
+## Execute and decide Task completion
 
-| What happened | MCP action |
-|---|---|
-| Implemented a meaningful result | `record_work op=result`; summary, actual checks, useful artifacts and remaining gaps/follow-ups |
-| Finished a Task or Module Atomic | Same call with its Task/Atomic ref and explicit `state="done"`; omitted state preserves its old state |
-| Need a plan correction | Agreed `plan_work op=edit_task/add_task/edit_atomic/add_atomic/edit_module` with the owning Module Version |
-| Cannot proceed | Module `record_work op=blocker` with problem, needed_action and known resolver |
-| Stopping or transferring work | Module `record_work op=handoff` with stopping_point and next_action |
-| Obstacle or handoff resolved | `clear_blocker` / `clear_handoff` with a reason |
-| Need to resume canceled/unfinished work | Reasoned `reopen` on the same target; canceled parents must be reopened first |
-| Need to report Module progress | `project_status(project, module=<Module>)`; counts and last reports, not live runtime state |
+Implement the next coherent Task in your assigned scope. The lead verifies it locally with tests OR manual verification and decides when finished. There is NO independent Task review; do not invent one or treat runtime succeeded/commit/import as an automatic completion event.
 
-## Report once, preserve the evidence
+For code, write the meaningful outcome once in the commit message, including real observed checks and known gaps/followups:
 
-Write the substance: what changed, actual check outcomes, unresolved problems
-and useful artifacts. Numbering, dates, phase calculation and recent activity
-are MCP's work. Do not duplicate a result into a development log or restate
-every routine tool call.
+```text
+fix(storage): preserve the current file on stale writes
 
-A result is a **complete replacement** of the current report, not an append
-or partial patch. Omitted checks/artifacts/gaps/followups become empty. Supply
-every current item you need to retain. A Task marked done needs a meaningful
-result, but done alone does not prove the Module's required checks passed.
-Report passed/failed/not_run/not_applicable honestly; do not substitute
-not_applicable for an explicit required check.
+Result:
+Stale replacement refuses without overwriting the current record.
 
-Record Module-level checks or cross-Task outcomes at the Module ref, omitting
-`state`. Do not copy all Task summaries into a second Module summary: status
-already shows their outcomes. A Module with no done Task needs its own report
-to establish delivery evidence.
+Checks:
+passed | stale write | cargo test core_store_stale
+passed | manual check | Inspected the refusal and recovery text
 
-Example `record_work` after using the actual Task ref and owning Module Version:
+Gaps:
 
-```json
-{
-  "project": "product",
-  "op": "result",
-  "ref": "M-001/T-001",
-  "version": "COPY_THE_RETURNED_MODULE_VERSION",
-  "actor": "Storage lead",
-  "state": "done",
-  "summary": "Documentation resolves correctly after directory relocation",
-  "checks": [{"label": "relocation", "status": "passed", "detail": "Moved the test directory and read its context through both aliases"}],
-  "artifacts": ["A real commit or report reference when available"]
-}
+Followups:
 ```
 
-Use actual evidence; omit an unavailable artifact instead of saving the example
-text. A Task receipt's phase is the owning **Module phase**, not the Task state.
+Use Result: and optional Checks:/Gaps:/Followups:. Check status is explicit; missing/not_run is not passed. Import one/multiple actual local commits with `record_work op=import_commits`, child ref, current owning Version, commits and your declared actor. Source messages/identity remain retained; repeated canonical repository+SHA does not duplicate history. Do not rewrite the same summary manually.
 
-## Hand off the whole Module
+Import alone preserves state. Once YOU judge the Task complete, explicitly use state=done on that import/result or `record_work op=complete` on its current meaningful report. Manual verification is valid when appropriate; report what was actually checked, without inventing command output or a new test run. Follow source-repository commit instructions; report-source and Task closure authority are different facts.
 
-Use remaining acceptance conditions to find open Tasks, blockers, in-scope gaps
-or missing required checks. Once the tracked outcome is ready, hand the
-orchestrator the project alias, Module reference, implementation artifact
-locations and any relevant limitations. The tracker supplies the plan and
-recorded evidence, so a duplicate assignment/report is unnecessary.
+Noncode work can use ordinary `record_work result` with summary/checks/artifacts/gaps/followups. A result is COMPLETE replacement, not a patch: include every current check/artifact that still matters. Required Module acceptance checks remain requirements even when a Task is locally done. not_applicable never waives an explicitly required check.
 
-Do not review your own implementation or invent a reviewer identity. The
-independent reviewer uses `review_module` for the whole Module; there is no
-individual Task/Atomic review and no manual Module status setter. An accepted current review
-directly yields the accepted phase. There is no hidden PR/merge gate; follow
-the actual repository's integration requirements and planned checks separately.
+## Embedded Atomics, obstacles and corrections
 
-For changes_requested, read the retained review, correct the named findings,
-update current evidence and return the same Module for another review. Reopen a
-Task with a reason if its completion is no longer true. Semantic changes make
-old approval historical; a handoff alone does not. Module cancellation cannot
-cascade through open Tasks or Module Atomics; ask the orchestrator to resolve the remaining scope.
+Module Atomics use `M-001/A-001` and remain in the same file. After the Module begins, explicitly report begin at the Atomic ref before importing or recording its local outcome/completion. `add_atomic` requires title/outcome; executor/checks may be declared. Its meaningful result/local done is separate from independent review. Every current Atomic, including Module-owned, goes to an independent reviewer through the orchestrator. Do not review your own work or disguise it as a Task to bypass its policy.
 
-## Stay within the returned versions
+| Situation | Record |
+|---|---|
+| Plan needs an agreed correction | Partial edit_task/edit_atomic/edit_module under Module Version |
+| Cannot proceed | blocker with problem/needed_action/resolver |
+| Stop or transfer | handoff with stopping_point/next_action |
+| Resolved obstacle/handoff | clear with reason |
+| Resume canceled/invalid work | Explicit reopen with reason; parent must allow it |
+| Current cross-Task outcome/check | Module result, no manual accepted-state setter |
 
-All Task/Module/embedded Atomic writes use the **owning Module Version**, including planning,
-reports, blocker/handoff and review. Task writes share one file, so a helper's
-write can stale yours. Serialize writes within your Module; use helpers for
-bounded implementation work without competing tracker writes.
+Cancellation does not cascade. Semantic changes/reopen stale approval and invalidate reported delivery/integration applicability. Handoff alone does not change implementation. Keep the same Module identity and report actual corrections; do not duplicate work just to continue.
 
-Chain the new Version from a confirmed receipt for the next write to the same
-Module. Refresh context when another actor changed it. Snapshot version and
-next offsets are for read continuation only; preserve the selected ref/view
-and review_index. Keep data/detail coverage warnings when reporting progress.
+## Submit the whole Module
 
-On stale refusal, reconcile fresh context before writing again. On lost,
-partial or uncertain outcomes, inspect context/results/log/review before retrying.
-Do not replay a mutation just because its prose could not be rendered. Normal
-work writes remain uncommitted; any Git action belongs to the repository's
-authorized workflow.
+Check current acceptance conditions: terminal Tasks, reviewed Atomics, meaningful delivery evidence, explicit checks passed, no blocker/gaps. Task progress is not whole-Module acceptance. Return implementation artifacts/limitations to the orchestrator; it obtains an independent whole-Module review, using review_module or review_work. Do not supply a fabricated reviewer identity.
 
-## Parent context and Module Atomics
+For changes requested, read retained findings, fix the named scope, update evidence and return the same Module. Follow-up review covers changed code/findings. Do not rerun unchanged broad suites solely for a new date, but preserve mandatory project gates and test real changed behavior.
 
-Read returned Epic title/outcome/criteria as assignment background. Required checks are explicit on their owner; parent check labels do not silently add per-Task/Module requirements. If the parent changes the intended assignment, coordinate the actual Module plan with the orchestrator.
+After implementation approval, the orchestrator handles any authorized actual delivery/merge and records `deliver` into target_branch. A local merge is sufficient; PR is optional. MCP does not merge itself. Matching delivery bookkeeping needs no second unchanged-code review. Source/Git/installation publication still follows actual user/repository authority.
 
-Use `add_atomic(module, title, outcome, required_checks?, executor?, version)` for an independently trackable outcome within the Module. Its reference is `M-001/A-001`; `edit_atomic(ref, ...)` partially edits its plan. `record_work result` uses that reference and the whole Module Version. Supply actual summary/checks/artifacts/gaps and state=done when complete. Whole-Module review covers this work; do not invent an Atomic reviewer or duplicate its result into the Module report.
+An Epic/Project integration Atomic can name your Module. Actual composition is checked after participating Modules are accepted/delivered; reopening/relevant changes stale previous integration. Coordinate renewed evidence with the orchestrator. Verification without code changes needs no invented commit.
 
-Standalone `A-001` and Epic `E-001` records are outside your assigned Module. Their allocation, membership and whole-Epic coordination belong to the orchestrator unless explicitly assigned. A Project/Epic integration Atomic can reference your Module as a participant; semantic changes or a new Module review may invalidate its recorded verification and the Epic approval. Tell the orchestrator when the changed interface requires renewed integration evidence, without manufacturing a commit for verification alone.
+## Versions and unknown outcomes
 
-Canceled Epic parents block Module/child writes. Parent cancellation never cascades. Recover current conditions and coordinate explicit parent reopen before continuing. Preserve stale-acceptance and partial-coverage facts in reports; unknown work is not zero.
+All Task/Module/embedded Atomic writes use owning Module Version. Helpers may stale it; serialize tracker writes within the Module and use helpers for bounded source work. Chain confirmed receipt Version; refresh after other actors or before a new decision. Snapshot version is read pagination only; keep selection/review index unchanged.
+
+On stale/busy refusal reconcile returned context. After lost/partial/unknown writes inspect current result/log/review/source inventory before retrying. Do not replay a mutation to repair presentation. Preserve unknown/partial coverage in your report; handles and last activity are not live-process proof.
