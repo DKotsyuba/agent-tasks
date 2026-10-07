@@ -1,7 +1,9 @@
 //! Purpose-based work tools: guarded planning, current evidence, whole-record review and bounded retrieval.
 use super::input::{self, Common, Completion, Plan, ReviewArgs, ReviewWorkArgs, TaskInput, Work};
+use super::{compaction_ops, document_ops, knowledge_ops, recovery_ops};
 use crate::{
     model::*,
+    persist,
     response::Templates,
     store::{self, Config, Error, LockGuard, Result, Snapshot, Store},
 };
@@ -46,10 +48,6 @@ const MAX_REF_BYTES: usize = 256;
 ///
 /// The presenter chooses from this kind and never from a target string or a template name that a
 /// producer or a user supplied.
-#[allow(
-    dead_code,
-    reason = "Producer dispatch constructs the remaining kinds when the producer modules land"
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ToolKind {
     /// `plan_work`, `record_work`, `review_work` and `review_module`.
@@ -164,6 +162,8 @@ struct Failure<'a> {
     message: String,
     /// Immutable execution ledger, retained even if normal rendering fails.
     effects: &'a [String],
+    /// Plain Git receipt lines of this call, present when a failure happened after publishing.
+    git: &'a [String],
     /// Distinguish setup-only effects from visibly published work.
     published: bool,
     /// Tool-specific inspection route; registration may not have published an alias yet.
@@ -180,6 +180,19 @@ struct Saved<'a> {
     git: &'a [String],
     /// The single read route this reply recommends, built from the tool kind and target.
     next: String,
+}
+
+/// What one mutating call published and what Git said about it.
+///
+/// Kept outside the result so a failure after publication still reports both: `published` comes
+/// from the typed publications of the request, never from effect strings, and `git` holds the
+/// persistence receipt lines of this call only.
+#[derive(Default)]
+struct Ledger {
+    /// The request published at least one typed effect (a directory counts).
+    published: bool,
+    /// Plain receipt lines of the current call; earlier commits appear as their own line.
+    git: Vec<String>,
 }
 
 /// Closed text layouts preserve execution effects, scope labels and exact continuation tokens.
@@ -203,7 +216,7 @@ pub fn templates() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "core_error",
-            "ERROR {{ code }}: {{ message }}\n{% if published %}Visible publication occurred; outcome/durability may be partial.\n{% else %}No business publication confirmed by this call.\n{% endif %}{% for effect in effects %}{{ effect }}\n{% endfor %}Next: {{ recovery }}\n",
+            "ERROR {{ code }}: {{ message }}\n{% if published %}Visible publication occurred; outcome/durability may be partial.\n{% else %}No business publication confirmed by this call.\n{% endif %}{% for effect in effects %}{{ effect }}\n{% endfor %}{% for line in git %}{{ line }}\n{% endfor %}Next: {{ recovery }}\n",
         ),
     ]
 }
@@ -226,12 +239,17 @@ pub fn call(
         "record_work",
         "review_module",
         "review_work",
+        "knowledge_work",
+        "document_work",
+        "compaction_work",
+        "git_recovery",
     ]
     .contains(&name)
     {
         return None;
     }
     let mut effects = Vec::new();
+    let mut ledger = Ledger::default();
     let result = (|| -> Result<String> {
         match name {
             "register_project" => {
@@ -249,26 +267,54 @@ pub fn call(
                     input::mutation::<Plan>(args, false).map_err(arguments)?;
                 validate_common(&common)?;
                 let prepare = matches!(operation, Plan::InitProject { .. });
-                let ack =
-                    mutation_scope(config, &common.project, prepare, &mut effects, |s, g, e| {
-                        plan(s, g, &common, operation, e)
-                    })?;
-                Ok(render_ack(templates, ToolKind::Work, &ack, &effects, &[]))
+                let ack = mutation_scope(
+                    config,
+                    &common.project,
+                    persist::EventClass::Work,
+                    prepare,
+                    &mut effects,
+                    &mut ledger,
+                    |s, g, e| plan(s, g, &common, operation, e),
+                )?;
+                Ok(render_ack(
+                    templates,
+                    ToolKind::Work,
+                    &ack,
+                    &effects,
+                    &ledger.git,
+                ))
             }
             "record_work" => {
                 let (common, operation) = input::mutation::<Work>(args, true).map_err(arguments)?;
                 validate_common(&common)?;
-                let ack =
-                    mutation_scope(config, &common.project, false, &mut effects, |s, g, e| {
-                        record(s, g, &common, operation, e)
-                    })?;
-                Ok(render_ack(templates, ToolKind::Work, &ack, &effects, &[]))
+                let ack = mutation_scope(
+                    config,
+                    &common.project,
+                    persist::EventClass::Work,
+                    false,
+                    &mut effects,
+                    &mut ledger,
+                    |s, g, e| record(s, g, &common, operation, e),
+                )?;
+                Ok(render_ack(
+                    templates,
+                    ToolKind::Work,
+                    &ack,
+                    &effects,
+                    &ledger.git,
+                ))
             }
             "review_module" => {
                 let args: ReviewArgs = decode_args(args)?;
                 number(&args.module, "M-").map_err(arguments)?;
-                let ack = review_call(config, args, &mut effects)?;
-                Ok(render_ack(templates, ToolKind::Work, &ack, &effects, &[]))
+                let ack = review_call(config, args, &mut effects, &mut ledger)?;
+                Ok(render_ack(
+                    templates,
+                    ToolKind::Work,
+                    &ack,
+                    &effects,
+                    &ledger.git,
+                ))
             }
             "review_work" => {
                 let a: ReviewWorkArgs = decode_args(args)?;
@@ -284,8 +330,101 @@ pub fn call(
                     changed_scope: a.changed_scope,
                     resolved_findings: a.resolved_findings,
                 };
-                let ack = review_call(config, args, &mut effects)?;
-                Ok(render_ack(templates, ToolKind::Work, &ack, &effects, &[]))
+                let ack = review_call(config, args, &mut effects, &mut ledger)?;
+                Ok(render_ack(
+                    templates,
+                    ToolKind::Work,
+                    &ack,
+                    &effects,
+                    &ledger.git,
+                ))
+            }
+            "knowledge_work" => {
+                let (common, operation) =
+                    input::mutation::<knowledge_ops::KnowledgeOp>(args, false)
+                        .map_err(arguments)?;
+                validate_common(&common)?;
+                let ack = mutation_scope(
+                    config,
+                    &common.project,
+                    persist::EventClass::Knowledge,
+                    false,
+                    &mut effects,
+                    &mut ledger,
+                    |s, g, e| knowledge_ops::execute_locked(s, g, &common, operation, e),
+                )?;
+                Ok(render_ack(
+                    templates,
+                    ToolKind::Knowledge,
+                    &ack,
+                    &effects,
+                    &ledger.git,
+                ))
+            }
+            "document_work" => {
+                let (common, operation) =
+                    input::mutation::<document_ops::DocumentOp>(args, false).map_err(arguments)?;
+                validate_common(&common)?;
+                let ack = mutation_scope(
+                    config,
+                    &common.project,
+                    persist::EventClass::Document,
+                    false,
+                    &mut effects,
+                    &mut ledger,
+                    |s, g, e| document_ops::execute_locked(s, g, &common, operation, e),
+                )?;
+                Ok(render_ack(
+                    templates,
+                    ToolKind::Document,
+                    &ack,
+                    &effects,
+                    &ledger.git,
+                ))
+            }
+            "compaction_work" => {
+                let (common, operation) =
+                    input::mutation::<compaction_ops::Compaction>(args, false)
+                        .map_err(arguments)?;
+                validate_common(&common)?;
+                let class = operation.event_class();
+                let ack = mutation_scope(
+                    config,
+                    &common.project,
+                    class,
+                    false,
+                    &mut effects,
+                    &mut ledger,
+                    |s, g, e| compaction_ops::execute_locked(s, g, &common, operation, e),
+                )?;
+                Ok(render_ack(
+                    templates,
+                    ToolKind::Compaction,
+                    &ack,
+                    &effects,
+                    &ledger.git,
+                ))
+            }
+            "git_recovery" => {
+                let (common, operation) =
+                    input::mutation::<recovery_ops::RecoveryOp>(args, false).map_err(arguments)?;
+                validate_common(&common)?;
+                let ack = mutation_scope(
+                    config,
+                    &common.project,
+                    recovery_ops::event_class(),
+                    false,
+                    &mut effects,
+                    &mut ledger,
+                    |s, g, e| recovery_ops::execute_locked(s, g, &common, operation, e),
+                )?;
+                Ok(render_ack(
+                    templates,
+                    ToolKind::GitRecovery,
+                    &ack,
+                    &effects,
+                    &ledger.git,
+                ))
             }
             _ => Err(arguments("Unknown business tool.")),
         }
@@ -297,7 +436,8 @@ pub fn call(
                 code: e.code,
                 message: store::safe(&e.message, 600),
                 effects: &effects,
-                published: effects.iter().any(|e| e.starts_with("Published ")),
+                git: &ledger.git,
+                published: ledger.published || effects.iter().any(|e| e.starts_with("Published ")),
                 recovery: match name {
                     "register_project" => {
                         "Inspect the requested documentation root and get_project_list; the alias may be unpublished. Resolve the cause before repeating the same intent."
@@ -319,23 +459,38 @@ pub fn call(
     Some(reply)
 }
 
-/// The one place a mutating call resolves its project and takes the single root write lock.
+/// The one place a mutating call resolves its project, takes the single root write lock and
+/// settles Git before releasing it.
 ///
 /// The alias is resolved, `prepare_first` creates the state directory before locking (only
 /// `init_project` needs it), the write lock is taken exactly once, and `body` runs while the
-/// guard is held. The guard drops when the scope returns, so nothing inside `body` may lock
-/// again. Business code, errors and replies of the hoisted handlers are unchanged.
+/// guard is held. Settlement happens under that same guard, from the actual typed publications of
+/// this request and never from the `changed` flag alone:
+///
+/// - `Ok` with `changed = true` settles as `Success`.
+/// - `Ok` with `changed = false` and no eligible file publication is a real no-op: nothing is
+///   settled and no Git line is added.
+/// - `Ok` with `changed = false` but an eligible file publication settles as `Partial`, so the
+///   effect is tracked and reported, never committed as a success and never dropped.
+/// - `Err` after any publication settles as `Partial`; the business error is returned unchanged.
+/// - `Err` before any publication is not settled.
+///
+/// The provider's plain receipt lines are appended to `git`; settlement never changes the
+/// business result and a Git failure never fails a saved change. The guard drops when the scope
+/// returns, so nothing inside `body` may lock again.
 ///
 /// # Errors
 /// Alias, preparation and lock failures (`busy` when another writer owns the lock) and every
 /// error `body` returns, unchanged.
-fn mutation_scope<T>(
+fn mutation_scope(
     config: &Config,
     project: &str,
+    class: persist::EventClass,
     prepare_first: bool,
     effects: &mut Vec<String>,
-    body: impl FnOnce(&Store, &LockGuard, &mut Vec<String>) -> Result<T>,
-) -> Result<T> {
+    ledger: &mut Ledger,
+    body: impl FnOnce(&Store, &LockGuard, &mut Vec<String>) -> Result<Ack>,
+) -> Result<Ack> {
     let store = config.resolve(project)?;
     if prepare_first {
         store.prepare(effects)?;
@@ -343,14 +498,61 @@ fn mutation_scope<T>(
     let guard = store
         .lock(true, effects)?
         .ok_or_else(|| Error::new("io", "Cannot take the writer lock."))?;
-    body(&store, &guard, effects)
+    let mut result = body(&store, &guard, effects);
+    let events = store.publications();
+    ledger.published = !events.is_empty();
+    let file_effect = events.iter().any(|p| {
+        matches!(
+            p.kind,
+            store::EffectKind::Created | store::EffectKind::Replaced | store::EffectKind::Removed
+        ) && p.tracking != store::Tracking::NotApplicable
+    });
+    let outcome = match &result {
+        Ok(ack) if ack.changed => Some(persist::EventOutcome::Success),
+        Ok(_) if file_effect => Some(persist::EventOutcome::Partial),
+        Ok(_) => None,
+        Err(_) if !events.is_empty() => Some(persist::EventOutcome::Partial),
+        Err(_) => None,
+    };
+    // Recovery settles itself through its own receipt; ordinary settlement never re-enters the
+    // engine that just acted (or failed).
+    if class != persist::EventClass::Recovery
+        && let Some(outcome) = outcome
+    {
+        let refs = match &result {
+            Ok(ack) if is_canonical_ref(&ack.target) => vec![ack.target.clone()],
+            _ => Vec::new(),
+        };
+        let event = persist::Event {
+            class,
+            refs,
+            operation: None,
+            outcome,
+        };
+        ledger
+            .git
+            .extend(persist::settle(&store, &guard, &event, persist::production_policy()).lines());
+        if let Ok(ack) = &mut result
+            && !ack.changed
+        {
+            ack.notes.push(
+                "Files were published although the result is unchanged; see the Git line.".into(),
+            );
+        }
+    }
+    result
 }
 
 /// Validate and run one whole-record review inside the shared mutation scope.
 ///
 /// Request validation happens before the alias is resolved or any lock is taken, exactly as the
 /// review always did.
-fn review_call(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Result<Ack> {
+fn review_call(
+    config: &Config,
+    args: ReviewArgs,
+    effects: &mut Vec<String>,
+    ledger: &mut Ledger,
+) -> Result<Ack> {
     validate_common(&Common {
         project: args.project.clone(),
         version: args.version.clone(),
@@ -358,9 +560,15 @@ fn review_call(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> 
         reference: None,
     })?;
     let project = args.project.clone();
-    mutation_scope(config, &project, false, effects, |s, g, e| {
-        review(s, g, args, e)
-    })
+    mutation_scope(
+        config,
+        &project,
+        persist::EventClass::Work,
+        false,
+        effects,
+        ledger,
+        |s, g, e| review(s, g, args, e),
+    )
 }
 
 /// Closed serde argument decoding; parser source values never enter diagnostics.

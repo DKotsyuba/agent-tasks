@@ -7,7 +7,10 @@ mod knowledge_ops;
 mod pages;
 mod projects;
 mod read;
+mod records;
 mod recovery_ops;
+#[cfg(test)]
+mod settle_tests;
 mod work;
 use crate::{response::Templates, store::Config};
 use mcp_presentation::Renderer;
@@ -40,6 +43,33 @@ pub fn definitions() -> Vec<Value> {
             schema::<input::ReviewWorkArgs>(),false),
         definition("review_module","Purpose: Compatible Module-only review surface; review_work also handles Epic/Atomic. Same candidate/contract/control/actual persistent reviewer rules in core mode. Initial review is whole; later changed scope resolves stable zero-based prior findings through same reviewer or explicitly recovered replacement.\nPositive core Module is ready for integration without delivery; managed1/unmanaged absent-core files preserve their old closure policy until adopt_core. Task has no review. Delivery/handoff/contact metadata alone is not implementation drift.\nInputs project/module/version/verdict/summary, actor, findings/checks, changed_scope/resolved_findings. Output saved owning Version/phase/effects; retained review readable by context. No runtime or Git write. Inspect stale/lost/partial/unknown outcomes before another mutation.",
             schema::<input::ReviewArgs>(),false),
+    ]);
+    // One purpose tool per producer; each closed payload enum shares `input::Common`.
+    result.extend([
+        definition(
+            "knowledge_work",
+            knowledge_ops::DESCRIPTION,
+            input::mutation_schema::<knowledge_ops::KnowledgeOp>(false),
+            false,
+        ),
+        definition(
+            "document_work",
+            document_ops::DESCRIPTION,
+            input::mutation_schema::<document_ops::DocumentOp>(false),
+            false,
+        ),
+        definition(
+            "compaction_work",
+            compaction_ops::DESCRIPTION,
+            input::mutation_schema::<compaction_ops::Compaction>(false),
+            false,
+        ),
+        definition(
+            "git_recovery",
+            recovery_ops::DESCRIPTION,
+            input::mutation_schema::<recovery_ops::RecoveryOp>(false),
+            false,
+        ),
     ]);
     result
 }
@@ -93,6 +123,10 @@ pub fn incomplete() -> Vec<&'static str> {
         ("plan_work", true),
         ("record_work", true),
         ("review_module", true),
+        ("knowledge_work", true),
+        ("document_work", true),
+        ("compaction_work", true),
+        ("git_recovery", true),
         // xtask:readiness
     ];
     statuses

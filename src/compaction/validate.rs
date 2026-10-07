@@ -327,6 +327,12 @@ pub fn build(env: &dyn Env, input: &ProposalIn) -> Result<Built> {
                     if a.content.is_none() {
                         return Err(named("actions.content", "replace needs candidate content"));
                     }
+                    if a.content.as_deref().map(str::as_bytes) == doc.body.as_deref() {
+                        return Err(named(
+                            "actions.content",
+                            "replace content equals the current document; nothing would change",
+                        ));
+                    }
                     if doc.state == DocState::Unmanaged && a.purpose.is_none() {
                         return Err(named(
                             "actions.purpose",

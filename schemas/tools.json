@@ -161,6 +161,21 @@
               "const": "integration",
               "description": "Current ready connected components, candidate/contract coverage and gaps.",
               "type": "string"
+            },
+            {
+              "const": "content",
+              "description": "Documents only: exact framed pages of the whole document or of one selected part.",
+              "type": "string"
+            },
+            {
+              "const": "history",
+              "description": "Decisions, Runbooks and Research only: retained revisions and Runbook uses.",
+              "type": "string"
+            },
+            {
+              "const": "references",
+              "description": "Typed records, Checklists, documents and compaction proposals: outgoing and incoming references.",
+              "type": "string"
             }
           ]
         }
@@ -169,12 +184,57 @@
       "additionalProperties": false,
       "description": "Read one Project/Epic/Module/Task/Atomic scope with snapshot-bound pagination.",
       "properties": {
+        "heading": {
+          "description": "Document `view=content` only: case-sensitive heading text of the part to read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "level": {
+          "description": "Only with `heading`: heading level 1 to 6.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "limit": {
           "default": 20,
-          "description": "Maximum displayed items, 1–20; default 20.",
+          "description": "Maximum displayed rows, 1–20; default 20. Optional so absence and supply stay\ndistinguishable: a supplied limit is refused for document `view=content`, whose page\nsize is fixed by the reply budget.",
           "format": "uint",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "occurrence": {
+          "description": "Only with `heading`: one-based occurrence among headings with identical text.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ordinal": {
+          "description": "Document `view=content` only: zero-based heading ordinal of the part to read.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "preamble": {
+          "description": "Document `view=content` only: true selects the preamble before the first heading.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "project": {
           "description": "Configured project alias; not a path or a global current project.",
@@ -265,10 +325,62 @@
     },
     "description": "Purpose: Find relevant tracked work before opening its context.\nInput: project alias and query containing 1-8 whitespace-separated words, at most 256 UTF-8 bytes. Optional module=M-001 restricts the scope.\nMatching: Unicode lowercase substring search across semantic fields. Every term must match somewhere in that target; different terms may match different fields. It is not regex, fuzzy, semantic, source-code or Markdown-document search. Rank by matching-field count, then numeric reference.\nOutput: references, titles, matching-field labels, bounded excerpts, match count and explicit data/detail coverage. An excerpt is a preview, not the complete report or proof that the whole repository was searched.\nOpen Epic/Module/Task/Atomic hits with get_context ref=<reference>. A Project hit is opened with get_context(project=...) and OMITTED ref; current rendering shows Project as its label, not a legal ref.\nPages: start defaults 0; limit defaults 20, range 1-20. Continue using Snapshot version and returned Next start, preserving project/query/module. Changed data/selection refuses rather than skipping.\nEffects: read only; no write token, repair, global scan or external query. Requires initialized project context.",
     "inputSchema": {
+      "$defs": {
+        "SearchKind": {
+          "description": "One source a lexical search can cover.",
+          "oneOf": [
+            {
+              "const": "work",
+              "description": "Tracked work records: Project, Epics, Modules, Atomics and Tasks.",
+              "type": "string"
+            },
+            {
+              "const": "knowledge",
+              "description": "Typed Decisions, Runbooks, Research and procedural Checklists.",
+              "type": "string"
+            },
+            {
+              "const": "document",
+              "description": "Managed and unmanaged Markdown documents.",
+              "type": "string"
+            }
+          ]
+        },
+        "StateFilter": {
+          "description": "Which currentness a search keeps.",
+          "oneOf": [
+            {
+              "const": "current",
+              "description": "Current records and documents only.",
+              "type": "string"
+            },
+            {
+              "const": "superseded",
+              "description": "Superseded records and retired documents only.",
+              "type": "string"
+            },
+            {
+              "const": "any",
+              "description": "Everything, with the state shown.",
+              "type": "string"
+            }
+          ]
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "description": "Bounded lexical work search over semantic fields, with exact continuation.",
       "properties": {
+        "kinds": {
+          "description": "Sources to search: one to three distinct of work, knowledge, document; default all\nthree, or work only when `module` is supplied and `kinds` is omitted.",
+          "items": {
+            "$ref": "#/$defs/SearchKind"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "limit": {
           "default": 20,
           "description": "Maximum displayed matches, 1–20; default 20.",
@@ -297,6 +409,17 @@
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Currentness filter: current, superseded or any; default any, with the state shown on every row."
         },
         "version": {
           "description": "Previous result's exact snapshot, required for a nonzero start.",
@@ -3029,5 +3152,2603 @@
       "type": "object"
     },
     "name": "review_module"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Purpose: Create, edit, supersede and use typed project knowledge: Decisions, Runbooks, Research and procedural Checklists.\nInput: project alias, version and one closed op. The version is the knowledge allocation version printed by project context for create operations and the record version for every other operation. Optional actor is the declared identity and stays unknown when omitted.\nOperations: create_decision, create_runbook, create_research, create_checklist, edit_decision, edit_runbook, edit_research, supersede, use_runbook, add_items, resolve_item, complete_checklist, cancel_checklist, reopen_checklist. Edits replace whole fields, omitted fields are kept, null is refused. A changed definition raises the revision and keeps the previous content. Supersede names an existing current record of the same kind. A runbook use records the used revision, the real environment and evidence (a check, an artifact or an observation) and never changes the definition. A checklist item is resolved with a completion fact or a cancellation reason; a checklist completes only when every item is resolved and at least one is done.\nEffects: identifiers, revisions and dates are generated. Records are saved under decisions, runbooks, research and checklists. A create also advances the tracked knowledge allocator. History is never dropped unless its bytes are proven in a committed object. Output: target, new version and actual state. No Git is run here.",
+    "inputSchema": {
+      "$defs": {
+        "Alternative": {
+          "additionalProperties": false,
+          "description": "One rejected alternative of a decision.",
+          "properties": {
+            "option": {
+              "description": "The option considered, at most 256 bytes.",
+              "type": "string"
+            },
+            "rejected_because": {
+              "description": "Why it was not adopted, at most 1024 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "option",
+            "rejected_because"
+          ],
+          "type": "object"
+        },
+        "Basis": {
+          "description": "Basis of a research conclusion or evidence entry.",
+          "oneOf": [
+            {
+              "const": "measured",
+              "description": "Directly measured by the author.",
+              "type": "string"
+            },
+            {
+              "const": "cited",
+              "description": "Reported by a cited source.",
+              "type": "string"
+            },
+            {
+              "const": "inferred",
+              "description": "Inferred without direct measurement or citation.",
+              "type": "string"
+            }
+          ]
+        },
+        "CheckStatus": {
+          "description": "Explicit check report; absence is not a success.",
+          "oneOf": [
+            {
+              "const": "passed",
+              "description": "Reported check succeeded.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "Reported check failed.",
+              "type": "string"
+            },
+            {
+              "const": "not_run",
+              "description": "Check has not been executed.",
+              "type": "string"
+            },
+            {
+              "const": "not_applicable",
+              "description": "Check is reported inapplicable; this does not waive a required check.",
+              "type": "string"
+            }
+          ]
+        },
+        "Conclusion": {
+          "additionalProperties": false,
+          "description": "One stated conclusion.",
+          "properties": {
+            "basis": {
+              "$ref": "#/$defs/Basis",
+              "description": "How it is known."
+            },
+            "statement": {
+              "description": "The conclusion, at most 1024 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "statement",
+            "basis"
+          ],
+          "type": "object"
+        },
+        "Evidence": {
+          "additionalProperties": false,
+          "description": "One supporting claim with its source.",
+          "properties": {
+            "basis": {
+              "$ref": "#/$defs/Basis",
+              "description": "How it is known."
+            },
+            "claim": {
+              "description": "The claim, at most 512 bytes.",
+              "type": "string"
+            },
+            "source": {
+              "description": "Where it comes from, at most 256 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "claim",
+            "source",
+            "basis"
+          ],
+          "type": "object"
+        },
+        "ItemState": {
+          "description": "State of one checklist item.",
+          "oneOf": [
+            {
+              "const": "open",
+              "description": "Not yet resolved.",
+              "type": "string"
+            },
+            {
+              "const": "done",
+              "description": "Completed with a recorded fact.",
+              "type": "string"
+            },
+            {
+              "const": "canceled",
+              "description": "Skipped or abandoned with a recorded reason; never counts as done.",
+              "type": "string"
+            }
+          ]
+        },
+        "OpenQuestion": {
+          "additionalProperties": false,
+          "description": "A question the decision leaves open.",
+          "properties": {
+            "needs_owner": {
+              "description": "Whether the project owner must answer it.",
+              "type": "boolean"
+            },
+            "text": {
+              "description": "The open question, at most 512 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "needs_owner"
+          ],
+          "type": "object"
+        },
+        "RunbookInput": {
+          "additionalProperties": false,
+          "description": "A named runbook input.",
+          "properties": {
+            "description": {
+              "description": "What the input means, at most 512 bytes.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Lowercase `[a-z0-9_]` name of at most 64 bytes, unique within the runbook.",
+              "type": "string"
+            },
+            "required": {
+              "description": "Whether the runbook cannot run without it.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "description",
+            "required"
+          ],
+          "type": "object"
+        },
+        "Step": {
+          "additionalProperties": false,
+          "description": "One ordered runbook step; reading it never executes anything.",
+          "properties": {
+            "command": {
+              "description": "Optional command text, at most 1024 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": {
+              "description": "What the step does, at most 1024 bytes.",
+              "type": "string"
+            },
+            "expected": {
+              "description": "The expected outcome, at most 512 bytes.",
+              "type": "string"
+            },
+            "recovery": {
+              "description": "Optional recovery guidance, at most 512 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "description": "Step title, at most 128 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "description",
+            "expected"
+          ],
+          "type": "object"
+        },
+        "UseCheck": {
+          "additionalProperties": false,
+          "description": "One reported check of a runbook use.",
+          "properties": {
+            "detail": {
+              "description": "Optional detail, at most 256 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "description": "Check label, at most 64 bytes.",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/CheckStatus",
+              "description": "Explicit reported status."
+            }
+          },
+          "required": [
+            "label",
+            "status"
+          ],
+          "type": "object"
+        },
+        "UseOutcome": {
+          "description": "Reported outcome of one runbook use.",
+          "oneOf": [
+            {
+              "const": "succeeded",
+              "description": "The runbook achieved its purpose.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "The runbook did not achieve its purpose.",
+              "type": "string"
+            },
+            {
+              "const": "partial",
+              "description": "Some steps worked and the purpose was only partly achieved.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Closed knowledge operations; unknown operations and fields are refused.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Create a Decision at revision 1.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "alternatives": {
+              "default": [],
+              "description": "Up to eight rejected alternatives.",
+              "items": {
+                "$ref": "#/$defs/Alternative"
+              },
+              "type": "array"
+            },
+            "decision": {
+              "description": "The adopted statement, at most 2048 bytes.",
+              "type": "string"
+            },
+            "detail": {
+              "default": null,
+              "description": "Optional managed-document reference.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "create_decision",
+              "type": "string"
+            },
+            "open_questions": {
+              "default": [],
+              "description": "Up to eight open questions.",
+              "items": {
+                "$ref": "#/$defs/OpenQuestion"
+              },
+              "type": "array"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "question": {
+              "description": "The question decided, at most 1024 bytes.",
+              "type": "string"
+            },
+            "rationale": {
+              "description": "Rationale, at most 4096 bytes.",
+              "type": "string"
+            },
+            "title": {
+              "description": "Short title, at most 256 bytes.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "title",
+            "question",
+            "decision",
+            "rationale",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Create a Runbook at revision 1.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "default": null,
+              "description": "Optional managed-document reference.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inputs": {
+              "default": [],
+              "description": "Up to eight named inputs.",
+              "items": {
+                "$ref": "#/$defs/RunbookInput"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "create_runbook",
+              "type": "string"
+            },
+            "pitfalls": {
+              "default": [],
+              "description": "Up to eight pitfalls.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "prerequisites": {
+              "default": [],
+              "description": "Up to eight prerequisites.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "purpose": {
+              "description": "Purpose, at most 1024 bytes.",
+              "type": "string"
+            },
+            "steps": {
+              "description": "One to thirty-two ordered steps.",
+              "items": {
+                "$ref": "#/$defs/Step"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Short title, at most 256 bytes.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "title",
+            "purpose",
+            "steps",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Create a Research record at revision 1.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "applicability": {
+              "description": "Where the findings apply, at most 512 bytes.",
+              "type": "string"
+            },
+            "conclusions": {
+              "description": "One to eight conclusions.",
+              "items": {
+                "$ref": "#/$defs/Conclusion"
+              },
+              "type": "array"
+            },
+            "detail": {
+              "default": null,
+              "description": "Optional managed-document reference.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "default": [],
+              "description": "Up to eight evidence entries.",
+              "items": {
+                "$ref": "#/$defs/Evidence"
+              },
+              "type": "array"
+            },
+            "limitations": {
+              "default": [],
+              "description": "Up to eight limitations.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "create_research",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "question": {
+              "description": "The researched question, at most 1024 bytes.",
+              "type": "string"
+            },
+            "title": {
+              "description": "Short title, at most 256 bytes.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "title",
+            "question",
+            "conclusions",
+            "applicability",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Create an open procedural Checklist.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "items": {
+              "description": "One to thirty-two item texts; identifiers are generated.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "create_checklist",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "purpose": {
+              "description": "Purpose, at most 1024 bytes.",
+              "type": "string"
+            },
+            "title": {
+              "description": "Short title, at most 256 bytes.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "title",
+            "purpose",
+            "items",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Edit a Decision; omitted fields are kept and a changed definition raises the revision.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "alternatives": {
+              "default": null,
+              "description": "Replacement alternatives.",
+              "items": {
+                "$ref": "#/$defs/Alternative"
+              },
+              "type": "array"
+            },
+            "decision": {
+              "default": null,
+              "description": "New adopted statement.",
+              "type": "string"
+            },
+            "detail": {
+              "default": null,
+              "description": "New managed-document reference.",
+              "type": "string"
+            },
+            "op": {
+              "const": "edit_decision",
+              "type": "string"
+            },
+            "open_questions": {
+              "default": null,
+              "description": "Replacement open questions.",
+              "items": {
+                "$ref": "#/$defs/OpenQuestion"
+              },
+              "type": "array"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "question": {
+              "default": null,
+              "description": "New question.",
+              "type": "string"
+            },
+            "rationale": {
+              "default": null,
+              "description": "New rationale.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Target `D-001`.",
+              "type": "string"
+            },
+            "title": {
+              "default": null,
+              "description": "New title.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Edit a Runbook; omitted fields are kept and a changed definition raises the revision.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "default": null,
+              "description": "New managed-document reference.",
+              "type": "string"
+            },
+            "inputs": {
+              "default": null,
+              "description": "Replacement inputs.",
+              "items": {
+                "$ref": "#/$defs/RunbookInput"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "edit_runbook",
+              "type": "string"
+            },
+            "pitfalls": {
+              "default": null,
+              "description": "Replacement pitfalls.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "prerequisites": {
+              "default": null,
+              "description": "Replacement prerequisites.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "purpose": {
+              "default": null,
+              "description": "New purpose.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Target `RB-001`.",
+              "type": "string"
+            },
+            "steps": {
+              "default": null,
+              "description": "Replacement steps.",
+              "items": {
+                "$ref": "#/$defs/Step"
+              },
+              "type": "array"
+            },
+            "title": {
+              "default": null,
+              "description": "New title.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Edit a Research record; omitted fields are kept and a changed definition raises the revision.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "applicability": {
+              "default": null,
+              "description": "New applicability.",
+              "type": "string"
+            },
+            "conclusions": {
+              "default": null,
+              "description": "Replacement conclusions.",
+              "items": {
+                "$ref": "#/$defs/Conclusion"
+              },
+              "type": "array"
+            },
+            "detail": {
+              "default": null,
+              "description": "New managed-document reference.",
+              "type": "string"
+            },
+            "evidence": {
+              "default": null,
+              "description": "Replacement evidence.",
+              "items": {
+                "$ref": "#/$defs/Evidence"
+              },
+              "type": "array"
+            },
+            "limitations": {
+              "default": null,
+              "description": "Replacement limitations.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "edit_research",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "question": {
+              "default": null,
+              "description": "New question.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Target `RS-001`.",
+              "type": "string"
+            },
+            "title": {
+              "default": null,
+              "description": "New title.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Mark a record superseded by an existing current record of the same kind.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "supersede",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Predecessor, for example `D-001`.",
+              "type": "string"
+            },
+            "successor": {
+              "description": "Successor of the same kind, for example `D-002`.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "successor",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Record an actual use of one runbook revision; never changes the definition.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "artifacts": {
+              "default": [],
+              "description": "Up to eight artifact references.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "checks": {
+              "default": [],
+              "description": "Up to eight reported checks.",
+              "items": {
+                "$ref": "#/$defs/UseCheck"
+              },
+              "type": "array"
+            },
+            "environment": {
+              "description": "Real environment of the use, at most 256 bytes.",
+              "type": "string"
+            },
+            "observation": {
+              "default": null,
+              "description": "Optional manual observation, at most 1024 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "use_runbook",
+              "type": "string"
+            },
+            "outcome": {
+              "$ref": "#/$defs/UseOutcome",
+              "description": "Reported outcome."
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Target `RB-001`.",
+              "type": "string"
+            },
+            "revision": {
+              "description": "The definition revision that was used.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            },
+            "work": {
+              "default": null,
+              "description": "Optional canonical work reference the use belongs to.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "revision",
+            "outcome",
+            "environment",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Append open items to an open checklist.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "items": {
+              "description": "Item texts.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "add_items",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Target `CL-001`.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "items",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Resolve one open item with a completion fact or a cancellation reason.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "item": {
+              "description": "Item identifier such as `I-001`.",
+              "type": "string"
+            },
+            "op": {
+              "const": "resolve_item",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Target `CL-001`.",
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/ItemState",
+              "description": "`done` or `canceled`."
+            },
+            "text": {
+              "description": "The completion fact or cancellation reason, at most 512 bytes.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "item",
+            "state",
+            "text",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Complete a checklist whose items are all resolved with at least one done.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "complete_checklist",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Target `CL-001`.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Cancel a checklist with a reason.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "cancel_checklist",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "The reason, at most 512 bytes.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Target `CL-001`.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "reason",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Reopen a completed or canceled checklist with a reason.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "reopen_checklist",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "The reason, at most 512 bytes.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Target `CL-001`.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "reason",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "KnowledgeOp",
+      "type": "object"
+    },
+    "name": "knowledge_work"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Purpose: Save, edit, adopt, remove and move managed Markdown documents under docs/ and the root README.md with guarded versions. Read them with get_context using a path or DOC id.\nInput: project, version and a closed op. version is the Version that get_context prints for the document; an absent path has one too, so creating needs the absent version. save: ref (docs path or DOC id), purpose (one line, required when a record is created), body (the exact new document). replace_section: ref, section (exactly one of preamble true, ordinal, or heading with optional level and occurrence), body (the new section body; the heading line is kept). adopt: ref, purpose; records the current bytes without rewriting them. remove: ref; removes the file and retires its record. relocate: ref, to (absent docs path), to_version (the absent version of to). body is a JSON string; set wire to escaped to send a backslash, carriage return or control character as the escapes backslash backslash, backslash r and backslash u with braces.\nEffects: only managed files and DOC records change; untouched bytes, BOM and line endings are preserved; a stale version saves nothing. A partial failure reports what was saved and the one recovery step; it never rolls back or retries. Names are ASCII, at most three folders deep.",
+    "inputSchema": {
+      "$defs": {
+        "BodyWire": {
+          "description": "How the `body` string encodes document bytes.",
+          "oneOf": [
+            {
+              "const": "raw",
+              "description": "The string is the document text as is.",
+              "type": "string"
+            },
+            {
+              "const": "escaped",
+              "description": "The string uses the `md-text-v1` escapes for backslash, carriage return and control characters.",
+              "type": "string"
+            }
+          ]
+        },
+        "SectionArg": {
+          "additionalProperties": false,
+          "description": "Which section of a document an edit addresses: exactly one of the three ways.",
+          "properties": {
+            "heading": {
+              "description": "Exact heading text.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "level": {
+              "description": "Heading level to match, 1 to 6, with `heading`.",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "occurrence": {
+              "description": "One-based occurrence among identical heading text, with `heading`.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "ordinal": {
+              "description": "Zero-based heading ordinal in document order.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "preamble": {
+              "description": "True to address the bytes before the first heading.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Closed operations of the document tool.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Create or replace the whole body.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "description": "The exact new document text.",
+              "type": "string"
+            },
+            "op": {
+              "const": "save",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "purpose": {
+              "description": "One-line purpose; required when a record is created.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ref": {
+              "description": "Docs path or DOC identifier.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            },
+            "wire": {
+              "$ref": "#/$defs/BodyWire",
+              "description": "Encoding of `body`."
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "body",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Replace the body of one section or the preamble; the heading line is kept.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "description": "The exact new section body.",
+              "type": "string"
+            },
+            "op": {
+              "const": "replace_section",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Docs path or DOC identifier.",
+              "type": "string"
+            },
+            "section": {
+              "$ref": "#/$defs/SectionArg",
+              "description": "The section to replace."
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            },
+            "wire": {
+              "$ref": "#/$defs/BodyWire",
+              "description": "Encoding of `body`."
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "section",
+            "body",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Record the current bytes without rewriting them.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "adopt",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "purpose": {
+              "description": "One-line purpose; required when a record is created.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ref": {
+              "description": "Docs path or DOC identifier.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Remove the file and retire its record.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "remove",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Docs path or DOC identifier.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Move the document to an absent path, keeping its identity.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "relocate",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Docs path or DOC identifier of the source.",
+              "type": "string"
+            },
+            "to": {
+              "description": "The absent destination path.",
+              "type": "string"
+            },
+            "to_version": {
+              "description": "The absent version of `to`.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "to",
+            "to_version",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "DocumentOp",
+      "type": "object"
+    },
+    "name": "document_work"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Purpose: Propose, review and apply a compaction of Markdown documents under independent review. An external actor prepares the proposal; the MCP validates it, stores every full revision and review, and applies it only after acceptance. Input: project, version, actor and one operation. propose and revise take sources with the observation version you read, actions create, replace, move and remove with candidate content, a ledger that accounts for every original section, and preservation items. review needs the exact revision and content hash and a verdict for every item. recover_reviewer replaces a reviewer only after observed unrecoverable loss. apply runs create, move and replace, verifies, then removes, and resumes after interruption. withdraw ends a proposal. Version is the knowledge allocation version for propose and the proposal record version for every other operation. Effects: tracked files under compactions and the document changes of an accepted proposal. Never launches a model, never deletes on its own, never rolls back; originals must already be committed in Git. Output: acknowledgement with state, applied actions and any stop reason.",
+    "inputSchema": {
+      "$defs": {
+        "ActionInPayload": {
+          "additionalProperties": false,
+          "description": "One proposed document action.",
+          "properties": {
+            "absorbed_into": {
+              "description": "Where the content of a removed document now lives.",
+              "items": {
+                "$ref": "#/$defs/TargetRefIn"
+              },
+              "type": "array"
+            },
+            "base_version": {
+              "description": "Optional assertion of the preimage version.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content": {
+              "description": "Candidate body text for create and replace.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "from": {
+              "description": "Move source path.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "description": "Identifier `A-01` to `A-32`, unique in the proposal.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/ActionKindIn",
+              "description": "Kind of action."
+            },
+            "path": {
+              "description": "Target path; for a move the destination.",
+              "type": "string"
+            },
+            "purpose": {
+              "description": "Purpose when a new document record will be created, at most 240 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "description": "Why the action belongs to the compaction, at most 512 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "path",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "ActionKindIn": {
+          "description": "Kind of document action.",
+          "oneOf": [
+            {
+              "const": "create",
+              "description": "Create at an absent path.",
+              "type": "string"
+            },
+            {
+              "const": "replace",
+              "description": "Replace a whole body.",
+              "type": "string"
+            },
+            {
+              "const": "move",
+              "description": "Move to an absent destination.",
+              "type": "string"
+            },
+            {
+              "const": "remove",
+              "description": "Remove a document.",
+              "type": "string"
+            }
+          ]
+        },
+        "DispositionIn": {
+          "description": "What happens to one original section.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "The exact section bytes appear in the named action's candidate.",
+              "properties": {
+                "action": {
+                  "description": "Action id.",
+                  "type": "string"
+                },
+                "fate": {
+                  "const": "kept",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fate",
+                "action"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "The section moves with the named Move action.",
+              "properties": {
+                "action": {
+                  "description": "Move action id.",
+                  "type": "string"
+                },
+                "fate": {
+                  "const": "moved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fate",
+                "action"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "The content is rewritten into the target.",
+              "properties": {
+                "fate": {
+                  "const": "merged",
+                  "type": "string"
+                },
+                "target": {
+                  "$ref": "#/$defs/TargetRefIn",
+                  "description": "Where the rewritten content lives."
+                }
+              },
+              "required": [
+                "fate",
+                "target"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "The content is dropped with a reason.",
+              "properties": {
+                "fate": {
+                  "const": "dropped",
+                  "type": "string"
+                },
+                "kind": {
+                  "$ref": "#/$defs/DropKindIn",
+                  "description": "Reason class."
+                },
+                "reason": {
+                  "description": "Reason, at most 512 bytes.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fate",
+                "kind",
+                "reason"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "DropKindIn": {
+          "description": "Reason class for dropping a section.",
+          "oneOf": [
+            {
+              "const": "duplicate",
+              "description": "Equivalent content is retained elsewhere.",
+              "type": "string"
+            },
+            {
+              "const": "obsolete",
+              "description": "No longer true or relevant.",
+              "type": "string"
+            },
+            {
+              "const": "superseded",
+              "description": "Superseded by another retained section.",
+              "type": "string"
+            }
+          ]
+        },
+        "Finding": {
+          "additionalProperties": false,
+          "description": "Reviewer finding; required corrections cannot accompany acceptance.",
+          "properties": {
+            "must_fix": {
+              "description": "True for an in-scope correction required before acceptance.",
+              "type": "boolean"
+            },
+            "text": {
+              "description": "Actionable finding, at most 256 UTF-8 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "must_fix"
+          ],
+          "type": "object"
+        },
+        "FindingResolution": {
+          "additionalProperties": false,
+          "description": "Stable retained finding address and independent resolution.",
+          "properties": {
+            "finding_index": {
+              "description": "Finding index in the immutable review.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "review_index": {
+              "description": "Retained review index.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "summary": {
+              "description": "Verified fix/disproof, at most 512 bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_index",
+            "finding_index",
+            "summary"
+          ],
+          "type": "object"
+        },
+        "PreservationInPayload": {
+          "additionalProperties": false,
+          "description": "One claimed preservation of a requirement, rationale or link.",
+          "properties": {
+            "id": {
+              "description": "Identifier `P-01` to `P-64`.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/PreserveKindIn",
+              "description": "Kind of fact."
+            },
+            "mode": {
+              "$ref": "#/$defs/PreserveModeIn",
+              "description": "Verification mode."
+            },
+            "path": {
+              "description": "Source path.",
+              "type": "string"
+            },
+            "section": {
+              "$ref": "#/$defs/SectionAddrIn",
+              "description": "Source section."
+            },
+            "statement": {
+              "description": "Statement, at most 256 bytes.",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetRefIn",
+              "description": "Where the fact now lives."
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "path",
+            "section",
+            "statement",
+            "target",
+            "mode"
+          ],
+          "type": "object"
+        },
+        "PreserveKindIn": {
+          "description": "Kind of preserved fact.",
+          "oneOf": [
+            {
+              "const": "requirement",
+              "description": "A business requirement.",
+              "type": "string"
+            },
+            {
+              "const": "rationale",
+              "description": "Durable rationale.",
+              "type": "string"
+            },
+            {
+              "const": "link",
+              "description": "A link.",
+              "type": "string"
+            },
+            {
+              "const": "decision",
+              "description": "A decision.",
+              "type": "string"
+            },
+            {
+              "const": "constraint",
+              "description": "A constraint.",
+              "type": "string"
+            }
+          ]
+        },
+        "PreserveModeIn": {
+          "description": "How a preserved fact reaches its target.",
+          "oneOf": [
+            {
+              "const": "verbatim",
+              "description": "Exact bytes, checked mechanically.",
+              "type": "string"
+            },
+            {
+              "const": "rewritten",
+              "description": "Rewritten, accepted by reviewer verdict.",
+              "type": "string"
+            }
+          ]
+        },
+        "RecoveryStage": {
+          "description": "Explicit role recovery stage; no runtime polling or automatic replacement.",
+          "oneOf": [
+            {
+              "const": "lost",
+              "description": "Original actor is lost and cannot continue or resume.",
+              "type": "string"
+            },
+            {
+              "const": "immersed",
+              "description": "Replacement reconstructs context; gaps still block use.",
+              "type": "string"
+            }
+          ]
+        },
+        "SectionAddrIn": {
+          "description": "Address of one section of an exact document body.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "Bytes before the first heading.",
+              "properties": {
+                "at": {
+                  "const": "preamble",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "at"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "One real heading of the observed bytes.",
+              "properties": {
+                "at": {
+                  "const": "heading",
+                  "type": "string"
+                },
+                "level": {
+                  "description": "Heading level, 1 to 6.",
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "occurrence": {
+                  "description": "One based occurrence among headings with identical text.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "ordinal": {
+                  "description": "Zero based document order ordinal.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "text_sha256": {
+                  "description": "Hex sha256 of the raw heading text.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "at",
+                "ordinal",
+                "level",
+                "occurrence",
+                "text_sha256"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "SectionInPayload": {
+          "additionalProperties": false,
+          "description": "Disposition of one original section.",
+          "properties": {
+            "disposition": {
+              "$ref": "#/$defs/DispositionIn",
+              "description": "What happens to the section."
+            },
+            "path": {
+              "description": "Source path.",
+              "type": "string"
+            },
+            "section": {
+              "$ref": "#/$defs/SectionAddrIn",
+              "description": "Section address from the source outline."
+            }
+          },
+          "required": [
+            "path",
+            "section",
+            "disposition"
+          ],
+          "type": "object"
+        },
+        "SourceInPayload": {
+          "additionalProperties": false,
+          "description": "One source document with the observation version the proposer read.",
+          "properties": {
+            "path": {
+              "description": "Managed document path.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Observation version read, which must still be current.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "version"
+          ],
+          "type": "object"
+        },
+        "TargetRefIn": {
+          "additionalProperties": false,
+          "description": "A document, optionally narrowed to one section.",
+          "properties": {
+            "path": {
+              "description": "Managed document path.",
+              "type": "string"
+            },
+            "section": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SectionAddrIn"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Section address; absent addresses the whole document."
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "Verdict": {
+          "description": "Independent whole-Epic/Module review verdict; leaves have no separate verdict.",
+          "oneOf": [
+            {
+              "const": "accepted",
+              "description": "Current evidence satisfies the module's explicit acceptance conditions.",
+              "type": "string"
+            },
+            {
+              "const": "changes_requested",
+              "description": "The same module needs more work.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The closed `compaction_work` operation set.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Create a proposal; `version` is the knowledge allocation version.",
+          "properties": {
+            "actions": {
+              "description": "Actions, at most 32.",
+              "items": {
+                "$ref": "#/$defs/ActionInPayload"
+              },
+              "type": "array"
+            },
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "propose",
+              "type": "string"
+            },
+            "preservation": {
+              "description": "Preservation items, at most 64.",
+              "items": {
+                "$ref": "#/$defs/PreservationInPayload"
+              },
+              "type": "array"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "request_key": {
+              "description": "Idempotency key, 8 to 64 characters of letters, digits, dot, underscore or dash.",
+              "type": "string"
+            },
+            "sections": {
+              "description": "Ledger accounting for every original section.",
+              "items": {
+                "$ref": "#/$defs/SectionInPayload"
+              },
+              "type": "array"
+            },
+            "sources": {
+              "description": "Source documents.",
+              "items": {
+                "$ref": "#/$defs/SourceInPayload"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Title, at most 128 bytes.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "request_key",
+            "title",
+            "sources",
+            "actions",
+            "sections",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Append a new full revision; every earlier revision and review is retained.",
+          "properties": {
+            "actions": {
+              "description": "Actions, at most 32.",
+              "items": {
+                "$ref": "#/$defs/ActionInPayload"
+              },
+              "type": "array"
+            },
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cp": {
+              "description": "Proposal identifier.",
+              "type": "string"
+            },
+            "op": {
+              "const": "revise",
+              "type": "string"
+            },
+            "preservation": {
+              "description": "Preservation items, at most 64.",
+              "items": {
+                "$ref": "#/$defs/PreservationInPayload"
+              },
+              "type": "array"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "sections": {
+              "description": "Ledger accounting for every original section.",
+              "items": {
+                "$ref": "#/$defs/SectionInPayload"
+              },
+              "type": "array"
+            },
+            "sources": {
+              "description": "Source documents.",
+              "items": {
+                "$ref": "#/$defs/SourceInPayload"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Title, at most 128 bytes.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "cp",
+            "title",
+            "sources",
+            "actions",
+            "sections",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Record the independent review of the current revision.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_hash": {
+              "description": "Content hash of that revision.",
+              "type": "string"
+            },
+            "cp": {
+              "description": "Proposal identifier.",
+              "type": "string"
+            },
+            "findings": {
+              "default": [],
+              "description": "Findings of this review.",
+              "items": {
+                "$ref": "#/$defs/Finding"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "review",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "resolved_findings": {
+              "default": [],
+              "description": "Resolutions of earlier findings by zero based review and finding index.",
+              "items": {
+                "$ref": "#/$defs/FindingResolution"
+              },
+              "type": "array"
+            },
+            "revision": {
+              "description": "Revision reviewed.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "summary": {
+              "description": "Summary, at most 512 bytes.",
+              "type": "string"
+            },
+            "verdict": {
+              "$ref": "#/$defs/Verdict",
+              "description": "accepted or changes_requested."
+            },
+            "verified_items": {
+              "default": [],
+              "description": "Every verified item for an acceptance.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "cp",
+            "revision",
+            "content_hash",
+            "verdict",
+            "summary",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Replace the pinned reviewer only after observed unrecoverable loss.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cp": {
+              "description": "Proposal identifier.",
+              "type": "string"
+            },
+            "gaps": {
+              "default": [],
+              "description": "Unresolved gaps; any gap blocks review.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "lost": {
+              "description": "True for the lost stage.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "observation": {
+              "description": "Observation of the inability to continue or resume.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "recover_reviewer",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "sources": {
+              "default": [],
+              "description": "Sources the replacement read.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "stage": {
+              "$ref": "#/$defs/RecoveryStage",
+              "description": "lost reports the loss, immersed restores a replacement's context."
+            },
+            "understanding": {
+              "description": "Replacement's understanding, at most 512 bytes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unfinished": {
+              "default": [],
+              "description": "Unfinished items inherited.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "unrecoverable": {
+              "description": "True for the lost stage.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "cp",
+            "stage",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Apply an accepted proposal, or resume an interrupted one.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cp": {
+              "description": "Proposal identifier.",
+              "type": "string"
+            },
+            "op": {
+              "const": "apply",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "cp",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Withdraw a proposal; a started application needs abandon_partial.",
+          "properties": {
+            "abandon_partial": {
+              "default": false,
+              "description": "Required to abandon a proposal that already started applying.",
+              "type": "boolean"
+            },
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cp": {
+              "description": "Proposal identifier.",
+              "type": "string"
+            },
+            "op": {
+              "const": "withdraw",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Reason, at most 512 bytes.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "cp",
+            "reason",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "Compaction",
+      "type": "object"
+    },
+    "name": "compaction_work"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Purpose: Exceptional explicit recovery of pending local Git work after a deferred, held, unknown or drifted automatic commit. The normal commit path is automatic after each successful mutation; never call this as a checkpoint.\nInput: common project and version, where version is the pending snapshot version shown by context or status (stale otherwise, nothing changes). op is one of: reconcile and retry, adopt, release with intents (1-16 identities PG-<24 hex>); preserve with paths (1-32 {relative, sha256, len}). reconcile resolves unknown or committing intents from HEAD, commit trailers and files. retry commits the named published or held intents together; for a held intent this is the explicit authorization to commit exactly the recorded bytes. adopt treats an unknown intent whose file bytes match as published, never a drifted one. release stops tracking without committing and leaves files untouched. preserve commits exactly the authorized byte identities.\nEffects: local Git commits only through a temporary index with user hooks and signing; foreign staging is preserved; no push, fetch or business replay. Failures are stale, invalid_arguments, not_locked, recovery_blocked or preserve_blocked with nothing committed.\nOutput: acknowledgement with the recovery receipt, at most two change lines and the remaining pending references.",
+    "inputSchema": {
+      "$defs": {
+        "PreservePathIn": {
+          "additionalProperties": false,
+          "description": "One file the caller authorizes to be committed with exactly these bytes.",
+          "properties": {
+            "len": {
+              "description": "Length of the authorized bytes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "relative": {
+              "description": "Owned relative path of the file.",
+              "type": "string"
+            },
+            "sha256": {
+              "description": "Lowercase SHA-256 of the authorized bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "relative",
+            "sha256",
+            "len"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Closed wire payload; `version` of the common fields carries the pending snapshot version.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Resolve unknown and committing intents from HEAD, trailers and the files; read-only for Git.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "intents": {
+              "description": "Up to sixteen pending intent identities (`PG-` plus 24 hex characters).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "reconcile",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "intents",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Commit the named published or held intents together without a policy decision.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "intents": {
+              "description": "Up to sixteen pending intent identities.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "retry",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "intents",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Treat the named unknown intents with matching bytes as published, after explicit authorization.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "intents": {
+              "description": "Up to sixteen pending intent identities.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "adopt",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "intents",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Stop tracking the named intents without committing; files are left untouched.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "intents": {
+              "description": "Up to sixteen pending intent identities.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "release",
+              "type": "string"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "intents",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Commit exactly the authorized bytes of the named files.",
+          "properties": {
+            "actor": {
+              "description": "Declared identity; omitted/null remains unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "preserve",
+              "type": "string"
+            },
+            "paths": {
+              "description": "Up to thirty-two files with their exact byte identity.",
+              "items": {
+                "$ref": "#/$defs/PreservePathIn"
+              },
+              "type": "array"
+            },
+            "project": {
+              "description": "Configured project alias, not a filesystem path.",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact manifest/module or allocation version returned by get_context.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "paths",
+            "project",
+            "version"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "RecoveryOp",
+      "type": "object"
+    },
+    "name": "git_recovery"
   }
 ]

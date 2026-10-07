@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
 
 /// One disposable portable root and lazy configuration; no installed state is touched.
-struct Host {
+pub(super) struct Host {
     /// Keeps the temporary directory alive through the assertions.
     _directory: tempfile::TempDir,
     /// Configured documentation root, initially absent.
@@ -26,7 +26,7 @@ struct Host {
 
 impl Host {
     /// Build alias `alpha` for a root that does not exist yet.
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("docs");
         let config_path = directory.path().join("config.toml");
@@ -48,8 +48,13 @@ impl Host {
         }
     }
 
+    /// Resolve a test-owned path beneath the disposable fixture directory.
+    pub(super) fn path(&self, relative: &str) -> PathBuf {
+        self._directory.path().join(relative)
+    }
+
     /// Run one real tool call and return its text, asserting the error flag and the budget.
-    async fn call(&self, name: &str, args: Value, error: bool) -> String {
+    pub(super) async fn call(&self, name: &str, args: Value, error: bool) -> String {
         let reply = super::call(name, args, &self.identity, &self.templates, &self.config)
             .await
             .unwrap();
@@ -61,7 +66,7 @@ impl Host {
     }
 
     /// Read one labeled exact precondition from compact text.
-    fn field(text: &str, label: &str) -> String {
+    pub(super) fn field(text: &str, label: &str) -> String {
         text.lines()
             .find_map(|line| line.strip_prefix(label))
             .expect(text)
@@ -85,7 +90,7 @@ impl Host {
     }
 
     /// Create the project, one Epic with two Modules and one standalone Atomic.
-    async fn populate(&self) {
+    pub(super) async fn populate(&self) {
         let version = self.allocation().await;
         self.call(
             "plan_work",

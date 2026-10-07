@@ -22,7 +22,7 @@ pub mod env;
 pub mod gate;
 /// The closed nested compactions inventory and the record scan.
 pub mod inventory;
-/// The live adapter over the real store and persistence provider.
+/// The live adapter over the real document, reference, knowledge, store and persistence providers.
 pub mod live;
 /// Proposal lifecycle operations: propose, revise, review, reviewer recovery and withdraw.
 pub mod ops;
@@ -35,10 +35,12 @@ pub mod review;
 /// Proposal validation, ledger accounting, incoming coverage and acceptance digests.
 pub mod validate;
 
+/// Module controls against the faithful provider substitute.
+#[cfg(test)]
+mod composed_tests;
 /// Faithful test substitute of the provider facts behind the adapter; module evidence only.
 #[cfg(test)]
 pub(crate) mod fake;
-/// Module controls against the faithful provider substitute.
 #[cfg(test)]
 mod tests;
 

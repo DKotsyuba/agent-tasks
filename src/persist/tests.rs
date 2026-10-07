@@ -562,15 +562,27 @@ fn a_signing_failure_defers_without_touching_the_index() {
 #[test]
 fn a_timeout_is_unknown_and_reconciles_without_a_duplicate_commit() {
     let f = GitFixture::new();
-    hook(&f, "pre-commit", "sleep 30");
+    // The hook leaves a marker inside .git before it blocks, so the test proves the deadline expired
+    // while the commit command was alive rather than assuming the clock was quick enough.
+    hook(&f, "pre-commit", "touch .git/hook-started; sleep 60");
     let (store, guard) = call(&f);
     create(&store, "doc.md", b"mine");
+    let budget = std::time::Duration::from_secs(10);
+    let started = std::time::Instant::now();
     let receipt = super::engine::settle_by(
         &store,
         &guard,
         &success(),
         production_policy(),
-        std::time::Instant::now() + std::time::Duration::from_secs(3),
+        started + budget,
+    );
+    assert!(
+        f.dir.path().join(".git/hook-started").exists(),
+        "the budget expired before the commit hook ran; the machine is too loaded for this proof"
+    );
+    assert!(
+        started.elapsed() >= budget,
+        "the outcome was decided before the deadline"
     );
     assert_eq!(receipt.outcome, GitOutcome::Unknown, "{receipt:?}");
     assert!(f.dir.path().join("doc.md").exists());
@@ -1057,4 +1069,261 @@ fn recovery_reconcile_resolves_a_lost_commit_reply() {
     let (j, _) = journal::load(&store).unwrap();
     assert_eq!(j.intents[0].committed.as_deref(), Some(landed.as_str()));
     assert_eq!(commits(&f), 2, "reconcile never commits again");
+}
+
+/// A required attestation that the journal cannot retain refuses before any effect.
+#[test]
+fn required_attestation_refuses_without_an_effect_when_the_journal_is_unusable() {
+    let f = GitFixture::new();
+    let (store, _guard) = call(&f);
+    let op = OperationId::new("required:one").unwrap();
+    let no_operation = store.publish_with(
+        Publish {
+            relative: "a.md",
+            bytes: b"a",
+            observed: None,
+            cap: RECORD_CAP,
+            operation: None,
+            attest: Attest::Required,
+        },
+        &mut Vec::new(),
+    );
+    assert!(no_operation.is_err());
+    assert!(!f.dir.path().join("a.md").exists());
+    std::fs::create_dir_all(f.dir.path().join(".git/agent-tasks")).unwrap();
+    std::fs::write(
+        f.dir.path().join(".git/agent-tasks/pending.yaml"),
+        b"not: [valid",
+    )
+    .unwrap();
+    let corrupt = store.publish_with(
+        Publish {
+            relative: "b.md",
+            bytes: b"b",
+            observed: None,
+            cap: RECORD_CAP,
+            operation: Some(&op),
+            attest: Attest::Required,
+        },
+        &mut Vec::new(),
+    );
+    assert_eq!(corrupt.unwrap_err().code, "attestation_unavailable");
+    assert!(
+        !f.dir.path().join("b.md").exists(),
+        "no effect without a retained entry"
+    );
+    create(&store, "c.md", b"c");
+    assert!(
+        matches!(store.publications()[0].tracking, Tracking::Untracked(_)),
+        "optional writes still succeed and say untracked"
+    );
+    assert!(f.dir.path().join("c.md").exists());
+    assert_eq!(
+        std::fs::read(f.dir.path().join(".git/agent-tasks/pending.yaml")).unwrap(),
+        b"not: [valid",
+        "corrupt evidence is left in place"
+    );
+}
+
+/// Replaying a recovery changes nothing: a committed or released intent is no longer pending.
+#[test]
+fn recovery_is_idempotent() {
+    use super::recover::{Action, recover};
+    let f = GitFixture::new();
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", b"mine");
+    let id = settle(&store, &guard, &partial(), production_policy()).pending[0]
+        .intent
+        .clone();
+    let version = super::pending_version(&store);
+    let first = recover(&store, &guard, &version, Action::Retry(vec![id.clone()])).unwrap();
+    assert_eq!(first.receipt.outcome, GitOutcome::Committed);
+    let after = commits(&f);
+    let version = super::pending_version(&store);
+    let again = recover(&store, &guard, &version, Action::Retry(vec![id.clone()]));
+    assert_eq!(again.err().unwrap().code, "recovery_blocked");
+    let release = recover(&store, &guard, &version, Action::Release(vec![id]));
+    assert_eq!(release.err().unwrap().code, "recovery_blocked");
+    assert_eq!(commits(&f), after, "a replay never commits again");
+}
+
+/// A removal is committed as a deletion of exactly the removed path.
+#[test]
+fn a_removal_commits_as_a_deletion() {
+    let f = GitFixture::new();
+    let (first, guard) = call(&f);
+    create(&first, "doc.md", b"mine");
+    commit_now(&first, &guard);
+    drop(guard);
+    let (second, guard) = call(&f);
+    second
+        .remove(
+            crate::store::Remove {
+                relative: "doc.md",
+                observed: b"mine",
+                cap: RECORD_CAP,
+                operation: None,
+                attest: Attest::Optional,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+    let receipt = commit_now(&second, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert_eq!(f.git(&["ls-files", "doc.md"]), "");
+    assert_eq!(
+        f.git(&["show", "--name-status", "--format=", "HEAD"]),
+        "D\tdoc.md"
+    );
+}
+
+/// A linked worktree or submodule (`.git` is a file) and unmerged paths are refused with their own reasons.
+#[test]
+fn linked_checkouts_and_unmerged_paths_defer() {
+    let f = GitFixture::new();
+    let linked = tempfile::tempdir().unwrap();
+    f.git(&[
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "side",
+        linked.path().join("w").to_str().unwrap(),
+    ]);
+    let store = Store::from_root(&linked.path().join("w")).unwrap();
+    store.prepare(&mut Vec::new()).unwrap();
+    let guard = store.lock(true, &mut Vec::new()).unwrap().unwrap();
+    create(&store, "doc.md", b"mine");
+    let receipt = commit_now(&store, &guard);
+    assert_eq!(
+        (receipt.outcome, receipt.reason),
+        (GitOutcome::Saved, Some(Reason::NoRepository)),
+        "a linked checkout is never journaled or committed"
+    );
+    drop(guard);
+    std::fs::write(f.dir.path().join("c.md"), "base").unwrap();
+    f.git(&["add", "--", "c.md"]);
+    f.git(&["commit", "--quiet", "-m", "fixture: c"]);
+    f.git(&["checkout", "--quiet", "-b", "other"]);
+    std::fs::write(f.dir.path().join("c.md"), "other").unwrap();
+    f.git(&["commit", "--quiet", "-am", "fixture: other"]);
+    f.git(&["checkout", "--quiet", "main"]);
+    std::fs::write(f.dir.path().join("c.md"), "main").unwrap();
+    f.git(&["commit", "--quiet", "-am", "fixture: main"]);
+    let merge = super::git::run(
+        f.dir.path(),
+        &["merge", "other"],
+        None,
+        std::time::Instant::now() + std::time::Duration::from_secs(20),
+    )
+    .unwrap();
+    assert!(!merge.success());
+    let (conflicted, guard) = call(&f);
+    create(&conflicted, "doc.md", b"mine");
+    let receipt = commit_now(&conflicted, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Deferred);
+    assert!(
+        matches!(
+            receipt.reason,
+            Some(Reason::OperationInProgress | Reason::UnmergedPaths)
+        ),
+        "{receipt:?}"
+    );
+}
+
+/// A line-ending filter makes the committed blob differ from the recorded bytes: reported, never certified.
+#[test]
+fn a_line_ending_filter_is_reported_not_certified() {
+    let f = GitFixture::new();
+    std::fs::write(f.dir.path().join(".gitattributes"), "*.txt text eol=crlf\n").unwrap();
+    f.git(&["add", "--", ".gitattributes"]);
+    f.git(&["commit", "--quiet", "-m", "fixture: attributes"]);
+    let (store, guard) = call(&f);
+    create(&store, "note.txt", b"one\ntwo\n");
+    let receipt = commit_now(&store, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert_eq!(
+        std::fs::read(f.dir.path().join("note.txt")).unwrap(),
+        b"one\ntwo\n",
+        "the file is never rewritten"
+    );
+}
+
+/// Output beyond the cap is cut and flagged, never buffered whole.
+#[test]
+fn oversized_git_output_is_capped() {
+    let f = GitFixture::new();
+    std::fs::write(f.dir.path().join("big.bin"), vec![b'x'; 2 * 1024 * 1024]).unwrap();
+    let blob = f.git(&["hash-object", "-w", "big.bin"]);
+    let out = super::git::run(
+        f.dir.path(),
+        &["cat-file", "blob", &blob],
+        None,
+        std::time::Instant::now() + std::time::Duration::from_secs(20),
+    )
+    .unwrap();
+    assert!(out.truncated && out.stdout.len() == super::git::STDOUT_CAP);
+}
+
+/// A locator that would exceed 256 bytes fails instead of truncating.
+#[test]
+fn an_over_long_locator_fails() {
+    let locator = super::locator::Locator {
+        commit: "a".repeat(40),
+        blob: "b".repeat(40),
+        relative: "d/".repeat(100),
+        sha256: digest(b"x"),
+        len: 1,
+    };
+    assert_eq!(locator.encode().unwrap_err().code, "locator_too_long");
+}
+
+/// Generated same-operation effects come back unasserted, and trailers keep the evidence after the journal is pruned.
+#[test]
+fn the_oracle_returns_generated_effects_and_survives_a_pruned_journal() {
+    let f = GitFixture::new();
+    let op = OperationId::new("oracle:generated").unwrap();
+    let (store, guard) = call(&f);
+    create_op(&store, "doc name.md", b"body", "oracle:generated");
+    store
+        .publish_with(
+            Publish {
+                relative: "meta.yaml",
+                bytes: b"generated",
+                observed: None,
+                cap: RECORD_CAP,
+                operation: Some(&op),
+                attest: Attest::Required,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+    commit_now(&store, &guard);
+    drop(guard);
+    assert!(
+        f.git(&["log", "-1", "--format=%B"])
+            .contains("doc%20name.md"),
+        "paths are percent encoded in trailers"
+    );
+    let (mut j, observed) = journal::load(&store).unwrap();
+    j.intents.clear();
+    journal::save(&store, &j, observed.as_deref()).unwrap();
+    let super::EffectStatus::Attested(receipt) =
+        super::effect_status(&store, &op, &[expect_created("doc name.md", b"body")])
+    else {
+        panic!("expected Attested from history alone");
+    };
+    assert_eq!(receipt.paths.len(), 2);
+    assert!(
+        receipt
+            .paths
+            .iter()
+            .any(|p| p.relative == "meta.yaml" && !p.asserted)
+    );
+    assert!(
+        receipt
+            .paths
+            .iter()
+            .all(|p| matches!(p.git, super::EffectGit::Committed { .. }))
+    );
 }

@@ -1112,6 +1112,12 @@ fn body_first_partial_resumes_through_the_oracle() {
         b"Intro\n## S1\none\n",
         "the body is published, its record is not"
     );
+    // The held effects must be committed by the explicit recovery before the resume writes again.
+    assert_eq!(
+        code(run_apply(&env, "CP-001")),
+        "replacements_not_committed"
+    );
+    env.retry_all();
     let out = run_apply(&env, "CP-001").unwrap();
     assert_eq!(out.state, CpState::Applied);
     assert_eq!(env.doc_for("docs/a.md").unwrap().1, 2);
@@ -1134,7 +1140,7 @@ fn equal_bytes_without_attestation_block() {
     env.inject(Inject::AfterBody);
     assert_eq!(code(run_apply(&env, "CP-001")), "partial_publication");
     // The attestation is lost; only bytes equal to the candidate remain. They certify nothing.
-    env.forget_rows("cp:CP-001:r1:A-01");
+    env.forget_rows("cp:CP-001");
     assert_eq!(
         env.body("docs/a.md").unwrap(),
         b"Intro
@@ -1931,11 +1937,11 @@ fn first_propose_commits_owned_files_and_only_untracked_siblings_defer() {
     let mut other = replace_a(&env);
     other.sources = vec![source(&env, "docs/b.md")];
     other.actions = vec![ActionIn {
-        content: Some("Bee\n## T1\nuno\n".into()),
+        content: Some("Bee\n## T1\nuno\nplus\n".into()),
         purpose: Some("b".into()),
         ..action("A-01", ActionKind::Replace, "docs/b.md")
     }];
-    other.sections = ledger(&env, "docs/b.md", Some(("A-01", "Bee\n## T1\nuno\n")));
+    other.sections = ledger(&env, "docs/b.md", Some(("A-01", "Bee\n## T1\nuno\nplus\n")));
     propose(&env, "key-0042-bb", &other).unwrap();
     assert!(
         !env.pending().is_empty(),
@@ -2008,6 +2014,11 @@ fn remove_resumes_by_retiring_the_record() {
     env.inject(Inject::AfterBody);
     assert_eq!(code(run_apply(&env, "CP-001")), "partial_publication");
     assert!(env.body("docs/a.md").is_none() && !env.doc_for("docs/a.md").unwrap().2);
+    assert_eq!(
+        code(run_apply(&env, "CP-001")),
+        "replacements_not_committed"
+    );
+    env.retry_all();
     assert_eq!(run_apply(&env, "CP-001").unwrap().state, CpState::Applied);
     assert!(env.doc_for("docs/a.md").unwrap().2, "the record is retired");
 }
@@ -2043,5 +2054,45 @@ fn external_metadata_edit_after_acceptance_blocks_the_first_apply() {
         env.body("docs/a.md").unwrap(),
         A_BODY.as_bytes(),
         "no effect ran"
+    );
+}
+
+/// A replacement whose content equals the current document changes nothing and is refused at proposal
+/// time, so it can never leave an unattested equal-bytes look-alike for the oracle to doubt.
+#[test]
+fn replace_with_identical_content_is_refused() {
+    let env = world();
+    let mut input = replace_a(&env);
+    input.actions[0].content = Some(A_BODY.into());
+    input.sections = ledger(&env, "docs/a.md", Some(("A-01", A_BODY)));
+    assert_eq!(
+        code(propose(&env, "key-0050-aa", &input)),
+        "invalid_arguments"
+    );
+}
+
+/// A held intent on paths a proposal never touches does not block it, so the barrier is scoped to the
+/// proposal's own documents, records and staged blobs.
+#[test]
+fn an_unrelated_held_intent_does_not_block_another_proposal() {
+    let env = world();
+    propose(&env, "key-0051-aa", &replace_a(&env)).unwrap();
+    accept(&env, "CP-001", "rev1").unwrap();
+    let mut other = replace_a(&env);
+    other.sources = vec![source(&env, "docs/b.md")];
+    other.actions = vec![ActionIn {
+        content: Some("Bee\n## T1\nuno\nplus\n".into()),
+        purpose: Some("b".into()),
+        ..action("A-01", ActionKind::Replace, "docs/b.md")
+    }];
+    other.sections = ledger(&env, "docs/b.md", Some(("A-01", "Bee\n## T1\nuno\nplus\n")));
+    propose(&env, "key-0052-bb", &other).unwrap();
+    accept(&env, "CP-002", "rev1").unwrap();
+    env.inject(Inject::AfterBody);
+    assert_eq!(code(run_apply(&env, "CP-002")), "partial_publication");
+    assert_eq!(run_apply(&env, "CP-001").unwrap().state, CpState::Applied);
+    assert_eq!(
+        code(run_apply(&env, "CP-002")),
+        "replacements_not_committed"
     );
 }

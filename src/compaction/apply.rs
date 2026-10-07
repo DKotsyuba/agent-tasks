@@ -562,6 +562,39 @@ pub fn apply(
             return Err(refuse("path_claimed", format!("{path}: held by {}.", r.id)));
         }
     }
+    // Held barrier: a held intent from an earlier call that touches a path this proposal needs (its
+    // documents, their DOC records, its own record or its staged blobs) must be committed by the explicit
+    // recovery first. A later committed call rewriting those paths would strand that intent, because
+    // Retry accepts only an unbroken chain of images ending at the current bytes. Intents on unrelated
+    // paths never block, and nothing is published here, so a refusal settles nothing.
+    let staged_prefix = format!("compactions/{}/", rec.id);
+    let record_path = record::record_path(&rec.id);
+    let needed: BTreeSet<&str> = touched
+        .iter()
+        .map(String::as_str)
+        .chain(body.sources.iter().filter_map(|s| s.record_path.as_deref()))
+        .chain(std::iter::once(record_path.as_str()))
+        .collect();
+    let held: Vec<_> = env
+        .pending()
+        .into_iter()
+        .filter(|p| p.phase == "held")
+        .filter(|p| {
+            p.paths
+                .iter()
+                .any(|x| needed.contains(x.as_str()) || x.starts_with(&staged_prefix))
+        })
+        .collect();
+    if !held.is_empty() {
+        let intents: Vec<String> = held.iter().map(|p| p.intent.clone()).collect();
+        return Err(refuse(
+            "replacements_not_committed",
+            format!(
+                "Earlier held effects on this proposal's paths are not committed (intents: {}). Run git_recovery Retry for them, then apply again.",
+                intents.join(", ")
+            ),
+        ));
+    }
     for p in env.pending() {
         let risky = matches!(p.phase.as_str(), "unknown" | "drifted");
         if risky && p.paths.iter().any(|x| touched.contains(x)) {

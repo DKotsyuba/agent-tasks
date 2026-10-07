@@ -584,11 +584,12 @@ impl Compaction {
     }
 }
 
-/// Run one decoded operation under the held root write lock against the real persistence provider.
+/// Run one decoded operation under the held root write lock against the real providers.
 ///
-/// `guard` must be the lock acquired through `store` in this request. The dispatcher settles Git after
-/// this returns; the handler itself never commits. The document and allocation providers are not part of
-/// this build, so operations that need them stop with `provider_unavailable` before any effect.
+/// `guard` must be the lock acquired through `store` in this request. Documents, references, the single
+/// knowledge allocator, publication and the persistence oracle are the owners' own functions. The
+/// dispatcher settles Git after this returns with [`Compaction::event_class`]; the handler itself never
+/// commits, and a failure after a publication is an error so the call settles as partial.
 ///
 /// # Errors
 /// `not_locked` for a foreign guard, otherwise the errors of [`execute_with`].
@@ -679,7 +680,7 @@ mod tests {
     /// Every operation maps to its own persistence family, and the locked entry refuses a missing
     /// provider before any effect against a real repository.
     #[test]
-    fn locked_entry_maps_families_and_refuses_before_effects() {
+    fn locked_entry_maps_families_and_refuses_stale_before_effects() {
         use crate::persist::{EventClass, testing::GitFixture};
         let withdraw = Compaction::Withdraw {
             cp: "CP-001".into(),
@@ -715,7 +716,7 @@ mod tests {
         let err = execute_locked(&f.store, &guard, &common, propose, &mut fx)
             .err()
             .unwrap();
-        assert_eq!(err.code, "provider_unavailable");
+        assert_eq!(err.code, "stale");
         assert!(fx.is_empty() && f.store.publications().is_empty());
     }
 

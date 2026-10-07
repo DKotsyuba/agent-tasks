@@ -426,7 +426,7 @@ async fn core_project_registry_cold_and_legacy_config() {
 #[tokio::test]
 async fn core_config_cold_aliases_and_read_only_absence() {
     let f = Fixture::new();
-    assert_eq!(super::definitions().len(), 10);
+    assert_eq!(super::definitions().len(), 14);
     f.call("get_status", json!({}), false).await;
     let absent = f
         .call("get_context", json!({"project":"alpha"}), false)

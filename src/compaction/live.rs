@@ -1,30 +1,54 @@
-//! The live [`crate::compaction::env::Env`]: the persistence half forwards to the real store and persistence provider.
+//! The live [`crate::compaction::env::Env`]: every method forwards to the real document, reference,
+//! knowledge, store and persistence providers.
 //!
 //! Publication, the complete operation oracle, committed-byte proofs, pending intents and the current
-//! call's typed events are the provider's own functions; this adapter only reshapes their answers into
-//! the domain's decision views. It owns no second journal, no second oracle and no Git logic.
-//!
-//! The document and allocation providers are not handed off to this branch yet: their methods refuse
-//! with `provider_unavailable` before any effect, so a compaction call cannot read a document or
-//! reserve an identifier through an invented substitute. Nothing here is composition proof.
+//! call's typed events are the persistence provider's functions; document observation, the whole-body
+//! save, relocate, remove and adopt are the document owner's, with the reference owner's incoming scan
+//! and integrity preview, and the knowledge owner's single allocation version and reservation. This
+//! adapter only reshapes their answers into the domain's decision views. It owns no second journal, no
+//! second oracle, no metadata serializer and no Git logic.
 use super::env::{
-    DocFacts, DocOp, EffectKindView, EffectRow, Env, EventView, Expected, GitView, IncomingFacts,
-    IntegrityFacts, LocatorView, OriginalItem, OutlineFacts, OverlayFacts, PendingIntent,
-    ReceiptView, StatusView, TrackingView,
+    DocFacts, DocOp, DocState, EffectKindView, EffectRow, Env, EventView, Expected, GitView,
+    IncomingFacts, IncomingRow, IntegrityFacts, LocatorView, OriginalItem, OutlineFacts,
+    OverlayFacts, PendingIntent, ReceiptView, RecordFacts, SectionFact, SourceKind, StatusView,
+    TrackingView,
 };
-use super::record::BLOB_CAP;
-use crate::persist::{
-    self, EffectGit, EffectReceipt, EffectStatus, ExpectedEffect, Phase,
-    locator::{self, Item},
-};
-use crate::store::{
-    Attest, EffectKind, Error, LockGuard, OperationId, Publish, Result, Store, Tracking,
+use super::record::{BLOB_CAP, SectionAddr, sha256_hex};
+use crate::{
+    documents::{self, DocPath, Edit, MoveBasis, Port, Ref, Save, Scope, State, StorePort},
+    knowledge::{self, Prefix},
+    persist::{
+        self, EffectGit, EffectReceipt, EffectStatus, ExpectedEffect, Phase,
+        locator::{self, Item},
+    },
+    references::{self, Target},
+    store::{Attest, EffectKind, Error, LockGuard, OperationId, Publish, Result, Store, Tracking},
 };
 
-/// The persistence-backed environment of one locked compaction call.
+/// The environment of one locked compaction call over the real providers.
 pub struct LiveEnv<'a> {
     /// The request-local store whose write lock the caller holds.
     store: &'a Store,
+    /// The root write lock acquired through `store` in this request.
+    guard: &'a LockGuard,
+    /// Scripted faults for the composed tests; absent from every shipping build.
+    #[cfg(test)]
+    pub(super) faults: std::cell::RefCell<Vec<Fault>>,
+}
+
+/// One scripted fault of a composed test: it fires on the matching `put` or `del` of the real port.
+#[cfg(test)]
+pub(super) struct Fault {
+    /// `put` or `del`.
+    pub(super) on: &'static str,
+    /// Substring of the relative path that triggers the fault.
+    pub(super) rel: String,
+    /// Matching calls to let through before failing.
+    pub(super) skip: usize,
+    /// Error code returned.
+    pub(super) code: &'static str,
+    /// Perform the real effect first: a visible publication whose reply was lost.
+    pub(super) after_effect: bool,
 }
 
 impl<'a> LiveEnv<'a> {
@@ -32,9 +56,14 @@ impl<'a> LiveEnv<'a> {
     ///
     /// # Errors
     /// `not_locked` when `guard` is not that lock; nothing is read or written.
-    pub fn new(store: &'a Store, guard: &LockGuard) -> Result<Self> {
+    pub fn new(store: &'a Store, guard: &'a LockGuard) -> Result<Self> {
         if guard.is_for(store) {
-            Ok(Self { store })
+            Ok(Self {
+                store,
+                guard,
+                #[cfg(test)]
+                faults: Default::default(),
+            })
         } else {
             Err(Error::new(
                 "not_locked",
@@ -42,14 +71,309 @@ impl<'a> LiveEnv<'a> {
             ))
         }
     }
+
+    /// The document owner's storage seam with the knowledge owner's allocator and record loaders.
+    pub(super) fn port(&self) -> LivePort<'_> {
+        LivePort {
+            inner: StorePort::new(self.store),
+            guard: self.guard,
+            #[cfg(test)]
+            faults: &self.faults,
+        }
+    }
 }
 
-/// The refusal of a method whose provider is not part of this build.
-fn unavailable<T>(what: &str) -> Result<T> {
-    Err(Error::new(
-        "provider_unavailable",
-        format!("{what} needs a provider that this build does not include; nothing was changed."),
-    ))
+/// The document owner's [`Port`] over the real store, completed with the knowledge owner's real
+/// functions where the stock `StorePort` still reports its interim loaders as unavailable.
+///
+/// Reservation is the single knowledge allocator under the held lock; typed record homes and typed
+/// identifier existence come from the knowledge loaders, so incoming coverage never degrades to an
+/// invented gap. Everything else is the stock port, unchanged.
+pub(super) struct LivePort<'a> {
+    /// The stock port over the request store.
+    pub(super) inner: StorePort<'a>,
+    /// The root write lock acquired through the same store.
+    pub(super) guard: &'a LockGuard,
+    /// The environment's scripted faults, composed tests only.
+    #[cfg(test)]
+    faults: &'a std::cell::RefCell<Vec<Fault>>,
+}
+
+impl LivePort<'_> {
+    /// The scripted fault matching this call, consuming it when it fires.
+    #[cfg(test)]
+    fn injected(&self, on: &str, rel: &str) -> Option<(&'static str, bool)> {
+        let mut faults = self.faults.borrow_mut();
+        let i = faults
+            .iter()
+            .position(|f| f.on == on && rel.contains(&f.rel))?;
+        if faults[i].skip > 0 {
+            faults[i].skip -= 1;
+            return None;
+        }
+        let f = faults.remove(i);
+        Some((f.code, f.after_effect))
+    }
+
+    /// Move the human effect lines collected by the stock port into the caller's list.
+    pub(super) fn drain_into(&self, effects: &mut Vec<String>) {
+        effects.append(&mut self.inner.fx.borrow_mut());
+    }
+}
+
+/// Typed record kind of a structured home, when the home is a knowledge home.
+fn knowledge_kind(home: &str) -> Option<knowledge::Kind> {
+    [
+        knowledge::Kind::Decision,
+        knowledge::Kind::Runbook,
+        knowledge::Kind::Research,
+        knowledge::Kind::Checklist,
+    ]
+    .into_iter()
+    .find(|k| k.prefix().directory() == home)
+}
+
+impl Port for LivePort<'_> {
+    /// Root and path bound version of exact bytes or of absence, from the stock port.
+    fn version(&self, rel: &str, bytes: Option<&[u8]>) -> String {
+        self.inner.version(rel, bytes)
+    }
+    /// Capped exact read of one owned file, from the stock port.
+    fn read(&self, rel: &str, cap: usize) -> Result<documents::Read> {
+        self.inner.read(rel, cap)
+    }
+    /// Sorted bounded directory listing, from the stock port.
+    fn list(&self, dir: &str, cap: usize) -> Result<crate::store::DirListing> {
+        self.inner.list(dir, cap)
+    }
+    /// Bounded identifier inventory of one record directory, from the stock port.
+    fn inventory(&self, dir: &str, prefix: &str) -> Result<crate::store::Inventory> {
+        self.inner.inventory(dir, prefix)
+    }
+    /// Guarded create or replace through the stock port; a scripted fault may intervene in tests.
+    fn put(&self, put: documents::Put<'_>) -> Result<()> {
+        #[cfg(test)]
+        let fault = self.injected("put", put.rel);
+        #[cfg(test)]
+        if let Some((code, false)) = fault {
+            return Err(Error::new(code, "scripted fault before any effect"));
+        }
+        self.inner.put(put)?;
+        #[cfg(test)]
+        if let Some((code, true)) = fault {
+            return Err(Error::new(code, "scripted fault after the effect"));
+        }
+        Ok(())
+    }
+    /// Guarded removal through the stock port; a scripted fault may intervene in tests.
+    fn del(&self, del: documents::Del<'_>) -> Result<()> {
+        #[cfg(test)]
+        let fault = self.injected("del", del.rel);
+        #[cfg(test)]
+        if let Some((code, false)) = fault {
+            return Err(Error::new(code, "scripted fault before any effect"));
+        }
+        self.inner.del(del)?;
+        #[cfg(test)]
+        if let Some((code, true)) = fault {
+            return Err(Error::new(code, "scripted fault after the effect"));
+        }
+        Ok(())
+    }
+    /// Create missing owned parent directories through the stock port.
+    fn ensure_parents(&self, rel: &str) -> Result<()> {
+        self.inner.ensure_parents(rel)
+    }
+    /// Every typed publication event of this request, from the stock port.
+    fn events(&self) -> Vec<crate::store::Publication> {
+        self.inner.events()
+    }
+    /// The persistence oracle's answer for one operation, from the stock port.
+    fn status(&self, op: &OperationId, expected: &[ExpectedEffect]) -> EffectStatus {
+        self.inner.status(op, expected)
+    }
+
+    /// Reserve the next `DOC-` identifier at a freshly observed allocation version.
+    fn reserve_id(&self) -> Result<String> {
+        let version = knowledge::allocation_version(self.inner.store)?;
+        knowledge::reserve(
+            self.inner.store,
+            self.guard,
+            Prefix::Document,
+            &version,
+            &mut self.inner.fx.borrow_mut(),
+        )
+    }
+
+    /// Work and project records through their loaders, typed homes through the knowledge scan.
+    fn records(&self, home: &str) -> Result<references::RecordSet> {
+        let Some(kind) = knowledge_kind(home) else {
+            return self.inner.records(home);
+        };
+        let scan = knowledge::scan(self.inner.store, Some(kind))?;
+        let mut set = references::RecordSet {
+            complete: scan.complete,
+            ..Default::default()
+        };
+        for snapshot in scan.records {
+            let id = snapshot.value.id().to_owned();
+            set.files.push(references::RecordFile {
+                rel: format!("{home}/{id}.yaml"),
+                source: references::Source {
+                    kind: references::SourceKind::Knowledge,
+                    id_or_path: id,
+                },
+                bytes: snapshot.bytes,
+            });
+        }
+        for name in scan.unreadable.into_iter().chain(scan.warnings) {
+            set.gaps.push(documents::Gap {
+                what: documents::quote(&name),
+                reason: documents::GapReason::Unreadable,
+            });
+        }
+        Ok(set)
+    }
+
+    /// Typed identifiers (and checklist items) by the knowledge loaders; the rest by the stock port.
+    fn resolve_id(&self, id: &str) -> Result<references::Resolution> {
+        let Ok(parsed) = knowledge::parse_id(id) else {
+            return self.inner.resolve_id(id);
+        };
+        if matches!(parsed.prefix, Prefix::Document | Prefix::Compaction) {
+            return self.inner.resolve_id(id);
+        }
+        let found = if parsed.item.is_some() {
+            match knowledge::resolve_child(self.inner.store, &parsed)? {
+                knowledge::Child::Found { .. } => references::Resolution::Found,
+                _ => references::Resolution::Missing,
+            }
+        } else {
+            match knowledge::load(self.inner.store, id) {
+                Ok(_) => references::Resolution::Found,
+                Err(e) if e.code == "not_found" => references::Resolution::Missing,
+                Err(e) => {
+                    references::Resolution::Unknown(format!("record unreadable ({})", e.code))
+                }
+            }
+        };
+        Ok(found)
+    }
+}
+
+/// Run one document operation through the document owner's mutation under `operation`.
+///
+/// The operation identity makes every publication of the call required-attested; the caller holds
+/// the root write lock and `port` reaches the real store. Errors are the document owner's own.
+pub(super) fn run_doc_op(port: &dyn Port, operation: &str, actor: &str, op: &DocOp) -> Result<()> {
+    let operation = OperationId::new(operation)?;
+    let mut scope = Scope {
+        port,
+        operation: Some(&operation),
+    };
+    let result = match op {
+        DocOp::Save {
+            path,
+            body,
+            purpose,
+            expected,
+        } => documents::save(
+            &mut scope,
+            Save {
+                target: &Ref::Path(DocPath::parse(path)?),
+                purpose: purpose.as_deref(),
+                edit: Edit::Body(body),
+                expected,
+                actor: Some(actor),
+            },
+        ),
+        DocOp::Relocate {
+            from,
+            to,
+            expected: _,
+            expected_to,
+            basis,
+        } => documents::relocate(
+            &mut scope,
+            &Ref::Path(DocPath::parse(from)?),
+            &DocPath::parse(to)?,
+            &MoveBasis {
+                version: basis.version.clone(),
+                body_sha256: basis.body_sha256.clone(),
+                record_sha256: basis.record_sha256.clone(),
+                id: basis.id.clone(),
+            },
+            expected_to,
+            Some(actor),
+        ),
+        DocOp::Remove { path, expected } => documents::remove(
+            &mut scope,
+            &Ref::Path(DocPath::parse(path)?),
+            expected,
+            Some(actor),
+        ),
+        DocOp::Adopt {
+            path,
+            purpose,
+            expected,
+        } => documents::adopt(
+            &mut scope,
+            &Ref::Path(DocPath::parse(path)?),
+            purpose.as_deref(),
+            expected,
+            Some(actor),
+        ),
+    };
+    result.map(|_| ())
+}
+
+/// One document observation reduced to what compaction decides on.
+fn doc_facts(obs: documents::Observation) -> DocFacts {
+    let state = match obs.state {
+        State::Managed => DocState::Managed,
+        State::Unmanaged => DocState::Unmanaged,
+        State::Absent => DocState::Absent,
+        State::Retired => DocState::Retired,
+        State::Unsupported(why) => DocState::Other(format!("unsupported ({why:?})")),
+        other => DocState::Other(other.label().to_owned()),
+    };
+    DocFacts {
+        path: obs.path.as_str().to_owned(),
+        retired: obs.state == State::Retired,
+        state,
+        version: obs.version,
+        body: obs.body,
+        record: obs.record.map(|r| RecordFacts {
+            sha256: sha256_hex(&r.bytes),
+            len: r.bytes.len() as u64,
+            path: r.rel,
+            id: r.record.id,
+            bound_path: r.record.path,
+            body_sha256: r.record.body_sha256,
+            revision: r.record.revision,
+        }),
+    }
+}
+
+/// Kind of a referring source in the domain's vocabulary.
+fn source_kind(kind: references::SourceKind) -> SourceKind {
+    match kind {
+        references::SourceKind::Markdown => SourceKind::Markdown,
+        references::SourceKind::Readme => SourceKind::Readme,
+        references::SourceKind::Work => SourceKind::Work,
+        references::SourceKind::Knowledge => SourceKind::Knowledge,
+        references::SourceKind::DocMetadata => SourceKind::DocMetadata,
+        references::SourceKind::Project => SourceKind::Project,
+    }
+}
+
+/// Named coverage gaps as bounded text lines.
+fn gap_lines(coverage: &references::Coverage) -> Vec<String> {
+    coverage
+        .gaps
+        .iter()
+        .map(|g| format!("{}: {:?}", g.what, g.reason))
+        .collect()
 }
 
 /// Effect kind of a file effect; directory effects are not operation rows.
@@ -119,19 +443,39 @@ impl Env for LiveEnv<'_> {
         self.store
     }
 
-    /// Refused: the knowledge allocation provider is not part of this build.
+    /// The single knowledge allocation version over the six homes and the allocator file.
     fn allocation_version(&self) -> Result<String> {
-        unavailable("The knowledge allocation version")
+        knowledge::allocation_version(self.store)
     }
 
-    /// Refused: the knowledge allocation provider is not part of this build.
-    fn reserve(&self, _expected: &str, _effects: &mut Vec<String>) -> Result<String> {
-        unavailable("Reserving a compaction identifier")
+    /// Reserve the next `CP-` identifier at the expected allocation version under the held lock.
+    ///
+    /// # Errors
+    /// `stale`, `inventory` and `allocator` as the allocation owner defines them.
+    fn reserve(&self, expected: &str, effects: &mut Vec<String>) -> Result<String> {
+        knowledge::reserve(
+            self.store,
+            self.guard,
+            Prefix::Compaction,
+            expected,
+            effects,
+        )
     }
 
-    /// Refused: the knowledge allocation provider is not part of this build.
-    fn allocation_valid(&self, _doc_id: &str) -> Result<bool> {
-        unavailable("Validating a document identifier")
+    /// Whether `doc_id` is a canonical `DOC-` identifier already below the allocator's next number
+    /// in a fully understood allocation.
+    fn allocation_valid(&self, doc_id: &str) -> Result<bool> {
+        let Ok(id) = knowledge::parse_id(doc_id) else {
+            return Ok(false);
+        };
+        if id.prefix != Prefix::Document || id.item.is_some() {
+            return Ok(false);
+        }
+        let allocation = knowledge::observe_allocation(self.store)?;
+        Ok(allocation.complete
+            && allocation
+                .counters
+                .is_some_and(|c| id.number > 0 && id.number < c.document))
     }
 
     /// Create the missing owned parents through the store; each created directory is disclosed.
@@ -139,40 +483,130 @@ impl Env for LiveEnv<'_> {
         self.store.ensure_parents(relative, effects).map(|_| ())
     }
 
-    /// Refused: the document provider is not part of this build.
-    fn observe(&self, _path: &str) -> Result<DocFacts> {
-        unavailable("Observing a document")
+    /// Observe one managed path through the document owner.
+    fn observe(&self, path: &str) -> Result<DocFacts> {
+        let port = self.port();
+        documents::observe(&port, &Ref::Path(DocPath::parse(path)?)).map(doc_facts)
     }
 
-    /// Refused: the document provider is not part of this build.
-    fn observe_id(&self, _id: &str) -> Result<DocFacts> {
-        unavailable("Observing a document by identifier")
+    /// Observe a document by `DOC-` identifier through the document owner, retired records included.
+    fn observe_id(&self, id: &str) -> Result<DocFacts> {
+        let port = self.port();
+        documents::observe(&port, &Ref::Id(id.to_owned())).map(doc_facts)
     }
 
-    /// Refused: the document provider is not part of this build.
-    fn outline(&self, _bytes: &[u8]) -> Result<OutlineFacts> {
-        unavailable("Outlining a document")
+    /// Outline exact bytes with the Markdown owner's dialect: the preamble when nonempty, then every
+    /// heading section including its nested sections.
+    fn outline(&self, bytes: &[u8]) -> Result<OutlineFacts> {
+        let outline = crate::markdown::outline(bytes)?;
+        let mut sections = Vec::new();
+        if outline.preamble_end > 0 {
+            let part = bytes[..outline.preamble_end].to_vec();
+            sections.push(SectionFact {
+                addr: SectionAddr::Preamble,
+                sha256: sha256_hex(&part),
+                bytes: part,
+            });
+        }
+        for h in &outline.headings {
+            let part = bytes[h.start..h.end].to_vec();
+            sections.push(SectionFact {
+                addr: SectionAddr::Heading {
+                    ordinal: h.ordinal,
+                    level: h.level,
+                    occurrence: h.occurrence,
+                    text_sha256: sha256_hex(h.text.as_bytes()),
+                },
+                sha256: sha256_hex(&part),
+                bytes: part,
+            });
+        }
+        Ok(OutlineFacts {
+            complete: outline.complete,
+            setext_candidates: outline.setext_candidates,
+            slugs: outline.headings.iter().map(|h| h.slug.clone()).collect(),
+            sections,
+        })
     }
 
-    /// Refused: the reference provider is not part of this build.
-    fn incoming(&self, _path: &str) -> Result<IncomingFacts> {
-        unavailable("Reading incoming references")
+    /// Complete bounded incoming scan of one target document; any gap makes the answer unknown.
+    fn incoming(&self, path: &str) -> Result<IncomingFacts> {
+        let port = self.port();
+        let target = Target::Doc {
+            path: DocPath::parse(path)?,
+            fragment: None,
+        };
+        let result = references::incoming(&port, &target)?;
+        Ok(IncomingFacts {
+            complete: result.coverage.complete,
+            gaps: gap_lines(&result.coverage),
+            rows: result
+                .rows
+                .into_iter()
+                .map(|r| IncomingRow {
+                    target: path.to_owned(),
+                    kind: source_kind(r.source.kind),
+                    source: r.source.id_or_path,
+                    via: format!("{:?}", r.via),
+                    count: r.count,
+                    fragments: r.fragments,
+                })
+                .collect(),
+        })
     }
 
-    /// Refused: the reference provider is not part of this build.
-    fn integrity(&self, _overlay: &OverlayFacts) -> Result<IntegrityFacts> {
-        unavailable("Checking reference integrity")
+    /// Whole-root reference integrity with the overlay applied in memory.
+    fn integrity(&self, overlay: &OverlayFacts) -> Result<IntegrityFacts> {
+        let port = self.port();
+        let put = overlay
+            .put
+            .iter()
+            .map(|(p, b)| Ok((DocPath::parse(p)?, b.clone())))
+            .collect::<Result<Vec<_>>>()?;
+        let remove = overlay
+            .remove
+            .iter()
+            .map(|p| DocPath::parse(p))
+            .collect::<Result<Vec<_>>>()?;
+        let moves = overlay
+            .moves
+            .iter()
+            .map(|(a, b)| Ok((DocPath::parse(a)?, DocPath::parse(b)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let result = references::integrity(
+            &port,
+            &references::Overlay {
+                put: &put,
+                remove: &remove,
+                moves: &moves,
+            },
+        )?;
+        Ok(IntegrityFacts {
+            complete: result.coverage.complete,
+            gaps: gap_lines(&result.coverage),
+            introduced: result
+                .introduced
+                .iter()
+                .map(|d| format!("{} -> {}", d.source.id_or_path, d.target.canonical()))
+                .collect(),
+        })
     }
 
-    /// Refused: the document provider is not part of this build.
+    /// One document operation in its own scope under the action's deterministic operation identity.
+    ///
+    /// Every publication of the call is required-attested by that identity, so an interrupted
+    /// operation is resumable only through the persistence oracle.
     fn doc_op(
         &self,
-        _operation: &str,
-        _actor: &str,
-        _op: &DocOp,
-        _effects: &mut Vec<String>,
+        operation: &str,
+        actor: &str,
+        op: &DocOp,
+        effects: &mut Vec<String>,
     ) -> Result<()> {
-        unavailable("A document operation")
+        let port = self.port();
+        let result = run_doc_op(&port, operation, actor, op);
+        port.drain_into(effects);
+        result
     }
 
     /// Publish with required journal attestation under the deterministic operation identity.
@@ -695,26 +1129,15 @@ mod tests {
         );
     }
 
-    /// A guard that is not this store's lock is refused outright, and the absent providers refuse
-    /// before any effect.
+    /// A guard that is not this store's lock is refused outright.
     #[test]
-    fn foreign_guards_and_missing_providers_refuse() {
+    fn foreign_guards_are_refused() {
         let f = GitFixture::new();
-        let guard = f.lock();
         let other = GitFixture::new();
         let foreign = other.lock();
         assert_eq!(
             LiveEnv::new(&f.store, &foreign).err().unwrap().code,
             "not_locked"
-        );
-        let env = LiveEnv::new(&f.store, &guard).unwrap();
-        assert_eq!(
-            env.allocation_version().err().unwrap().code,
-            "provider_unavailable"
-        );
-        assert_eq!(
-            env.observe("docs/a.md").err().unwrap().code,
-            "provider_unavailable"
         );
         assert!(f.store.publications().is_empty());
     }

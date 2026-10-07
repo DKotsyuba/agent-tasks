@@ -1,6 +1,7 @@
 //! Semantic bounded retrieval. Coverage, unknown data and real pagination remain explicit.
 use super::{
-    input::{ContextArgs, SearchArgs, StatusArgs, View},
+    input::{ContextArgs, SearchArgs, StateFilter, StatusArgs, View},
+    records,
     work::{Page, module_id},
 };
 use crate::{
@@ -148,6 +149,14 @@ fn diagnostics(value: &mut Page, snapshot: &Snapshot<Module>) {
 pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Result<String> {
     let store = config.resolve(&args.project)?;
     let _lock = store.lock(false, &mut Vec::new())?;
+    let kind = args
+        .reference
+        .as_deref()
+        .map_or(records::RefKind::Work, records::classify);
+    records::validate(&args, kind)?;
+    if kind != records::RefKind::Work {
+        return records::context(&store, &args, kind, templates);
+    }
     if matches!(args.view, View::Integration) {
         return integration_context(&store, &args, templates);
     }
@@ -165,7 +174,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             .map(|p| p.version.clone())
             .unwrap_or_else(|| store.version("project.yaml", None));
         let snapshot = scope_version("get_context:project", &manifest_version, &scan.version);
-        continuation(args.start, args.limit, args.version.as_deref(), &snapshot)?;
+        continuation(args.start, args.rows(), args.version.as_deref(), &snapshot)?;
         let mut value = page(
             format!(
                 "Project {}{}",
@@ -223,6 +232,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             Err(e)=>value.lines.push(format!("Allocator unreadable: {}",store::safe(&e.message,200))),
         }
         warnings(&mut value, &scan.warnings);
+        records::project_lines(&store, &mut value);
         for m in scan.modules {
             value.rows.push(module_brief(&store, &m.value));
         }
@@ -231,7 +241,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                 .rows
                 .push(format!("UNREADABLE {}", store::safe(&issue, 240)));
         }
-        return render_page(value, args.start, args.limit, true, templates);
+        return render_page(value, args.start, args.rows(), true, templates);
     }
     let reference = args
         .reference
@@ -274,7 +284,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
     let read_version = scope_version(&selection, &snapshot.version, &background);
     continuation(
         args.start,
-        args.limit,
+        args.rows(),
         args.version.as_deref(),
         &read_version,
     )?;
@@ -493,6 +503,12 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             return Err(Error::new(
                 "invalid_arguments",
                 "Integration context requires Project or Epic scope.",
+            ));
+        }
+        View::Content | View::History | View::References => {
+            return Err(Error::new(
+                "invalid_arguments",
+                "view: this view applies to knowledge, document and compaction references.",
             ));
         }
         View::Summary => {
@@ -860,6 +876,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
     }
     if value.rows.is_empty() {
         let empty = match args.view {
+            View::Content | View::History | View::References => "No rows.",
             View::Integration => "No ready connected sets or integration evidence in this scope.",
             View::Summary => "No additional acceptance conditions or review-detail rows.",
             View::Review if !m.reviews.is_empty() => {
@@ -874,7 +891,7 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
         };
         value.lines.push(empty.into());
     }
-    render_page(value, args.start, args.limit, true, templates)
+    render_page(value, args.start, args.rows(), true, templates)
 }
 
 /// Record named missing/unknown facts as partial coverage, never as zero or success.
@@ -1513,7 +1530,7 @@ fn integration_context(store: &Store, args: &ContextArgs, templates: &Templates)
         &version,
         &scan.version,
     );
-    continuation(args.start, args.limit, args.version.as_deref(), &snapshot)?;
+    continuation(args.start, args.rows(), args.version.as_deref(), &snapshot)?;
     let mut value = page(
         format!(
             "Integration context — {}",
@@ -1687,11 +1704,11 @@ fn integration_context(store: &Store, args: &ContextArgs, templates: &Templates)
             criterion_rows(store, &epic.value, &mut value);
         }
     }
-    render_page(value, args.start, args.limit, true, templates)
+    render_page(value, args.start, args.rows(), true, templates)
 }
 
 /// Bind tool/ref/view/query/review selection and data snapshot, separately from editable file versions.
-fn scope_version(selection: &str, version: &str, scan: &str) -> String {
+pub(super) fn scope_version(selection: &str, version: &str, scan: &str) -> String {
     let mut digest = Sha256::new();
     for value in ["agent-tasks/view/v1", selection, version, scan] {
         digest.update((value.len() as u64).to_le_bytes());
@@ -2132,7 +2149,7 @@ fn check_status(value: CheckStatus) -> &'static str {
     }
 }
 /// Stable English verdict without raw enums or serialization.
-fn verdict(value: Verdict) -> &'static str {
+pub(super) fn verdict(value: Verdict) -> &'static str {
     match value {
         Verdict::Accepted => "accepted",
         Verdict::ChangesRequested => "changes requested",
@@ -2363,23 +2380,31 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
 }
 
 /// Search hit projection retaining matched field names, score and numeric order.
-struct Hit {
+pub(super) struct Hit {
     /// Owned reference or Project.
-    reference: String,
+    pub(super) reference: String,
     /// Human title.
-    title: String,
+    pub(super) title: String,
     /// Count of semantic fields containing terms.
-    score: usize,
-    /// Stable numeric module/task ordering, never filename lexicographic order.
-    order: (u64, u64),
+    pub(super) score: usize,
+    /// Stable ordering inside equal score and currentness, never filename order.
+    pub(super) order: (u64, u64),
     /// Matching field labels.
-    fields: Vec<String>,
+    pub(super) fields: Vec<String>,
     /// Bounded relevant excerpt.
-    excerpt: String,
+    pub(super) excerpt: String,
+    /// Source kind shown on the row: work, knowledge or document.
+    pub(super) kind: &'static str,
+    /// Honest state label of the hit (phase, currentness or document state).
+    pub(super) state: String,
+    /// Whether the hit is current; current hits rank before superseded ones.
+    pub(super) current: bool,
+    /// Exact read route that opens this hit.
+    pub(super) route: String,
 }
 
 /// Add one semantic target when every term matches at least one of its fields.
-fn hit(
+pub(super) fn hit(
     hits: &mut Vec<Hit>,
     reference: String,
     title: &str,
@@ -2403,6 +2428,11 @@ fn hit(
     let Some((_, excerpt)) = matched.first() else {
         return;
     };
+    let route = if reference == "Project" {
+        "get_context with project only and omit ref".to_owned()
+    } else {
+        format!("get_context ref={reference}")
+    };
     hits.push(Hit {
         reference,
         title: title.into(),
@@ -2410,6 +2440,10 @@ fn hit(
         order,
         fields: matched.iter().map(|(label, _)| (**label).into()).collect(),
         excerpt: store::safe(excerpt, 220),
+        kind: "work",
+        state: String::new(),
+        current: true,
+        route,
     });
 }
 
@@ -2461,12 +2495,19 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
             "Initialize the project before work search.",
         )
     })?;
+    let (want_work, want_knowledge, want_document) = records::search_kinds(&args)?;
+    let filter = args.state.unwrap_or(StateFilter::Any);
     let scan = store.scan(args.module.as_deref())?;
-    let selection = format!("search:{:?}:{terms:?}", args.module);
-    let snapshot = scope_version(&selection, &project.version, &scan.version);
+    let sources = records::Sources::gather(&store, want_knowledge, want_document);
+    let selection = format!(
+        "search:{:?}:{terms:?}:{want_work}{want_knowledge}{want_document}:{filter:?}",
+        args.module
+    );
+    let basis = format!("{};{}", scan.version, sources.basis());
+    let snapshot = scope_version(&selection, &project.version, &basis);
     continuation(args.start, args.limit, args.version.as_deref(), &snapshot)?;
     let mut hits = Vec::new();
-    if args.module.is_none() {
+    if args.module.is_none() && want_work {
         hit(
             &mut hits,
             "Project".into(),
@@ -2479,7 +2520,7 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
             &terms,
         );
     }
-    for snapshot in &scan.modules {
+    for snapshot in scan.modules.iter().filter(|_| want_work) {
         let m = &snapshot.value;
         let n = work_number(&m.id).map(|(_, n)| n).map_err(store::invalid)?;
         let mut fields = vec![
@@ -2690,6 +2731,11 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
             fields.push(("reason", r.reason.clone()));
         }
         hit(&mut hits, m.id.clone(), &m.title, (n, 0), fields, &terms);
+        if let Some(h) = hits.last_mut()
+            && h.reference == m.id
+        {
+            h.state = store.phase(m).into();
+        }
         for t in m.children() {
             let mut fields = vec![
                 ("title", t.title.clone()),
@@ -2727,29 +2773,59 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
                 fields,
                 &terms,
             );
+            if let Some(h) = hits.last_mut()
+                && h.reference == format!("{}/{}", m.id, t.id)
+            {
+                h.state = format!("{:?}", t.state).to_lowercase();
+            }
         }
     }
-    hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.order.cmp(&b.order)));
+    sources.knowledge_hits(&terms, filter, &mut hits);
+    sources.document_hits(&terms, filter, &mut hits);
+    hits.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then(b.current.cmp(&a.current))
+            .then(a.order.cmp(&b.order))
+    });
     let mut value = page(
-        format!("Work search — {}", store::safe(&args.query, 256)),
+        format!("Search — {}", store::safe(&args.query, 256)),
         snapshot,
     );
     value.coverage = if scan.complete { "complete" } else { "PARTIAL" }.into();
-    value.lines.push(format!("{} matches in readable tracked work. All terms must match; ranked by matching fields, then numeric reference.",hits.len()));
+    value.lines.push(format!("{} matches. All terms must match; ranked by matching fields, then currentness, then numeric reference.",hits.len()));
     value.lines.push(
         args.module
             .as_ref()
             .map(|id| format!("Scope: module {id}."))
-            .unwrap_or("Scope: tracked project work.".into()),
+            .unwrap_or(format!(
+                "Scope: {} (state filter {filter:?}).",
+                [
+                    want_work.then_some("work"),
+                    want_knowledge.then_some("knowledge"),
+                    want_document.then_some("documents")
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ")
+            )),
     );
-    value.lines.push("Open Module/Task hits with get_context ref=<reference>. For a Project hit, call get_context with project only and omit ref. Select results/checks/review for full evidence.".into());
+    value.lines.push("Every row names its kind, state and the exact read route; open it as shown. An excerpt is a preview, not proof that all content was searched.".into());
+    sources.coverage_lines(&mut value);
     warnings(&mut value, &scan.warnings);
     warnings(&mut value, &scan.unreadable);
     for h in hits {
         value.rows.push(format!(
-            "{} {} — fields: {}{} — excerpt: {}",
+            "{} {} [{} {}] — fields: {}{} — excerpt: {} — open: {}",
             h.reference,
             store::safe(&h.title, 100),
+            h.kind,
+            if h.state.is_empty() {
+                "tracked"
+            } else {
+                &h.state
+            },
             h.fields
                 .iter()
                 .take(3)
@@ -2761,7 +2837,8 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
             } else {
                 String::new()
             },
-            h.excerpt
+            h.excerpt,
+            h.route
         ));
     }
     render_page(value, args.start, args.limit, true, templates)

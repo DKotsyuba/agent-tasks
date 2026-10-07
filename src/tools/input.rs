@@ -77,7 +77,7 @@ pub struct ProjectListArgs {
 }
 
 /// Allowlisted context projection; YAML is never an agent-facing response.
-#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum View {
     /// Compact orientation and current conditions.
@@ -97,6 +97,12 @@ pub enum View {
     Commits,
     /// Current ready connected components, candidate/contract coverage and gaps.
     Integration,
+    /// Documents only: exact framed pages of the whole document or of one selected part.
+    Content,
+    /// Decisions, Runbooks and Research only: retained revisions and Runbook uses.
+    History,
+    /// Typed records, Checklists, documents and compaction proposals: outgoing and incoming references.
+    References,
 }
 
 /// Read one Project/Epic/Module/Task/Atomic scope with snapshot-bound pagination.
@@ -114,13 +120,32 @@ pub struct ContextArgs {
     /// Zero-based offset into the selected view; default zero.
     #[serde(default)]
     pub start: usize,
-    /// Maximum displayed items, 1–20; default 20.
-    #[serde(default = "page_limit")]
-    pub limit: usize,
+    /// Maximum displayed rows, 1–20; default 20. Optional so absence and supply stay
+    /// distinguishable: a supplied limit is refused for document `view=content`, whose page
+    /// size is fixed by the reply budget.
+    #[schemars(extend("default" = 20))]
+    pub limit: Option<usize>,
     /// Exact snapshot returned by the previous page; mandatory for nonzero offsets.
     pub version: Option<String>,
     /// Zero-based retained review index; omission selects the latest.
     pub review_index: Option<usize>,
+    /// Document `view=content` only: zero-based heading ordinal of the part to read.
+    pub ordinal: Option<usize>,
+    /// Document `view=content` only: case-sensitive heading text of the part to read.
+    pub heading: Option<String>,
+    /// Only with `heading`: one-based occurrence among headings with identical text.
+    pub occurrence: Option<usize>,
+    /// Only with `heading`: heading level 1 to 6.
+    pub level: Option<u8>,
+    /// Document `view=content` only: true selects the preamble before the first heading.
+    pub preamble: Option<bool>,
+}
+
+impl ContextArgs {
+    /// Rows per page for every row based view: the supplied limit or the default of twenty.
+    pub fn rows(&self) -> usize {
+        self.limit.unwrap_or_else(page_limit)
+    }
 }
 
 /// Return an owner-ready English status of the tracked work, not runtime liveness.
@@ -151,6 +176,35 @@ pub struct SearchArgs {
     pub limit: usize,
     /// Previous result's exact snapshot, required for a nonzero start.
     pub version: Option<String>,
+    /// Sources to search: one to three distinct of work, knowledge, document; default all
+    /// three, or work only when `module` is supplied and `kinds` is omitted.
+    pub kinds: Option<Vec<SearchKind>>,
+    /// Currentness filter: current, superseded or any; default any, with the state shown on every row.
+    pub state: Option<StateFilter>,
+}
+
+/// One source a lexical search can cover.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchKind {
+    /// Tracked work records: Project, Epics, Modules, Atomics and Tasks.
+    Work,
+    /// Typed Decisions, Runbooks, Research and procedural Checklists.
+    Knowledge,
+    /// Managed and unmanaged Markdown documents.
+    Document,
+}
+
+/// Which currentness a search keeps.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StateFilter {
+    /// Current records and documents only.
+    Current,
+    /// Superseded records and retired documents only.
+    Superseded,
+    /// Everything, with the state shown.
+    Any,
 }
 
 /// Default bounded page request.
