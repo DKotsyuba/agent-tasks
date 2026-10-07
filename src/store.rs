@@ -342,53 +342,71 @@ fn read_path(path: &Path, cap: usize) -> Result<Option<Vec<u8>>> {
 ///
 /// This is a small node-context scanner, not a YAML lexer. A property indicator (`&`, `*`, `!`)
 /// is refused only where a node may begin: at a line start in block context, after a block
-/// sequence or complex-key indicator, after a mapping separator, after `[`, `{`, `,` or `:` in
-/// flow context, and after a document marker. The same characters inside a plain scalar
-/// (`valid_reference(store,&str)`), a quoted scalar, a comment or a literal/folded block scalar
-/// are ordinary text. A block scalar ends at the first non-empty line that is not indented past the
-/// column of the node that owns it, so mapping siblings after it are scanned again. Ambiguous
-/// shapes (a continuation line of a multi-line plain scalar that starts with an indicator) are
-/// refused, never accepted. The canonical writer never emits those, and `encode` verifies its own
-/// output through this same gate.
+/// sequence or explicit-key indicator, after a mapping separator, after `[`, `{`, `,`, `:` or an
+/// explicit-key `?` in flow context, and after a document marker. The same characters inside a
+/// plain scalar (`valid_reference(store,&str)`), a quoted scalar, a comment or a literal/folded
+/// block scalar are ordinary text. A block scalar ends at the first non-blank line that is not
+/// indented past the column of the node that owns it, so mapping siblings after it are scanned
+/// again. Only SPACE and TAB separate tokens or begin comments; Unicode spaces such as U+00A0 are
+/// scalar text.
 ///
-/// Errors: non-UTF-8 input, more than one document, a property indicator at a node start, or a
-/// malformed block scalar header.
+/// Deliberately strict subset, so no later line can be masked by a fake continuation:
+/// - every line must close its quotes and flow brackets (`single-line` rule); native multi-line
+///   quoted scalars and flow collections are refused, and the canonical writer, which emits
+///   block and literal collections with single-line quoted scalars, never produces them;
+/// - a continuation line of a multi-line plain scalar is scanned as a fresh node, so one that
+///   begins with an indicator is refused rather than trusted;
+/// - the only line breaks are LF and CRLF, and a byte order mark is accepted once at the start of
+///   the document; lone CR, NEL, LS, PS and a mid-document BOM are refused because the parser and
+///   `str::lines` would disagree about where lines start.
+///
+/// `encode` verifies its own output through this same gate.
+///
+/// Errors: non-UTF-8 input, forbidden line breaks, more than one document, a property indicator
+/// at a node start, a line that leaves a quote or flow collection open, or a malformed block
+/// scalar header.
 fn yaml_subset(bytes: &[u8]) -> Result<()> {
     let source = std::str::from_utf8(bytes).map_err(|_| invalid("YAML must be UTF-8."))?;
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    if source.contains(['\u{feff}', '\u{85}', '\u{2028}', '\u{2029}'])
+        || source.split("\r\n").any(|part| part.contains('\r'))
+    {
+        return Err(invalid(
+            "YAML line breaks must be LF or CRLF and a byte order mark may only start the document.",
+        ));
+    }
     let refused =
         || invalid("YAML tags, anchors and aliases are unsupported; quote literal prose.");
-    let separated = |next: Option<&(usize, char)>| next.is_none_or(|(_, c)| c.is_whitespace());
-    let mut quote = None;
+    let blank = |c: char| c == ' ' || c == '\t';
+    let separated = |next: Option<&(usize, char)>| next.is_none_or(|(_, c)| blank(*c));
     let mut block: Option<usize> = None;
-    let mut flow = 0usize;
-    let mut start = true;
     let mut documents = 0;
     for line in source.lines() {
         let indent = line.bytes().take_while(|b| *b == b' ').count();
         if let Some(base) = block {
-            if line.trim().is_empty() || indent > base {
+            if line.chars().all(blank) || indent > base {
                 continue;
             }
             block = None;
         }
         let chars: Vec<(usize, char)> = line.char_indices().collect();
         let mut at = 0;
+        let mut quote = None;
+        let mut flow = 0usize;
+        let mut start = true;
         let mut entry_start = true;
         let mut entry = indent;
         let mut parent = indent;
-        if quote.is_none() && flow == 0 {
-            start = true;
-            if line.starts_with("...") && line[3..].trim().is_empty() {
-                continue;
+        if line.starts_with("...") && line[3..].chars().all(blank) {
+            continue;
+        }
+        if line.starts_with("---") && line[3..].chars().next().is_none_or(blank) {
+            documents += 1;
+            if documents > 1 {
+                return Err(invalid("One YAML document is allowed."));
             }
-            if line.starts_with("---") && line[3..].chars().next().is_none_or(char::is_whitespace) {
-                documents += 1;
-                if documents > 1 {
-                    return Err(invalid("One YAML document is allowed."));
-                }
-                at = 3;
-                entry_start = false;
-            }
+            at = 3;
+            entry_start = false;
         }
         while at < chars.len() {
             let (col, c) = chars[at];
@@ -409,11 +427,11 @@ fn yaml_subset(bytes: &[u8]) -> Result<()> {
                 at += 1;
                 continue;
             }
-            if c == ' ' || c == '\t' {
+            if blank(c) {
                 at += 1;
                 continue;
             }
-            if c == '#' && (at == 0 || chars[at - 1].1.is_whitespace()) {
+            if c == '#' && (at == 0 || blank(chars[at - 1].1)) {
                 break;
             }
             let opened = start;
@@ -423,6 +441,7 @@ fn yaml_subset(bytes: &[u8]) -> Result<()> {
             if flow > 0 {
                 match c {
                     ',' | ':' => start = true,
+                    '?' if separated(next) => start = true,
                     '[' | '{' => {
                         flow += 1;
                         start = true;
@@ -450,7 +469,7 @@ fn yaml_subset(bytes: &[u8]) -> Result<()> {
                             .trim_start_matches(|h: char| {
                                 h.is_ascii_digit() || h == '+' || h == '-'
                             })
-                            .trim_start();
+                            .trim_start_matches(blank);
                         if !header.is_empty() && !header.starts_with('#') {
                             return Err(invalid("Invalid block scalar header."));
                         }
@@ -475,6 +494,11 @@ fn yaml_subset(bytes: &[u8]) -> Result<()> {
                 parent = entry;
             }
             at += 1;
+        }
+        if quote.is_some() || flow > 0 {
+            return Err(invalid(
+                "YAML quoted scalars and flow collections must stay on a single-line; use a block scalar.",
+            ));
         }
     }
     Ok(())
@@ -2471,4 +2495,168 @@ fn semantic_digest(value: &serde_json::Value) -> Result<String> {
             serde_json::to_vec(value).map_err(|_| invalid("Cannot encode semantic coverage."))?
         )
     ))
+}
+
+/// Preflight-level regressions: every assertion calls the subset scanner itself and checks its own
+/// refusal message, so a later parser or tree error can never be mistaken for scanner protection.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "Explicit isolated scanner assertions"
+)]
+mod yaml_preflight_tests {
+    use super::{read_tree, yaml_subset};
+
+    /// Fixed refusal text for property indicators at a node start.
+    const PROPERTY: &str = "YAML tags, anchors and aliases are unsupported";
+    /// Fixed refusal text for quote or flow state left open at a line end.
+    const MULTILINE: &str = "single-line";
+    /// Fixed refusal text for line breaks other than LF and CRLF, and for stray byte order marks.
+    const BREAKS: &str = "line breaks";
+
+    /// Assert the scanner alone refuses every `(input, expected)` pair with a message containing
+    /// `expected`; every wrong outcome is listed, not only the first.
+    fn assert_refused<'a>(cases: impl IntoIterator<Item = (&'a str, &'a str)>) {
+        let wrong: Vec<String> = cases
+            .into_iter()
+            .filter_map(|(input, expected)| match yaml_subset(input.as_bytes()) {
+                Ok(()) => Some(format!("{input:?} accepted")),
+                Err(e) if !e.message.contains(expected) => {
+                    Some(format!("{input:?} refused with {:?}", e.message))
+                }
+                Err(_) => None,
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// Assert the scanner alone refuses one input with a message containing `expected`.
+    fn refused(input: &str, expected: &str) {
+        assert_refused([(input, expected)]);
+    }
+
+    /// The five raw inputs from the source review, plus byte order mark and later-document cases.
+    /// Each is valid for the real parser, so the scanner is the only thing standing in front of
+    /// alias expansion; the test proves that by parsing the raw bytes first.
+    #[test]
+    fn reviewed_attack_inputs_are_refused_by_the_preflight() {
+        assert_refused([
+            ("a: x\n  [y\nb:\n- &anc v\n- *anc\n", MULTILINE),
+            ("[? &x a : 1, ? *x : 2]\n", PROPERTY),
+            ("a:\r  &x [1]\rb:\r  *x\r", BREAKS),
+            ("a: x\n  'y\nb: &anc v\nc: *anc\nd: it's\n", MULTILINE),
+            ("a\u{a0}#: &x [1]\nb\u{a0}#: *x\n", PROPERTY),
+            ("\u{feff}&r a: 1\n", PROPERTY),
+            ("a: 1\n\u{feff}  &r b: 2\nc: *r\n", BREAKS),
+            ("a: |\n  x\n\u{85}  &y z: 1\n", BREAKS),
+            ("a: x\u{2028}  &y z: 1\n", BREAKS),
+            ("a: x\u{2029}b: &y 1\n", BREAKS),
+        ]);
+        for raw in [
+            "a: x\n  [y\nb:\n- &anc v\n- *anc\n",
+            "[? &x a : 1, ? *x : 2]\n",
+            "a\u{a0}#: &x [1]\nb\u{a0}#: *x\n",
+        ] {
+            assert!(
+                serde_yaml_ng::from_slice::<serde_yaml_ng::Value>(raw.as_bytes()).is_ok(),
+                "{raw:?} must be accepted by the raw parser for this proof"
+            );
+        }
+    }
+
+    /// Property indicators at every node start are refused by the scanner, with defined anchors.
+    #[test]
+    fn property_indicators_at_node_starts_are_refused() {
+        assert_refused(
+            [
+                "a: &x 1\nb: *x\n",
+                "a: !!str x\n",
+                "a: !Tag x\n",
+                "a: ! x\n",
+                "a:\t&x 1\n",
+                "- &x one\n- *x\n",
+                "- - &x a\n",
+                "a:\n  - &x b\n",
+                "a:\n  &x b\n",
+                "&x a: 1\nb: *x\n",
+                "!t a: 1\n",
+                "? &x k\n: v\n",
+                "k: [&x a, *x]\n",
+                "k: [a, !t b]\n",
+                "k: {a: &x 1}\n",
+                "k: {a: 1, b: !t x}\n",
+                "k: [? &x a : 1]\n",
+                "--- &x\na: 1\n",
+                "--- !t\na: 1\n",
+                "a: |\n  text\nb: &x 1\nc: *x\n",
+                "- a: |\n    x\n  b: &x 1\n  c: *x\n",
+                "a: >-\n  text\n&y z: 1\nw: *y\n",
+                "a: \u{a0}b #c\nd: &x 1\n",
+            ]
+            .map(|bad| (bad, PROPERTY)),
+        );
+    }
+
+    /// Multiple documents, merges, complex keys and duplicate keys keep failing, each with its own
+    /// preflight or tree-level refusal rather than a coincidental parse error.
+    #[test]
+    fn other_forbidden_shapes_keep_their_own_refusals() {
+        refused("--- \na: 1\n--- \na: 2\n", "One YAML document");
+        for (input, expected) in [
+            ("<<: {a: 1}\n", "ordinary strings"),
+            ("a: {<<: {x: 1}}\n", "ordinary strings"),
+            ("? [a, b]\n: x\n", "ordinary strings"),
+            ("[a]: x\n", "ordinary strings"),
+            ("a: 1\na: 2\n", "duplicate keys"),
+            ("a: 1\n---\na: 2\n", "duplicate keys"),
+        ] {
+            let error = read_tree(input.as_bytes()).unwrap_err();
+            assert!(
+                error.message.contains(expected),
+                "{input:?}: {}",
+                error.message
+            );
+        }
+    }
+
+    /// Text that is merely punctuation stays readable in every position the writer can emit.
+    #[test]
+    fn literal_text_controls_pass_the_preflight() {
+        for good in [
+            "a: valid_reference(store,&str)\n",
+            "a: 'x &y *z !w, &v'\n",
+            "a: \"x &y *z !w, &v \\\" &q\"\n",
+            "a: [b, \"&c\", 'd, *e']\n",
+            "a: {b: \"&c\", d: 'e, !f'}\n",
+            "a: |\n  &x text\n  *y !z\nb: ok\n",
+            "a: >-\n  &x folded\n  *y\nb: ok\n",
+            "- a: |\n    &x text\n  b: ok\n",
+            "- |\n  &x text\n- ok\n",
+            "# &x comment\na: b # *y !z\n",
+            "a: b&c\nd: e*f\ng: h!i\n",
+            "a: x - &y\n",
+            "a\u{a0}#b: c\u{a0}&d\n",
+            "a: b\r\nc: d&x\r\n",
+            "\u{feff}a: 1\n",
+        ] {
+            yaml_subset(good.as_bytes()).unwrap_or_else(|e| panic!("{good:?}: {}", e.message));
+        }
+    }
+
+    /// Native multi-line quoted scalars and flow collections are a deliberate unsupported shape:
+    /// they are refused as a whole, and the canonical writer emits only single-line forms.
+    #[test]
+    fn multiline_quotes_and_flow_are_refused_by_design() {
+        assert_refused(
+            [
+                "a: \"multi\n  line\"\n",
+                "a: 'multi\n  line'\n",
+                "a: [1,\n  2]\n",
+                "a: {b: 1,\n  c: 2}\n",
+                "a: \"escaped \\\n  break\"\n",
+            ]
+            .map(|bad| (bad, MULTILINE)),
+        );
+    }
 }

@@ -3119,6 +3119,14 @@ const YAML_PROSE: &[&str] = &[
     "trailing colon:",
     "unicode ✓ & ünïcode, *ok*",
     "mid ' quote and mid \" quote & more",
+    "line one\nline two & more\n  indented *star\n!bang",
+    "carriage\rreturn and crlf\r\n&x and tab\t*y",
+    "nel \u{85} ls \u{2028} ps \u{2029} nbsp \u{a0}#c: &x [1]",
+    "bom \u{feff} inside",
+    "\u{feff}leading bom &r",
+    "control \u{1} \u{7f} bell \u{7}",
+    "an unbroken sentence that is long enough to tempt a folding emitter past eighty columns, with ampersands & stars *and* bangs ! all through the remainder of this single plain line so that no wrap is ever introduced",
+    "- starts like a sequence, key: value, ? and : and # and [x] and {y}",
 ];
 
 /// Canonical encode of valid plain prose must always pass the exact read gate and decode equal,
@@ -3209,10 +3217,11 @@ fn yaml_legacy_plain_scalar_bytes_read_without_rewrite() {
     assert_eq!(value["items"], json!(["a,*b", "c,!d"]));
 }
 
-/// Forbidden syntax stays refused in block, flow, nested, key, separator and block-scalar-sibling
-/// positions, while quoted, literal, folded, commented and multiline controls remain accepted.
+/// End-to-end public decode keeps refusing forbidden syntax and accepting literal text. The exact
+/// scanner refusals are asserted separately by the preflight tests in the store module, because a
+/// decode error alone could come from the parser instead of the preflight.
 #[test]
-fn yaml_forbidden_syntax_negatives_and_literal_controls() {
+fn yaml_public_decode_negatives_and_literal_controls() {
     for bad in [
         "a: &x 1\nb: *x\n",
         "a: !!str x\n",
@@ -3260,8 +3269,6 @@ fn yaml_forbidden_syntax_negatives_and_literal_controls() {
         "- a: |\n    &x text\n  b: ok\n",
         "- |\n  &x text\n- ok\n",
         "# &x comment\na: b # *y !z\n",
-        "a: \"multi\n  line &x\n  quoted\"\nb: ok\n",
-        "a: 'multi\n  line *y\n  quoted'\nb: ok\n",
         "a: b&c\nd: e*f\ng: h!i\n",
         "a: x - &y\n",
     ] {
