@@ -19,6 +19,18 @@ use std::{
     time::Instant,
 };
 
+#[cfg(test)]
+std::thread_local! {
+    /// One-shot read failure after a real successful commit, isolated to the test thread.
+    static UNAVAILABLE_VERIFICATION_HEAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make only the next post-commit HEAD verification unavailable in this test thread.
+#[cfg(test)]
+pub(super) fn fail_next_verification_head() {
+    UNAVAILABLE_VERIFICATION_HEAD.with(|fault| fault.set(true));
+}
+
 /// Serialized commit message budget: whole intents only, never a truncated trailer.
 pub const MESSAGE_BUDGET: usize = 64 * 1024;
 
@@ -521,8 +533,9 @@ fn index_info(staged: &[Staged], oid_len: usize) -> Vec<u8> {
 /// real index. The user's configuration, hooks and signing apply; nothing is forced.
 ///
 /// The commit stages the exact recorded bytes (no clean filters) and is certified only when its parent,
-/// changed set, trailers and every path's object id equal what was staged; anything else is reported as
-/// [`Attempt::Unverified`], never as landed.
+/// changed set, trailers and every path's object id equal what was staged. An unreadable HEAD after
+/// writing returns [`Attempt::Unknown`] and retains reconciliation evidence; a readable but mismatched
+/// commit returns [`Attempt::Unverified`], never as landed.
 pub fn commit_paths(
     store: &Store,
     parent: &str,
@@ -589,12 +602,23 @@ pub fn commit_paths(
         &["rev-parse", "--verify", "-q", "HEAD"],
         verify,
     );
+    #[cfg(test)]
+    let head = if UNAVAILABLE_VERIFICATION_HEAD.with(|fault| fault.replace(false)) {
+        None
+    } else {
+        head
+    };
     match result {
         Ok(out) if out.success() => (),
         Ok(_) if head.as_deref() == Some(parent) => return Attempt::NotCompleted,
         Err(git::RunError::Unavailable) => return Attempt::NotCompleted,
         _ if head.as_deref() == Some(parent) || head.is_none() => return Attempt::Unknown,
         _ => (),
+    }
+    // A successful write without readable HEAD proof is uncertain, not evidence that no commit
+    // landed. Keep the journal's committing_from so explicit reconciliation can find that commit.
+    if head.is_none() {
+        return Attempt::Unknown;
     }
     let deadline = deadline.max(verify);
     let Some(new) = head.filter(|h| h != parent) else {

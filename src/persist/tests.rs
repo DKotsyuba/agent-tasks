@@ -538,6 +538,41 @@ fn a_hook_that_changes_the_worktree_is_reported() {
     );
 }
 
+/// A successful commit whose verification HEAD is temporarily unreadable keeps its attempt
+/// unknown, so a later available read can reconcile the existing commit without duplicating it.
+#[cfg(unix)]
+#[test]
+fn successful_commit_with_unavailable_head_keeps_unknown_attempt_evidence() {
+    let f = GitFixture::new();
+    let parent = f.git(&["rev-parse", "HEAD"]);
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", b"mine");
+    super::engine::fail_next_verification_head();
+    let receipt = commit_now(&store, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Unknown, "{receipt:?}");
+    let (pending, _) = journal::load(&store).unwrap();
+    assert!(pending.intents.iter().any(|i| i.committing_from.as_deref() == Some(parent.as_str()) && i.committed.is_none()), "unknown commit verification must retain its attempt: {pending:?}");
+    assert_eq!(f.git(&["show", "HEAD:doc.md"]), "mine");
+    let landed = commits(&f);
+    drop(guard);
+    let (next, guard) = call(&f);
+    let version = super::pending_version(&next);
+    let id = journal::load(&next).unwrap().0.intents[0].id.clone();
+    let report = super::recover::recover(
+        &next,
+        &guard,
+        &version,
+        super::recover::Action::Reconcile(vec![id]),
+    )
+    .unwrap();
+    assert!(report.changed);
+    assert_eq!(
+        commits(&f),
+        landed,
+        "reconcile must retain the landed commit instead of retrying it"
+    );
+}
+
 /// A signing failure behaves like any rejected commit.
 #[test]
 fn a_signing_failure_defers_without_touching_the_index() {
