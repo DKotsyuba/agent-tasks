@@ -1,13 +1,11 @@
 //! Scripted storage wrapper and behavior tests of the managed-document owner.
 //!
-//! The wrapper runs the real [`StorePort`] (real publication primitives, real journal and oracle) in
-//! a disposable temporary Git repository and adds only two things the real sources do not provide
-//! yet: scripted faults, and a stand-in DOC allocator that publishes nothing.
+//! The wrapper runs the real [`StorePort`] (real publication primitives, journal, oracle and
+//! knowledge allocator) in a disposable temporary Git repository and adds only scripted faults.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "Test assertions")]
 use super::*;
 use crate::persist::testing::GitFixture;
-use crate::store::{Durability, Tracking};
-use std::cell::Cell;
+use crate::store::Tracking;
 
 /// One scripted fault.
 pub(crate) struct Fault {
@@ -23,39 +21,30 @@ pub(crate) struct Fault {
     pub after_effect: bool,
 }
 
-/// Real storage plus scripted faults and a stand-in allocator.
+/// Real storage plus scripted faults.
 pub(crate) struct Fake<'a> {
-    /// The real filesystem port.
+    /// The real filesystem port with the root write lock.
     pub inner: StorePort<'a>,
-    /// Holds the root write lock for the test.
-    _guard: store::LockGuard,
     /// Events the store already recorded before this wrapper existed.
     baseline: usize,
-    /// Next DOC number to hand out.
-    pub next_id: Cell<u64>,
     /// Pending faults.
     pub faults: RefCell<Vec<Fault>>,
-    /// Real-event counts at which a reservation was published.
-    reservations: RefCell<Vec<usize>>,
-    /// Number of identifiers reserved.
-    pub reserved: Cell<usize>,
 }
 
 impl<'a> Fake<'a> {
-    /// Wrap a store that has an initialized `.agent-tasks/` folder, taking its write lock.
+    /// Wrap a store that has an initialized `.agent-tasks/` folder, taking its write lock for the
+    /// rest of the test process (the lock file belongs to this test's own temporary root).
     pub fn new(store: &'a store::Store) -> Self {
-        let guard = store
-            .lock(true, &mut Vec::new())
-            .unwrap()
-            .expect("write lock");
+        let guard: &'static store::LockGuard = Box::leak(Box::new(
+            store
+                .lock(true, &mut Vec::new())
+                .unwrap()
+                .expect("write lock"),
+        ));
         Self {
             baseline: store.publications().len(),
-            inner: StorePort::new(store),
-            _guard: guard,
-            next_id: Cell::new(1),
+            inner: StorePort::locked(store, guard),
             faults: RefCell::new(Vec::new()),
-            reservations: RefCell::new(Vec::new()),
-            reserved: Cell::new(0),
         }
     }
 
@@ -132,57 +121,25 @@ impl Port for Fake<'_> {
     }
     fn events(&self) -> Vec<Publication> {
         let real = self.inner.events();
-        let real = &real[self.baseline.min(real.len())..];
-        let marks = self.reservations.borrow();
-        let mut out = Vec::new();
-        for (i, event) in real.iter().enumerate() {
-            out.extend(
-                marks
-                    .iter()
-                    .filter(|m| **m == i)
-                    .map(|_| reservation_event()),
-            );
-            out.push(event.clone());
-        }
-        out.extend(
-            marks
-                .iter()
-                .filter(|m| **m >= real.len())
-                .map(|_| reservation_event()),
-        );
-        out
+        real[self.baseline.min(real.len())..].to_vec()
     }
     fn status(&self, op: &OperationId, expected: &[ExpectedEffect]) -> EffectStatus {
         self.inner.status(op, expected)
     }
     fn reserve_id(&self) -> Result<String> {
-        let n = self.next_id.get();
-        self.next_id.set(n + 1);
-        self.reserved.set(self.reserved.get() + 1);
-        let real = self.inner.events().len().saturating_sub(self.baseline);
-        self.reservations.borrow_mut().push(real);
-        Ok(format!("DOC-{n:03}"))
+        self.inner.reserve_id()
     }
     fn records(&self, home: &str) -> Result<crate::references::RecordSet> {
         self.inner.records(home)
     }
     fn resolve_id(&self, id: &str) -> Result<crate::references::Resolution> {
-        crate::references::interim_resolve(self.inner.store, self, id)
+        crate::references::prove_id(self.inner.store, self, id)
     }
 }
 
-/// The event a published allocator counter would leave.
-fn reservation_event() -> Publication {
-    Publication {
-        relative: ".agent-tasks/knowledge.yaml".into(),
-        kind: EffectKind::Replaced,
-        before: None,
-        after: None,
-        durability: Durability::Durable,
-        operation: None,
-        intent: None,
-        tracking: Tracking::NotApplicable,
-    }
+/// Exact bytes of the knowledge allocator file, `None` before the first reservation.
+pub(crate) fn allocator_bytes(dir: &tempfile::TempDir) -> Option<Vec<u8>> {
+    std::fs::read(dir.path().join(".agent-tasks/knowledge.yaml")).ok()
 }
 
 /// An operation identity for a test.
@@ -472,9 +429,8 @@ fn collisions_links_and_unsupported_files() {
     native(&dir, "docs/a.md", b"# a\n");
     let err = save_at(&f, None, "docs/A.md", b"x", Some("Collides")).unwrap_err();
     assert_eq!(err.code, "collision");
-    assert_eq!(
-        f.reserved.get(),
-        0,
+    assert!(
+        allocator_bytes(&dir).is_none(),
         "no identifier is reserved before the refusal"
     );
     assert!(f.events().is_empty(), "nothing was published");
@@ -653,6 +609,7 @@ fn relocate_normal_keeps_identity_and_order() {
     let (dir, st) = root();
     let f = Fake::new(&st);
     let (src, basis, expected_to) = prepared(&f);
+    let allocator_before = allocator_bytes(&dir);
     let to = DocPath::parse("docs/new/moved.md").unwrap();
     let r = relocate(
         &mut Scope {
@@ -689,7 +646,11 @@ fn relocate_normal_keeps_identity_and_order() {
         b"# Moving\r\nbody\r\n"
     );
     assert!(!dir.path().join("docs/old.md").exists());
-    assert_eq!(f.reserved.get(), 1);
+    assert_eq!(
+        allocator_bytes(&dir),
+        allocator_before,
+        "a move reserves nothing"
+    );
 }
 
 /// Without an operation identity an occupied destination always refuses and nothing is overwritten.
@@ -809,7 +770,7 @@ fn relocate_identity_resume_windows() {
         )
         .unwrap_err();
         assert_eq!(e.code, "partial_publication", "window {window}");
-        let reserved = f.reserved.get();
+        let reserved = allocator_bytes(&dir);
         let r = relocate(
             &mut Scope {
                 port: &f,
@@ -827,7 +788,7 @@ fn relocate_identity_resume_windows() {
             (Some("DOC-001"), State::Managed),
             "window {window}"
         );
-        assert_eq!(f.reserved.get(), reserved, "resume never reserves");
+        assert_eq!(allocator_bytes(&dir), reserved, "resume never reserves");
         assert!(!dir.path().join("docs/old.md").exists());
         assert_eq!(
             std::fs::read(dir.path().join("docs/new/moved.md")).unwrap(),
@@ -1056,10 +1017,10 @@ fn resolve_documents_and_retired_ids() {
         resolve(&f, &crate::references::Target::Knowledge("DOC-077".into())).unwrap(),
         Resolution::Missing
     );
-    assert!(matches!(
+    assert_eq!(
         resolve(&f, &crate::references::Target::Knowledge("D-001".into())).unwrap(),
-        Resolution::Unknown(_)
-    ));
+        Resolution::Missing
+    );
     assert!(crate::references::valid_reference(&f, "docs/x.md#real-heading").is_ok());
     assert!(crate::references::valid_reference(&f, "docs/x.md#nope").is_err());
     assert!(crate::references::valid_reference(&f, "M-001").is_err());
@@ -1246,16 +1207,41 @@ fn live_store_relocates_with_tracked_attested_events() {
     ));
 }
 
-/// Until the knowledge allocator source exists, a save that needs an identifier refuses before any
-/// effect and says so; an existing document is unaffected.
+/// A new document reserves its identifier through the real knowledge allocator first, then publishes
+/// the body and the record, all tracked; the next document gets the next number.
 #[test]
-fn live_store_reports_the_missing_allocator_without_effects() {
+fn live_store_allocates_before_publishing_and_never_recycles() {
     let (dir, st) = root();
-    let _guard = st.lock(true, &mut Vec::new()).unwrap().unwrap();
-    let port = StorePort::new(&st);
-    let before = tree(dir.path());
-    let err = save_at(&port, None, "docs/new.md", b"# N\n", Some("Needs an id")).unwrap_err();
-    assert_eq!(err.code, "allocator");
-    assert_eq!(tree(dir.path()), before);
-    assert!(port.events().is_empty());
+    let guard = st.lock(true, &mut Vec::new()).unwrap().unwrap();
+    let port = StorePort::locked(&st, &guard);
+    let first = save_at(&port, None, "docs/one.md", b"# One\n", Some("First")).unwrap();
+    assert_eq!(first.id.as_deref(), Some("DOC-001"));
+    let files: Vec<_> = first
+        .publications
+        .iter()
+        .filter(|p| p.kind != EffectKind::DirectoryCreated)
+        .map(|p| p.relative.as_str())
+        .collect();
+    assert_eq!(
+        files,
+        vec![
+            ".agent-tasks/knowledge.yaml",
+            "docs/one.md",
+            "documents/DOC-001.yaml"
+        ]
+    );
+    assert!(
+        first
+            .publications
+            .iter()
+            .filter(|p| p.kind != EffectKind::DirectoryCreated)
+            .all(|p| p.tracking == Tracking::Tracked)
+    );
+    let second = save_at(&port, None, "docs/two.md", b"# Two\n", Some("Second")).unwrap();
+    assert_eq!(second.id.as_deref(), Some("DOC-002"));
+    let counters = String::from_utf8(allocator_bytes(&dir).unwrap()).unwrap();
+    assert!(counters.contains("next_document: 3"), "{counters}");
+    // A port without the lock reads but cannot reserve.
+    let reader = StorePort::new(&st);
+    assert_eq!(reader.reserve_id().unwrap_err().code, "not_locked");
 }

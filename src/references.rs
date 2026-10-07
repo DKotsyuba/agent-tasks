@@ -162,6 +162,7 @@ pub fn resolve(port: &dyn Port, target: &Target) -> Result<Resolution> {
 
 /// Validator for the optional detail reference stored verbatim by typed records: a root-relative
 /// managed path with an optional fragment, an existing supported document, a matching fragment.
+/// Reads only; pass `&Store` or any [`Port`]; the caller holds at least a shared lock.
 /// Errors: `invalid_arguments` (typed IDs, dot segments, noncanonical spellings, missing targets).
 pub fn valid_reference(port: &dyn Port, raw: &str) -> Result<()> {
     let target = parse(raw)?;
@@ -704,19 +705,12 @@ pub struct RecordSet {
 }
 
 /// The structured homes whose records are searched.
-pub const HOMES: [&str; 6] = [
-    "work",
-    "project",
-    "decisions",
-    "runbooks",
-    "research",
-    "checklists",
-];
+pub const HOMES: [&str; 3] = ["work", "project", "knowledge"];
 
-/// Interim loader over the current store: work records through the work loader, the manifest through
-/// the project loader, and a named gap for a typed home that exists, because the knowledge owner's
-/// loader is not available yet.
-pub fn interim_records(store: &Store, home: &str) -> Result<RecordSet> {
+/// Records of one structured home, loaded only through their owners' validating loaders: work
+/// records through the work loader, the manifest through the project loader and the four typed
+/// kinds through the knowledge scan. Anything a loader rejects is a named gap, never searched.
+pub fn load_home(store: &Store, home: &str) -> Result<RecordSet> {
     let mut set = RecordSet {
         complete: true,
         ..Default::default()
@@ -761,28 +755,47 @@ pub fn interim_records(store: &Store, home: &str) -> Result<RecordSet> {
                 });
             }
         },
-        typed => {
-            let path = store.path(typed)?;
-            if std::fs::symlink_metadata(&path).is_ok() {
-                let nonempty = std::fs::read_dir(&path)
-                    .map(|mut d| d.next().is_some())
-                    .unwrap_or(true);
-                if nonempty {
-                    set.complete = false;
-                    set.gaps.push(Gap {
-                        what: format!("{typed}/"),
-                        reason: GapReason::LoaderUnavailable,
-                    });
-                }
+        _ => {
+            let scan = crate::knowledge::scan(store, None)?;
+            set.complete = scan.complete;
+            for snap in scan.records {
+                let id = snap.value.id().to_owned();
+                let rel = snap.value.kind().path(&id).map_err(crate::store::invalid)?;
+                set.files.push(RecordFile {
+                    rel,
+                    source: Source {
+                        kind: SourceKind::Knowledge,
+                        id_or_path: id,
+                    },
+                    bytes: snap.bytes,
+                });
+            }
+            for name in scan.unreadable {
+                set.gaps.push(Gap {
+                    what: documents::quote(&name),
+                    reason: GapReason::Unreadable,
+                });
+            }
+            for warning in scan
+                .warnings
+                .iter()
+                .filter(|w| !w.starts_with("Orphan publication temp"))
+            {
+                set.gaps.push(Gap {
+                    what: documents::quote(warning),
+                    reason: GapReason::UnrecognizedEntry,
+                });
             }
         }
     }
     Ok(set)
 }
 
-/// Interim existence proof over the current store (work records, DOC records, CP files); typed
-/// knowledge identifiers are unknown until the knowledge owner's loader lands.
-pub fn interim_resolve(store: &Store, port: &dyn Port, id: &str) -> Result<Resolution> {
+/// Proof of existence for a work, knowledge, DOC or compaction identifier through the owners' own
+/// loaders: the work loader (with its tasks and atomics), the typed knowledge loader and checklist
+/// child resolver, this owner's DOC records and the compaction record reader. A loader failure is
+/// `Unknown`, never proof.
+pub fn prove_id(store: &Store, port: &dyn Port, id: &str) -> Result<Resolution> {
     let Some(target) = parse_id(id) else {
         return Ok(Resolution::Missing);
     };
@@ -821,16 +834,29 @@ pub fn interim_resolve(store: &Store, port: &dyn Port, id: &str) -> Result<Resol
                 None => Resolution::Unknown("document records are incomplete".into()),
             })
         }
-        Target::Knowledge(_) if head.starts_with("CP-") => Ok(
-            match port.read(&format!("compactions/{head}.yaml"), documents::BODY_CAP)? {
-                documents::Read::Bytes(_) => Resolution::Found,
-                documents::Read::Absent => Resolution::Missing,
-                _ => Resolution::Unknown("not a regular file".into()),
-            },
-        ),
-        _ => Ok(Resolution::Unknown(
-            "the knowledge loader is not available".into(),
-        )),
+        Target::Knowledge(_) if head.starts_with("CP-") => {
+            Ok(match crate::compaction::read::read_cp(store, head) {
+                Ok(_) => Resolution::Found,
+                Err(e) if e.code == "cp_not_found" => Resolution::Missing,
+                Err(e) => Resolution::Unknown(format!("compaction record unreadable ({})", e.code)),
+            })
+        }
+        Target::Knowledge(_) => {
+            let parsed = crate::knowledge::parse_id(id).map_err(crate::store::invalid)?;
+            if parsed.item.is_some() {
+                return Ok(match crate::knowledge::resolve_child(store, &parsed) {
+                    Ok(crate::knowledge::Child::Found { .. }) => Resolution::Found,
+                    Ok(_) => Resolution::Missing,
+                    Err(e) => Resolution::Unknown(format!("checklist unreadable ({})", e.code)),
+                });
+            }
+            Ok(match crate::knowledge::load(store, head) {
+                Ok(_) => Resolution::Found,
+                Err(e) if e.code == "not_found" => Resolution::Missing,
+                Err(e) => Resolution::Unknown(format!("typed record unreadable ({})", e.code)),
+            })
+        }
+        Target::Doc { .. } => Ok(Resolution::Missing),
     }
 }
 

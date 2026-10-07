@@ -312,12 +312,12 @@ pub fn run(port: &dyn Port, common: &Common, op: DocumentOp) -> Result<Ack> {
 /// strings are appended to `effects` even when the operation fails after publishing.
 pub fn execute_locked(
     store: &Store,
-    _guard: &LockGuard,
+    guard: &LockGuard,
     common: &Common,
     op: DocumentOp,
     effects: &mut Vec<String>,
 ) -> Result<Ack> {
-    let port = StorePort::new(store);
+    let port = StorePort::locked(store, guard);
     let result = run(&port, common, op);
     effects.extend(port.fx.borrow_mut().drain(..));
     result
@@ -535,6 +535,82 @@ mod tests {
         assert_eq!(
             (a.target.as_str(), a.phase.as_str(), a.changed),
             ("DOC-001", "retired", true)
+        );
+    }
+
+    /// Typed identifiers, checklist items and compaction records resolve through the owners' real
+    /// loaders, and incoming coverage is complete only when every typed record validated.
+    #[test]
+    fn typed_references_resolve_through_the_real_loaders() {
+        use crate::references::{Resolution, Target, incoming, resolve};
+        use crate::tools::knowledge_ops::{KnowledgeOp, execute_locked as knowledge_execute};
+        let (dir, st) = root();
+        let guard = st.lock(true, &mut Vec::new()).unwrap().unwrap();
+        let project = crate::model::Project {
+            schema_version: 1,
+            title: "Fixture".into(),
+            purpose: "Typed references".into(),
+            remote: None,
+            created_at: crate::store::now(),
+            updated_at: crate::store::now(),
+        };
+        st.save("project.yaml", &project, None, false, &mut Vec::new())
+            .unwrap();
+        let create = |op: serde_json::Value| {
+            let token = crate::knowledge::allocation_version(&st).unwrap();
+            let common = Common {
+                project: "p".into(),
+                version: token,
+                actor: Some("tester".into()),
+                reference: None,
+            };
+            let op: KnowledgeOp = serde_json::from_value(op).unwrap();
+            if let Err(e) = knowledge_execute(&st, &guard, &common, op, &mut Vec::new()) {
+                panic!("{}: {}", e.code, e.message);
+            }
+        };
+        create(
+            json!({"op":"create_decision","title":"T","question":"Q?","decision":"D","rationale":"R"}),
+        );
+        create(
+            json!({"op":"create_checklist","title":"Release","purpose":"Steps","items":["build","tag"]}),
+        );
+        let port = StorePort::locked(&st, &guard);
+        let know = |id: &str| Target::Knowledge(id.to_owned());
+        assert_eq!(resolve(&port, &know("D-001")).unwrap(), Resolution::Found);
+        assert_eq!(resolve(&port, &know("D-002")).unwrap(), Resolution::Missing);
+        assert_eq!(
+            resolve(&port, &know("RB-001")).unwrap(),
+            Resolution::Missing
+        );
+        assert_eq!(resolve(&port, &know("CL-001")).unwrap(), Resolution::Found);
+        assert_eq!(
+            resolve(&port, &know("CL-001/I-002")).unwrap(),
+            Resolution::Found
+        );
+        assert_eq!(
+            resolve(&port, &know("CL-001/I-003")).unwrap(),
+            Resolution::Missing
+        );
+        assert_eq!(
+            resolve(&port, &know("CL-009/I-001")).unwrap(),
+            Resolution::Missing
+        );
+        assert_eq!(
+            resolve(&port, &know("CP-001")).unwrap(),
+            Resolution::Missing
+        );
+        // A document that mentions a Decision is an incoming source, and coverage stays complete.
+        native(&dir, "docs/note.md", b"We decided in D-001.\n");
+        let found = incoming(&port, &know("D-001")).unwrap();
+        assert!(found.coverage.complete && found.rows.len() == 1);
+        // A corrupt typed record is a named gap and makes coverage incomplete, never a silent zero.
+        native(&dir, "decisions/D-009.yaml", b"not: [valid");
+        let gap = incoming(&port, &know("D-001")).unwrap();
+        assert!(!gap.coverage.complete && !gap.coverage.gaps.is_empty());
+        assert_eq!(
+            resolve(&port, &know("D-009")).unwrap(),
+            Resolution::Unknown("typed record unreadable (invalid_data)".into())
         );
     }
 

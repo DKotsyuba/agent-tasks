@@ -373,12 +373,14 @@ pub trait Port {
 }
 
 /// [`Port`] over the real request [`store::Store`]: publication primitives with typed events and
-/// journal attestation, the persistence oracle and the work and DOC record loaders. Allocation of a
-/// DOC identifier and the typed knowledge loaders belong to the knowledge owner and are reported as
-/// unavailable until that source exists; nothing here imitates them.
+/// journal attestation, the persistence oracle, the knowledge allocator and the work, typed
+/// knowledge, compaction and DOC record loaders. Mutations need the root write lock: build the port
+/// with [`StorePort::locked`]; a port from [`StorePort::new`] only reads.
 pub struct StorePort<'a> {
     /// The resolved request store; the caller holds its root write lock for mutations.
     pub store: &'a store::Store,
+    /// The root write lock acquired through `store`, when the caller holds it.
+    guard: Option<&'a store::LockGuard>,
     /// Human effect strings, in order.
     pub fx: RefCell<Vec<String>>,
 }
@@ -388,6 +390,17 @@ impl<'a> StorePort<'a> {
     pub fn new(store: &'a store::Store) -> Self {
         Self {
             store,
+            guard: None,
+            fx: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Wrap one request store together with the root write lock the caller holds, enabling the
+    /// allocator reservation. Publication primitives check the lock themselves.
+    pub fn locked(store: &'a store::Store, guard: &'a store::LockGuard) -> Self {
+        Self {
+            store,
+            guard: Some(guard),
             fx: RefCell::new(Vec::new()),
         }
     }
@@ -467,21 +480,73 @@ impl Port for StorePort<'_> {
     }
 
     fn reserve_id(&self) -> Result<String> {
-        Err(Error::new(
-            "allocator",
-            "The knowledge allocator source is not available yet; nothing was reserved.",
-        ))
+        let guard = self.guard.ok_or_else(|| {
+            Error::new(
+                "not_locked",
+                "Reserve under the root write lock acquired through this store.",
+            )
+        })?;
+        let expected = crate::knowledge::allocation_version(self.store)?;
+        crate::knowledge::reserve(
+            self.store,
+            guard,
+            crate::knowledge::Prefix::Document,
+            &expected,
+            &mut self.fx.borrow_mut(),
+        )
     }
 
     fn records(&self, home: &str) -> Result<references::RecordSet> {
-        references::interim_records(self.store, home)
+        references::load_home(self.store, home)
     }
 
     fn resolve_id(&self, id: &str) -> Result<references::Resolution> {
-        references::interim_resolve(self.store, self, id)
+        references::prove_id(self.store, self, id)
     }
 }
 
+/// The bare store is a [`Port`] for the read-only functions and for callers that do not need the
+/// human effect strings: the contract-facing signatures that take `&Store` accept it directly.
+/// Reservation needs the write lock, so a bare store refuses it with `not_locked`; build a
+/// [`StorePort::locked`] for mutations that reserve.
+impl Port for store::Store {
+    fn version(&self, rel: &str, bytes: Option<&[u8]>) -> String {
+        store::Store::version(self, rel, bytes)
+    }
+    fn read(&self, rel: &str, cap: usize) -> Result<Read> {
+        StorePort::new(self).read(rel, cap)
+    }
+    fn list(&self, dir: &str, cap: usize) -> Result<DirListing> {
+        self.list_dir(dir, cap)
+    }
+    fn inventory(&self, dir: &str, prefix: &str) -> Result<store::Inventory> {
+        self.kind_inventory(dir, prefix)
+    }
+    fn put(&self, p: Put<'_>) -> Result<()> {
+        StorePort::new(self).put(p)
+    }
+    fn del(&self, d: Del<'_>) -> Result<()> {
+        StorePort::new(self).del(d)
+    }
+    fn ensure_parents(&self, rel: &str) -> Result<()> {
+        StorePort::new(self).ensure_parents(rel)
+    }
+    fn events(&self) -> Vec<Publication> {
+        self.publications()
+    }
+    fn status(&self, op: &OperationId, expected: &[ExpectedEffect]) -> EffectStatus {
+        effect_status(self, op, expected)
+    }
+    fn reserve_id(&self) -> Result<String> {
+        StorePort::new(self).reserve_id()
+    }
+    fn records(&self, home: &str) -> Result<references::RecordSet> {
+        references::load_home(self, home)
+    }
+    fn resolve_id(&self, id: &str) -> Result<references::Resolution> {
+        references::prove_id(self, self, id)
+    }
+}
 // ---------------------------------------------------------------------------------------------
 // Records, gaps and states
 // ---------------------------------------------------------------------------------------------
@@ -511,8 +576,6 @@ pub enum GapReason {
     NotRegular,
     /// The file is larger than the body cap.
     TooLarge,
-    /// The owner's loader for this home is not available yet.
-    LoaderUnavailable,
 }
 
 /// One named omission.
