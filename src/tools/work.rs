@@ -450,7 +450,21 @@ pub fn call(
                     }
                 },
             };
-            let text=templates.render("core_error",&failure).unwrap_or_else(|_| format!("ERROR {}. Presentation degraded.\n{}\nEffects: {}\nInspect current state before retrying.\n",e.code,failure.message,if effects.is_empty(){"none confirmed".into()}else{effects.join("\n")}));
+            let text = templates
+                .render("core_error", &failure)
+                .unwrap_or_else(|_| {
+                    let head = format!(
+                        "ERROR {}. Presentation degraded.\n{}",
+                        e.code,
+                        plain_line(&failure.message, 512)
+                    );
+                    degraded(
+                        &head,
+                        &effects,
+                        &ledger.git,
+                        "Inspect current state before retrying.",
+                    )
+                });
             (text, true)
         }
     };
@@ -615,9 +629,56 @@ pub(super) fn render_ack(
         "core_ack"
     };
     let ack = ack.clone().bounded(&next);
-    templates.render(layout,&Saved {ack:&ack,effects,git,next}).unwrap_or_else(|_| format!(
-        "{} {}. Version: {}. Presentation degraded.\nEffects:\n{}\nInspect get_context; do not replay.\n",
-        if ack.changed {"SAVED"}else{"UNCHANGED"},ack.target,ack.version,effects.join("\n")))
+    templates
+        .render(
+            layout,
+            &Saved {
+                ack: &ack,
+                effects,
+                git,
+                next,
+            },
+        )
+        .unwrap_or_else(|_| {
+            let head = format!(
+                "{} {}. Version: {}. Presentation degraded.",
+                if ack.changed { "SAVED" } else { "UNCHANGED" },
+                ack.target,
+                ack.version
+            );
+            degraded(&head, effects, git, "Inspect get_context; do not replay.")
+        })
+}
+
+/// Last-resort reply when a template cannot render: the head line, every Git receipt line (a
+/// pending commit or an attention flag must never disappear), then as many effect lines as the
+/// reply limit allows with an explicit omission count.
+fn degraded(head: &str, effects: &[String], git: &[String], tail: &str) -> String {
+    let mut text = format!("{head}\n");
+    for line in git {
+        text.push_str(&plain_line(line, 200));
+        text.push('\n');
+    }
+    let reserve = tail.len() + 80;
+    let mut shown = 0;
+    for effect in effects {
+        let line = plain_line(effect, 400);
+        if text.len() + line.len() + 1 + reserve > super::pages::REPLY_LIMIT {
+            break;
+        }
+        text.push_str(&line);
+        text.push('\n');
+        shown += 1;
+    }
+    if shown < effects.len() {
+        text.push_str(&format!(
+            "{} effect line(s) omitted.\n",
+            effects.len() - shown
+        ));
+    }
+    text.push_str(tail);
+    text.push('\n');
+    text
 }
 
 /// Label the record kind of a canonical target; the label carries its own noun.

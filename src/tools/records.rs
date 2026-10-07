@@ -910,7 +910,7 @@ fn cp_reviews(record: &CpRecord, index: Option<usize>, value: &mut Page) -> Resu
 ///
 /// Every figure names its coverage; an incomplete inventory is PARTIAL with lower bounds, never a
 /// silent zero. Pending Git facts come from the persistence provider's read-only summary.
-pub(super) fn project_lines(store: &Store, value: &mut Page) {
+pub(super) fn project_lines(store: &Store, pending: &persist::PendingSummary, value: &mut Page) {
     match knowledge::observe_allocation(store) {
         Ok(a) => {
             value
@@ -1001,6 +1001,12 @@ pub(super) fn project_lines(store: &Store, value: &mut Page) {
             ));
         }
     }
+    compaction_line(store, value);
+    git_line(pending, value);
+}
+
+/// Add the compaction proposal summary; an unreadable inventory is PARTIAL, never a silent zero.
+pub(super) fn compaction_line(store: &Store, value: &mut Page) {
     match compaction::summaries(store, 20) {
         Ok(s) => {
             let live = s.rows.iter().filter(|r| !r.state.terminal()).count();
@@ -1030,7 +1036,10 @@ pub(super) fn project_lines(store: &Store, value: &mut Page) {
             ));
         }
     }
-    let pending = persist::pending(store);
+}
+
+/// Add the pending Git facts and the exact pending version a recovery call needs.
+pub(super) fn git_line(pending: &persist::PendingSummary, value: &mut Page) {
     value.lines.push(format!(
         "Git persistence: {} pending intent(s), {} path(s), {} unknown, {} drifted; pending version {}{}.",
         pending.facts.intents,
@@ -1040,9 +1049,34 @@ pub(super) fn project_lines(store: &Store, value: &mut Page) {
         pending.version,
         if pending.complete { "" } else { "; coverage PARTIAL" }
     ));
+    for warning in pending.warnings.iter().take(2) {
+        value.lines.push(store::safe(warning, 200));
+    }
     if !pending.complete {
         value.coverage = "PARTIAL".into();
     }
+}
+
+/// One pageable row per listed pending Git intent, oldest first, so every `PG-` identity a recovery
+/// call needs is readable through the project context pages.
+pub(super) fn pending_rows(pending: &persist::PendingSummary) -> Vec<String> {
+    let mut rows: Vec<String> = pending
+        .refs
+        .iter()
+        .map(|r| {
+            format!(
+                "{} pending Git intent, phase {:?}, {} path(s); recover with git_recovery at pending version {}.",
+                r.intent, r.phase, r.paths, pending.version
+            )
+        })
+        .collect();
+    let unlisted = pending.facts.intents.saturating_sub(pending.refs.len());
+    if unlisted > 0 {
+        rows.push(format!(
+            "{unlisted} more pending intent(s) are not listed; resolve the listed ones and read this context again."
+        ));
+    }
+    rows
 }
 
 // ---------------------------------------------------------------------------------------------

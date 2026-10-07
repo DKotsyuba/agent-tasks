@@ -6,6 +6,7 @@ use super::{
 };
 use crate::{
     model::*,
+    persist,
     response::Templates,
     store::{self, Config, Error, Result, Snapshot, Store},
 };
@@ -173,7 +174,12 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             .as_ref()
             .map(|p| p.version.clone())
             .unwrap_or_else(|| store.version("project.yaml", None));
-        let snapshot = scope_version("get_context:project", &manifest_version, &scan.version);
+        let pending = persist::pending(&store);
+        let snapshot = scope_version(
+            "get_context:project",
+            &manifest_version,
+            &format!("{}:{}", scan.version, pending.version),
+        );
         continuation(args.start, args.rows(), args.version.as_deref(), &snapshot)?;
         let mut value = page(
             format!(
@@ -232,7 +238,8 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             Err(e)=>value.lines.push(format!("Allocator unreadable: {}",store::safe(&e.message,200))),
         }
         warnings(&mut value, &scan.warnings);
-        records::project_lines(&store, &mut value);
+        records::project_lines(&store, &pending, &mut value);
+        value.rows.extend(records::pending_rows(&pending));
         for m in scan.modules {
             value.rows.push(module_brief(&store, &m.value));
         }
@@ -2283,6 +2290,14 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
         "Purpose: {}",
         store::safe(&project.value.purpose, 240)
     ));
+    if args.module.is_none() {
+        records::compaction_line(&store, &mut value);
+        let pending = persist::pending(&store);
+        records::git_line(&pending, &mut value);
+        value
+            .lines
+            .push("Pending Git intent identities: get_context with project only (rows).".into());
+    }
     value.lines.push("Last activity is reported, not live agent presence. Artifacts/checks are agent reports, not independently queried external facts.".into());
     value.lines.push("More detail: get_context ref=M-001 view=tasks/results/checks/review. Narrow this status with module=M-001.".into());
     warnings(&mut value, &scan.warnings);
