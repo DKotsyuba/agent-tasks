@@ -1,21 +1,21 @@
 # Registered tool surface, dispatch seam and read presentation — planning contract
 
-Status: planning artifact, revision 2 of `registered-tool-surface` (provider M-003, consumer M-006). Revision 2 replaces the unagreed provisional revision 1 (staged blob `ed19772807c2c311bc4543354edc68daf2588ffd`) after the owner and root decisions on automatic commits, work writes, recovery and read schemas. Nothing here is implemented: every Rust item is a signature to be written. [architecture.md](../architecture.md) stays the truth for implemented behavior. M-003 is the only owner of `src/main.rs` module declarations, `src/tools/mod.rs`, `src/tools/input.rs`, `src/tools/read.rs`, the dispatcher and acknowledgement parts of `src/tools/work.rs`, the response templates and the exported `schemas/tools.json`. Producers never edit those files. Revision numbers belong to this provider.
+Status: planning artifact, semantic revision 3 of `registered-tool-surface` (provider M-003, consumer M-006). It supersedes the earlier semantic revisions after the owner and root decisions on automatic commits, work writes, recovery, read schemas and the independent final review (explicit recovery acknowledgement exception, real no-op rule, partial outcome after publications). The immutable tracker reference revision is distinct from this heading: each tracker entry pins the actual committed bytes and gets a higher revision when this file is signed. Nothing here is implemented: every Rust item is a signature to be written. [architecture.md](../architecture.md) stays the truth for implemented behavior. M-003 is the only owner of `src/main.rs` module declarations, `src/tools/mod.rs`, `src/tools/input.rs`, `src/tools/read.rs`, the dispatcher and acknowledgement parts of `src/tools/work.rs`, the response templates and the exported `schemas/tools.json`. Producers never edit those files. Revision numbers belong to this provider.
 
 ## 1 Pinned consumptions
 
-Each is a provider-owned proposal; the consumer pins revision, commit, path and content digest. An affecting change by a provider raises its revision and needs fresh agreement from every party.
+Each is a provider-owned, signed and committed artifact; the consumer pins the current published revision, commit, path and content digest, read from the live tracker context and never guessed. An affecting change by a provider raises its revision and needs fresh agreement from every party.
 
-| Boundary | Provider | Revision | Reference (commit:path sha256) |
+| Boundary | Provider | Current pinned revision | Reference (commit path sha256) |
 |---|---|---|---|
-| `kr-model-read` | M-001 | 2 | `d782f9cf33383c0b903a31a53d9ee99d5269d1a2:docs/contracts/knowledge-records.md sha256:e1e6829717348c83ac66ce798380e2b23ee73d5374a1c7224a71b5f7c53586cb` |
-| `md-documents` | M-002 | 1 | `d4bd4ac1df9db01c1a2e3dbdd4e5f90430cf16bf:docs/contracts/markdown-references.md sha256:809032a9f8313c11f84074eab07858a67a21e1f692a5ba3fac768f7848a7f2e6` |
-| `persist-git-m003` | M-004 | 1 | `c7f800e38dd23dd7fd7e2ada000cd3e9c46f4c2a:docs/contracts/publication-git.md sha256:c588aead85a8f4d7ff3af1cca050383a2e60a541184c83f0d85ab9a1351761f2` |
-| `compaction-operations` | M-005 | 2 | none pinned: the retained revision is 2 but the only committed artifact (`e1a7559bb1a801a3eaceb601b3db4d9e37765b54`, sha256 `800f7daa14da3fc4ad1462bb863910c85362f58a53db151047fed22f383b569c`) is revision 1 |
+| `kr-model-read` | M-001 | 5 | `commit 485137330f11a9ab05088801309f66c2c6e17d5b path docs/contracts/knowledge-records.md sha256 49833aaa21fe571683670fc78ba9150af49aacc5adb7384438780e0a07268841` |
+| `md-documents` | M-002 | 2 | `commit ea3a17fd4169f4c254ecd1f082a85c5f51d801da path docs/contracts/markdown-references.md sha256 e9808e8336df412a3219c8858435977e0ef966c19db6b7479609119b2f99f94c` |
+| `persist-git-m003` | M-004 | 2 | `commit 2193a35a5465c0f88486807263e65c58cead4ad9 path docs/contracts/publication-git.md sha256 7fd00805e4394ca5e6416e43c636ecb58be857da5151b9568aed9ca0edae6862` |
+| `compaction-operations` | M-005 | 3 | `commit 256f77c8b9013d66e77d40213d1d5357810e261b path docs/contracts/compaction.md sha256 e24fd79d2e9fd0198d791683309d36e2a98ee2d1b5ee06989a8c4444e4bd89a6` |
 
-Known gaps, named and not papered over. M-004 has a staged, uncommitted revision 2 (read in its worktree: blob `2130e81ee680420c2438ec8ab2041c6418190183`, sha256 `e7ce42fd0c9ffbc90e62777b651dcb58be09fcfc2895a94954eb34f18e6a7f5c`); this contract is written against its content but pins only the committed revision 1 until the provider commits revision 2 and declares it. The M-005 artifact for revision 2 is not available to M-003. No pin is claimed for either.
+The M-005 artifact is signed and matches revision 3. Review requested changes to its move and removal handling will later produce a higher input revision (r4); until the provider publishes it the signed r3 stays the current pin and is not an uncommitted proposal. No source interface is guessed from a staged or future text.
 
-Provided here: `registered-tool-surface` revision 2 to M-006. Its reference stays provisional until root commits this file; the working-tree blob and sha256 are reported by the lead, never invented.
+Provided here: `registered-tool-surface` to M-006 and `producer-host` to M-001, M-002, M-004 and M-005, all pinning this file by commit, path and sha256 once root signs it. Placeholder or staged references are never published as agreed.
 
 ## 2 Registered surface
 
@@ -34,7 +34,7 @@ Reads add no tool. `get_context`, `project_status` and `search` learn the new re
 
 The single `input::Common {project, version, actor, reference}` is reused. The four new tools decode with `input::mutation::<Op>(args, false)` and export `input::mutation_schema::<Op>(false)`; `ref` stays a variant field owned by the producer. A producer defines no second Common, decoder or schema function.
 
-`version` means, per tool: `knowledge_work` create ops the one knowledge allocation observation, every other op the record version; `document_work` the `Version` printed by `get_context` for that path or DOC id (an absent path has a version too); `compaction_work propose` the knowledge allocation observation, other ops the CP record version; `git_recovery` the exact pending journal observation version (`PendingSummary.version`, section 13 M4-2), validated by `persist::recover` under the same lock. A stale version refuses before any effect.
+`version` means, per tool: `knowledge_work` create ops the one knowledge allocation observation, every other op the record version; `document_work` the `Version` printed by `get_context` for that path or DOC id (an absent path has a version too); `compaction_work propose` the knowledge allocation observation, other ops the CP record version; `git_recovery` the exact pending journal observation version, validated by the recovery producer's own `execute_locked` under the lock the dispatcher holds. The dispatcher never calls a private recovery engine entry point. A stale version refuses before any effect.
 
 Field specific errors (observed defect AT-003), no new dependency. M-003 provides in `input.rs`:
 
@@ -73,7 +73,9 @@ pub(super) fn ack(target: impl Into<String>, version: String, phase: impl Into<S
 
 `ack` derives `phase_label` from the target: `E-` Epic phase, `A-` Atomic phase, `M-` Module phase (unchanged), `D-` Decision state, `RB-` Runbook state, `RS-` Research state, `CL-` Checklist state, `DOC-` or a managed path Document state, `CP-` Compaction state. The `core_ack` template prints `{{ phase_label }}: {{ phase }}` with the label carrying its own noun, so existing output is byte identical. `target` is a canonical ref usable with `get_context`; `version` is the new record or observation version usable for the next write; `phase` is a short lowercase state. Notes beyond eight or lines beyond 200 bytes are cut by the dispatcher with an explicit `N notes omitted; get_context ref=<target>` line, never silently. Producers never add a Git line, never render text and never settle.
 
-Read models stay public in the domain modules and M-003 renders them: `knowledge::{load, scan, Any, Kind, allocation_version}`, `documents::{observe, read, inventory, corpus}`, `markdown::{outline, resolve, page, heading_at}`, `references::{incoming, outgoing}`, `persist::pending`, `compaction::{read_cp, summaries, inventory_ids}`. Every struct field M-003 renders is `pub`.
+Canonical target rule and its one closed exception. The application `Ack` is unchanged. Every work, knowledge, document and compaction target is a real canonical ref (an `E-`, `M-`, `A-`, `D-`, `RB-`, `RS-`, `CL-`, `DOC-` or `CP-` ref, or a managed path) and its `Next` route is `get_context ref=<target>`. The single exception is `git_recovery`: the presenter selects the `recovery_ack` layout from the known tool kind of the call, never from the target string and never from a template name supplied by a producer or a user. Its `target` is the display label `Git recovery`, its phase label is specific to recovery, and its `Next` route is `get_context` with the project and the `ref` omitted, which shows the actual pending version and facts. The label is never rendered as `ref=Git recovery` or `ref=Project`. For any other tool a target that is not a canonical ref cannot invent a route: the reply names the target as unrouted and points only at `get_context` with the project and `ref` omitted. No new application outcome type, no second common argument type and no backend locking are introduced.
+
+Read models stay public in the domain modules and M-003 renders them: `knowledge::{load, scan, Any, Kind, allocation_version}`, `documents::{observe, read, inventory, corpus}`, `markdown::{outline, resolve, page, heading_at}`, `references::{incoming, outgoing}`, `persist::pending`, and the actual compaction read surface `compaction::{read_cp(store, id), summaries, inventory, scan}`. Every struct field M-003 renders is `pub`.
 
 ## 5 Dispatch: one mutation scope for every mutating tool
 
@@ -91,14 +93,19 @@ fn mutation_scope(config: &Config, project: &str, class: persist::EventClass, pr
 
 `plan`, `record` and `review` become `*_locked(store, guard, ..)` bodies minus their first two lines; `prepare_first` keeps today's `store.prepare` before the lock for `init_project` only. The scope: (1) resolve the alias; (2) optional prepare; (3) take the write lock once; (4) run the body or `execute_locked`; (5) decide settlement; (6) call `persist::settled(&store, &guard, event, persist::production_policy(), result)` while the guard is held; (7) release; the caller then renders. Settlement is decided as follows:
 
+A real no-op is the absence of any actual file publication, not merely `Ack.changed = false`. The scope decides from the actual typed events in `store.publications()` (a `DirectoryExisting` event is not an effect) and from the real success or error, never from the flag alone, and it never drops a receipt or commits something it should not:
+
 - `Ok` with `changed = true`: settle with `EventOutcome::Success`.
-- `Ok` with `changed = false` and no typed publication in `store.publications()`: no settlement, no Git line; a true no-op never commits.
-- `Err` with typed publications (partial or failed after publishing): settle with `EventOutcome::Partial`; the business error is returned unchanged with the ledger and the Git lines.
+- `Ok` with `changed = false` and no actual file publication: a real no-op; no settlement, no Git line, never a commit.
+- `Ok` with `changed = false` but at least one actual file publication: not a no-op. Settle with `EventOutcome::Partial` so the effects are tracked and reported, never committed as a success and never dropped; the reply keeps the receipt and states that effects were published while the result was reported unchanged.
+- `Err` with actual file publications (partial or failed after publishing): settle with `EventOutcome::Partial`; the business error is returned unchanged with the ledger and the Git lines.
 - `Err` with no publication: no settlement.
 
 Event classes: `plan_work`, `record_work`, `review_work` and `review_module` use Work; `knowledge_work` Knowledge; `document_work` Document; `compaction_work` the M-005 provided `Compaction::event_class(&self) -> persist::EventClass` (M-004 revision 2 has five Compaction variants); `refs` come from `Ack.refs`, empty on failure and advisory only, because identity is the journal. Event uses the provider-owned EventOutcome enum, not a second boolean or outcome type; settlement downgrades sync-uncertain or unknown-tracking success to Partial. `operation` is None at this level (M-005 passes its own per-action operation ids inside its handler).
 
-Recovery. `git_recovery` runs in the same scope with the same single lock. Its producer execute_locked checks the exact pending observation under the held lock, calls its private recovery engine and returns the explicit recovery receipt lines in Ack.notes. The dispatcher invokes only the uniform public producer handler, never a second engine entry point. For this tool and only here the scope skips ordinary settlement, on `Ok` because the recovery receipt is its settlement, and on `Err` because re-entering the engine that just failed would hide the cause; the error carries M-004's pending references. No handler locks itself.
+Recovery. `git_recovery` runs in the same scope with the same single lock. Its producer `execute_locked` validates the exact pending journal observation version under the held lock, calls its private recovery engine and returns the explicit recovery receipt lines in `Ack.notes`. The dispatcher invokes only the uniform public producer handler, never a second engine entry point, so the version check lives in that handler and not in a dispatcher call to a private function. For this tool and only here the scope skips ordinary settlement, on `Ok` because the recovery receipt is its settlement, and on `Err` because re-entering the engine that just failed would hide the cause; the error carries M-004's pending references. The reply uses the `recovery_ack` layout selected from the known tool kind (see the canonical target rule). No handler locks itself.
+
+Receipt projection. The receipt a call returns (outcome, commit and paths) describes that call only. Earlier pending intents and any commits made for older work are separate facts: the reply renders them as their own lines, labeled as earlier pending, and never merges them into the current call's outcome or paths. M-003 projects only the fields the provider actually publishes and invents no field names until the provider's final type is published. Under the whole intent rule the current call's atomic replacement plus removal commits as one intent; an older held replacement must be committed before a delete commit, and the dispatcher never requires all unrelated pending work to commit inside a fresh handler, so there is no dispatch deadlock. These are the providers' business guarantees; the dispatcher calls `settled` once, renders the result and adds no loop or retry.
 
 Reply. After the existing text the reply shows the effect ledger (`Published ...` strings from `effects`, which stay human text) and at most the six lines of `GitReceipt::lines()`; the added lines are additive and the pre-existing lines of every existing tool are unchanged. A rendering failure keeps the saved result: the degraded text still names target, version, effects and Git line. Errors render through `core_error`, extended with the Git lines; an unknown outcome keeps the "inspect before retrying, do not replay" recovery text. Under the owner approved policy the SDK exercises the shipped production policy with no injection flag; an automatic commit is claimed delivered only from such a run, never from a mock.
 
@@ -184,11 +191,13 @@ There is exactly one knowledge allocation observation, covering all six kinds (D
 
 ## 12 Controls
 
-Each is positive, negative and a named implementation mutant that must fail the same test, then restored, tied to the restored candidate and revision 2. Substitutes are not E2E proof; the integration Atomic and real stdio protocol runs prove composition. Git fault tests live in M-004's in-crate fixtures because the SDK cannot reach `cfg(test)` code; the SDK qualifies shipped public behavior.
+Each is positive, negative and a named implementation mutant that must fail the same test, then restored, tied to the restored candidate and the published tracker revision of each boundary. Substitutes are not E2E proof; the integration Atomic and real stdio protocol runs prove composition. Git fault tests live in M-004's in-crate fixtures because the SDK cannot reach `cfg(test)` code; the SDK qualifies shipped public behavior.
 
 - Catalog: exactly the existing ten plus four tools; schemas closed; `contract check` clean. Mutant: a tool unrouted.
 - Dispatch scope: the lock is held during the body and `settled`; a probing policy cannot take the lock; a stale version has no effect; an unknown op or field is refused naming the field. Mutants: settle after the guard drops; a value echoed in an error.
-- Settlement rules: a changed success settles, a true no-op does not, a partial failure settles as failed and the error text is unchanged, `git_recovery` skips settlement, registration is not settled. Mutants: settle a no-op; settle a read.
+- Settlement rules: a changed success settles, a real no-op (no actual file publication) does not, an `Ok` with `changed = false` but actual publications settles as Partial and keeps its receipt, an error after publications settles as Partial with the error text unchanged, `git_recovery` skips ordinary settlement, registration is not settled. Mutants: settle a real no-op; settle a read; drop the receipt of an unchanged result with publications; commit that case as a success.
+- Acknowledgement target: every work, knowledge, document and compaction target routes `get_context ref=<target>`; `git_recovery` selects `recovery_ack` from the tool kind and routes `get_context` with `ref` omitted; a non-canonical target on another tool invents no route. Mutants: a recovery reply rendered as `ref=Git recovery`; the layout chosen from the target string.
+- Receipt projection: the current call's outcome, commit and paths are shown apart from earlier pending facts. Mutant: earlier pending paths merged into the current receipt.
 - Hoisted work handlers: the full existing core and protocol suites pass unchanged except for the additive Git line. Mutant: a hoisted handler loses its version check.
 - Wire: pages for every budget concatenate to the original for the CRLF, BOM, lone CR, NUL, bidi, non-BMP and fenced-heading fixture, the whole reply is at most 8192 bytes, and an empty span ends with no continuation. Mutants: HTML-escape the payload; subtract no overhead; keep a `Next` on the final page.
 - Continuation and schemas: pages share one snapshot, an edit between pages gives `stale`; a `limit` on document content and a selector on a non-document refuse naming the field; row paging of existing views is unchanged. Mutants: offset in the snapshot; `limit` ignored.
@@ -197,41 +206,19 @@ Each is positive, negative and a named implementation mutant that must fail the 
 - Epic: a fixture Epic with one unreadable member prints PARTIAL, names it, never zero. Mutants: complete printed; direct counts unlabeled.
 - Errors: AT-003 retest names `read_refs` and the limit without the value, and a wrong field name on `plan_work edit_task` is named, on a real stdio call.
 
-## 13 Mismatches to resolve (precise)
+## 13 Provider alignment against the final published references
 
-M1 knowledge records (M-001)
-1. `Common`, `decode` and `schema()` duplicate `input::Common`, `input::mutation`, `input::mutation_schema`; remove them.
-2. `execute` locks internally; the dispatcher needs only `execute_locked(store, guard, common, op, effects) -> work::Ack`. Its `recoverable` argument must go: M-004 revision 2 provides `locate_committed(store, relative, version, bytes)`, so the trait forwards in one line inside M-001.
-3. `KnowledgeOutcome` becomes `work::Ack`; `published` is redundant with the effect ledger.
-4. Caller specific `foreign` lists conflict with one observation across six kinds (section 11).
-5. Struct fields need `pub` for rendering; `Any` accessors do not cover content rows.
+The providers' final published references in section 1 govern. This section lists only what M-003 relies on or must project; the earlier proposal level mismatches are closed by those publications, and any divergence found later is a mismatch to report to the provider, never patched here or guessed from staged text.
 
-M2 documents and references (M-002)
-1. No `DocumentOp`, `DESCRIPTION` or `execute_locked` is proposed; they must be provided with document and section selection, `purpose`, the exact body as a JSON string with `wire` (raw default, escaped decodes through `markdown::decode`), and both versions for relocate.
-2. `Receipt` maps to `Ack` inside the handler.
-3. `references::valid_reference` text names `docs/../x.md`, apparently a typo for `docs/x.md`.
-4. `Coverage` and `Incoming` shapes differ from what M-005 assumes (M5-4).
-5. `corpus` should report `bytes_read` so M-003 can record search cost.
-
-M4 publication and Git (M-004; revision 2 staged proposal read)
-1. `RecoveryRequest` is still a plain struct; provide `RecoveryOp` (serde tag `op`, schemars, `DESCRIPTION`, `execute_locked`) and delete the sentence that the recovery handler locks itself; section 11 of the staged text conflicts with its own rule 0.1.
-2. `PendingSummary` has no `version`; add the exact journal observation version, make `recover` take it and refuse `stale` under the same lock.
-3. `Event.refs` on failure are empty and advisory; identity is the journal.
-4. Owner policy: `production_policy()` must implement commit after every successful actual mutation, never for reads, true no-ops, failed or partial calls; the policy input has no `changed` or published count, so M-004 must derive them from the journal and `store.publications()` or add a field. Remove every statement that the shipping policy never commits.
-5. `settled` receives no changed flag; M-003 skips settlement for no-ops itself (section 5) and M-004 must tolerate that.
-6. `recover` and `settle` receipts are plain data; `recover` errors must carry the pending references.
-7. Assumption to confirm: knowledge, compaction and document records count as "document or task or project record" for the commit policy.
-
-M5 compaction (M-005)
-1. `tool_definitions` and `templates` are removed; M-003 composes catalog and templates.
-2. `execute(config, ...)` and `CpAck.git` become `execute_locked(...) -> work::Ack`; Git lines come only from the dispatcher; blocked and applied go to `notes` and `phase`. Add `Compaction::event_class(&self)`.
-3. `read_cp(config, &ContextArgs) -> CpView` becomes `read_cp(store, id) -> Snapshot<CpRecord>`; keep `summaries(store, limit)`; add `inventory_ids(store) -> (Vec<String>, bool)`.
-4. Duplicated `OperationId`, `GitOutcome`, `EffectReceipt` and an undefined `MutationScope` must use M-004's types (revision 2 already maps them); M-002's `Coverage` and `Incoming` are `{complete, files_read, bytes_read, gaps, unparsed, limits, version}` and `{source, via, count, fragments}`, not `{unknown, digest}` and `{kind, from, locator, to}`; `DocObservation.owner` has no M-002 counterpart because typed bodies are outside its namespace.
-5. Reuse `input::RecoveryStage` and the model verdict types; `actor` is optional in `Common`, the handler refuses a missing actor naming the field.
-6. The tracker retains revision 2 while the only committed artifact is revision 1; no revision 2 artifact is available to M-003.
+- M-001, M-002, M-004 and M-005 each supply, in `src/tools/<producer>_ops.rs`, a closed operation enum, `DESCRIPTION` and `execute_locked(store, guard, common, op, effects) -> work::Ack` under `input::Common`. None defines a second common type, decoder, schema helper or outcome type, takes the lock, renders text or adds a Git line. Domain code never imports `tools`.
+- M-004 owns the commit policy, `EventOutcome`, `settled`, the pending facts with their exact observation version, the receipt types and the proofs; the store owns `OperationId`, `Publication` and attestation. M-003 consumes them and defines none. The recovery producer validates the version itself.
+- M-002 owns document reads, pages, inventory and corpus; M-001 the one knowledge allocation observation and typed read models; M-005 the actual compaction read surface `read_cp(store, id)`, `summaries`, `inventory` and `scan` (the early name `inventory_ids` is obsolete) and the operation handler with its removal barrier. M-003 renders them and defines none.
+- References in `Ack.refs` and tracker entries are at most 256 bytes.
+- The receipt projection obligation in section 5 holds until the provider publishes its final receipt type; M-003 then renders exactly the published fields.
 
 ## 14 Open items
 
-- O3: Markdown scan cost and the query corpus size are measured, not assumed.
+- Markdown scan cost and the query corpus size are measured, not assumed.
 - The conditions of the commit policy are owned by M-004 under the owner decision; nothing here chooses a threshold.
+- A later M-005 input revision (move and removal handling) will be re-pinned and reconfirmed when published; the current signed pin stays valid until then.
 - Closed by decision: work writes settle (section 5); field errors need no dependency (section 3).
