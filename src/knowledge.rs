@@ -31,8 +31,6 @@ pub const LOCATOR_CAP: usize = 64;
 pub const ITEM_CAP: usize = 32;
 /// Steps a runbook may hold.
 pub const STEP_CAP: usize = 32;
-/// Depth of the successor walk performed before a supersession is written.
-pub const CHAIN_CAP: usize = 32;
 /// Relative path of the tracked knowledge allocator file.
 pub const ALLOCATOR_PATH: &str = ".agent-tasks/knowledge.yaml";
 
@@ -1852,8 +1850,11 @@ pub fn allocation_version(store: &Store) -> Result<String> {
 ///
 /// `expected` must equal a fresh [`allocation_version`]. The incremented allocator file is published
 /// before the caller publishes its record; a later failure leaves the number as a visible gap that
-/// is never recycled. An absent allocator file is valid only while all six homes are empty. Every
-/// counter must exceed the largest existing number of its own home. Returns the canonical identifier.
+/// is never recycled. An absent allocator file is valid only while all six homes are empty. A
+/// corrupt, unknown-schema or unknown-field allocator file refuses with `allocator` and restore
+/// guidance before any inventory check, and is never rewritten. Every counter must exceed the
+/// largest existing number of its own home; an incomplete home refuses with `inventory`. Returns the
+/// canonical identifier.
 pub fn reserve(
     store: &Store,
     guard: &LockGuard,
@@ -1877,14 +1878,20 @@ pub fn reserve(
             ),
         ));
     }
-    if !observed.complete {
+    let (bytes, decoded) = read_allocator(store)?;
+    let decoded = decoded.map_err(|_| {
+        Error::new(
+            "allocator",
+            "knowledge.yaml is unreadable or has an unknown schema; restore retained state, never guess reserved IDs.",
+        )
+    })?;
+    if !observed.homes.iter().all(|h| h.complete) {
         return Err(Error::new(
             "inventory",
             "A knowledge home is incomplete or foreign; inspect project context before allocating.",
         ));
     }
-    let (bytes, decoded) = read_allocator(store)?;
-    let mut file = match decoded? {
+    let mut file = match decoded {
         Some(file) => {
             for home in &observed.homes {
                 let counter = file.get(home.prefix);
@@ -2825,6 +2832,41 @@ mod tests {
         assert_eq!(err.code, "not_locked");
         assert!(effects.is_empty());
         assert!(fx.store.bytes(ALLOCATOR_PATH).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_corrupt_or_unknown_schema_allocator_refuses_with_the_allocator_code() {
+        for (label, bytes) in [
+            (
+                "unknown schema",
+                "schema_version: 9\nnext_decision: 1\nnext_runbook: 1\nnext_research: 1\nnext_checklist: 1\nnext_document: 1\nnext_compaction: 1\n",
+            ),
+            ("garbage", "not: [valid"),
+            (
+                "unknown field",
+                "schema_version: 1\nnext_decision: 1\nnext_runbook: 1\nnext_research: 1\nnext_checklist: 1\nnext_document: 1\nnext_compaction: 1\nextra: 1\n",
+            ),
+        ] {
+            let fx = fixture();
+            let guard = lock(&fx.store);
+            let mut effects = Vec::new();
+            fs::write(fx.store.path(ALLOCATOR_PATH).unwrap(), bytes).unwrap();
+            let token = allocation_version(&fx.store).unwrap();
+            let err =
+                reserve(&fx.store, &guard, Prefix::Decision, &token, &mut effects).unwrap_err();
+            assert_eq!(err.code, "allocator", "{label}: {}", err.message);
+            assert!(
+                err.message.contains("restore retained state"),
+                "{label}: {}",
+                err.message
+            );
+            assert!(effects.is_empty(), "{label}: nothing is published");
+            assert_eq!(
+                fs::read(fx.store.path(ALLOCATOR_PATH).unwrap()).unwrap(),
+                bytes.as_bytes(),
+                "{label}: the file is untouched"
+            );
+        }
     }
 
     #[test]

@@ -84,6 +84,8 @@ struct World {
     dangling: Vec<String>,
     inject: Vec<Inject>,
     untracked_sibling: bool,
+    /// Publication events of the following effects carry no journal entry.
+    untracked_events: bool,
     reserved: u64,
     doc_ops: Vec<String>,
 }
@@ -171,6 +173,10 @@ impl FakeEnv {
     /// Queue a one-shot failure.
     pub fn inject(&self, i: Inject) {
         self.w.borrow_mut().inject.push(i);
+    }
+    /// Make every following publication event untracked, as a full or unwritable journal would.
+    pub fn untracked_events(&self, on: bool) {
+        self.w.borrow_mut().untracked_events = on;
     }
     /// Add a real, non-ignored, untracked sibling file that blocks the whole current commit.
     pub fn untracked_sibling(&self, on: bool) {
@@ -295,11 +301,16 @@ impl FakeEnv {
     ) {
         let mut w = self.w.borrow_mut();
         let call = w.call;
+        let untracked = w.untracked_events;
         w.events.push(EventView {
             relative: relative.to_owned(),
             operation: Some(op.to_owned()),
             intent: Some(format!("PG-{call}")),
-            tracking: TrackingView::Tracked,
+            tracking: if untracked {
+                TrackingView::Untracked
+            } else {
+                TrackingView::Tracked
+            },
             durable: true,
         });
         w.rows.push(Row {

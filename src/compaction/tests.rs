@@ -2096,3 +2096,23 @@ fn an_unrelated_held_intent_does_not_block_another_proposal() {
         "replacements_not_committed"
     );
 }
+
+/// The removal gate also guards the fresh call itself: when an eligible replacement of this very call
+/// carries no journal entry, settlement would hold the whole intent, so no removal may run after it and
+/// the original documents stay.
+#[test]
+fn removal_waits_when_the_current_intent_cannot_commit_atomically() {
+    let env = world();
+    propose(&env, "key-0053-aa", &merge_input(&env)).unwrap();
+    accept(&env, "CP-001", "rev1").unwrap();
+    env.untracked_events(true);
+    assert_eq!(
+        code(run_apply(&env, "CP-001")),
+        "replacements_not_committed"
+    );
+    assert!(env.body("docs/a.md").is_some() && env.body("docs/b.md").is_some());
+    assert!(
+        env.body("docs/ab.md").is_some(),
+        "the replacement was published"
+    );
+}

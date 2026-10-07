@@ -350,7 +350,9 @@ fn require_version(common: &Common, current: &str) -> Result<()> {
     Ok(())
 }
 
-/// Create one record: check the token, create the home, reserve, validate and publish.
+/// Create one record: check the token, reserve (which refuses before any effect), then create the
+/// home directory if absent and publish the validated record. A refusal before the reservation
+/// publishes nothing and creates no home.
 fn create<R: Serialize + DeserializeOwned>(
     store: &Store,
     guard: &LockGuard,
@@ -375,8 +377,8 @@ fn create<R: Serialize + DeserializeOwned>(
             ),
         ));
     }
-    knowledge::ensure_home(store, kind.prefix(), effects)?;
     let id = knowledge::reserve(store, guard, kind.prefix(), &common.version, effects)?;
+    knowledge::ensure_home(store, kind.prefix(), effects)?;
     let at = store::now();
     let record = build(&id, &at, &common.actor);
     validate(&record).map_err(|e| {
@@ -435,14 +437,20 @@ fn phase_of<R: Revisioned>(record: &R) -> &'static str {
 }
 
 /// Verify a runbook use's work reference exists and that the actor matches a bound lead.
+///
+/// A bare `M-`, `A-` or `E-` reference names a stored work record. `M-nnn/T-nnn` must name a Task
+/// of that Module and `M-nnn/A-nnn` an embedded Atomic of that Module; any other child kind is
+/// refused. When the Module has a bound lead without a recorded loss, the declared actor must be
+/// that lead (`attribution`); without a bound lead the declared actor stays as given.
 fn bind_work(store: &Store, work: &str, actor: &Option<String>) -> Result<()> {
     let head = work::module_id(work)?;
     let tail = work.split_once('/').map(|(_, t)| t);
-    if let Some(t) = tail
-        && !(model::number(t, "T-").is_ok() || model::number(t, "A-").is_ok())
-    {
-        return Err(bad("work: expected a canonical work reference."));
-    }
+    let child = match tail {
+        None => None,
+        Some(t) if model::number(t, "T-").is_ok() => Some((t, false)),
+        Some(t) if model::number(t, "A-").is_ok() => Some((t, true)),
+        Some(_) => return Err(bad("work: expected a canonical work reference.")),
+    };
     let module = store.module(head).map_err(|e| {
         if e.code == "not_found" {
             bad("work: that work record does not exist.")
@@ -450,10 +458,15 @@ fn bind_work(store: &Store, work: &str, actor: &Option<String>) -> Result<()> {
             e
         }
     })?;
-    if let Some(t) = tail
-        && !module.value.tasks.iter().any(|task| task.id == t)
-    {
-        return Err(bad("work: that task or atomic does not exist."));
+    if let Some((id, embedded_atomic)) = child {
+        let children = if embedded_atomic {
+            &module.value.atomics
+        } else {
+            &module.value.tasks
+        };
+        if !children.iter().any(|c| c.id == id) {
+            return Err(bad("work: that task or atomic does not exist."));
+        }
     }
     let lead = module
         .value
@@ -1000,10 +1013,20 @@ mod tests {
 
     /// Run one operation given as JSON with a version; returns the acknowledgement and the ledger.
     fn run(fx: &Fx, version: &str, op: Value) -> (Result<Ack>, Vec<String>) {
+        run_as(fx, version, op, Some("tester"))
+    }
+
+    /// Run one operation as a declared actor, or with no actor at all.
+    fn run_as(
+        fx: &Fx,
+        version: &str,
+        op: Value,
+        actor: Option<&str>,
+    ) -> (Result<Ack>, Vec<String>) {
         let mut args = op;
         args["project"] = json!("p");
         args["version"] = json!(version);
-        args["actor"] = json!("tester");
+        args["actor"] = json!(actor);
         let (common, op) = decode(args).unwrap();
         let mut effects = Vec::new();
         let result = execute_locked(&fx.store, &fx.guard, &common, op, &mut effects);
@@ -1103,6 +1126,205 @@ mod tests {
         assert_eq!(edit.err().unwrap().code, "invalid_arguments");
     }
 
+    /// Save a Module with one Task, one embedded Atomic and, when given, a bound lead.
+    fn module_with_work(fx: &Fx, id: &str, lead: Option<&str>) {
+        use crate::model::{
+            AgentBinding, AgentIdentity, AgentRole, AgentTerm, CoreWorkflow, Module, ModuleState,
+            Task, TaskState, Workflow,
+        };
+        let at = store::now();
+        let work = |id: &str| Task {
+            id: id.into(),
+            title: "Work".into(),
+            criterion: Some("Outcome".into()),
+            executor: None,
+            atomic_workflow: None,
+            started_at: None,
+            required_checks: vec![],
+            state: TaskState::Open,
+            result: None,
+            checks: vec![],
+            cancellation: None,
+            cancellation_history: vec![],
+            created_at: at.clone(),
+            updated_at: at.clone(),
+        };
+        let mut core = CoreWorkflow::default();
+        if let Some(agent) = lead {
+            core.bindings.push(AgentBinding {
+                role: AgentRole::Lead,
+                current: AgentTerm {
+                    identity: AgentIdentity {
+                        harness: "claude-code".into(),
+                        agent_id: agent.into(),
+                        communication_ref: "agent-run:steer:lead".into(),
+                        resume_ref: None,
+                        launch_ref: "launch".into(),
+                    },
+                    loss: None,
+                    needs_immersion: false,
+                    immersion: None,
+                },
+                history: vec![],
+            });
+        }
+        let mut workflow = Workflow::new();
+        workflow.core = Some(core);
+        let module = Module {
+            schema_version: 1,
+            id: id.into(),
+            title: "Module".into(),
+            outcome: "Outcome".into(),
+            lead: None,
+            required_checks: vec![],
+            state: ModuleState::Open,
+            next_task: Some(2),
+            next_log: Some(1),
+            omitted_log_entries: 0,
+            review_epoch: 0,
+            tasks: vec![work("T-001")],
+            atomics: vec![work("A-001")],
+            next_atomic: Some(2),
+            criteria: vec![],
+            modules: vec![],
+            atomic_members: vec![],
+            participants: vec![],
+            participant_basis: Default::default(),
+            completed: false,
+            workflow: Some(workflow),
+            imports: vec![],
+            result: None,
+            checks: vec![],
+            blocker: None,
+            handoff: None,
+            cancellation: None,
+            cancellation_history: vec![],
+            reviews: vec![],
+            reasons: vec![],
+            log: vec![],
+            created_at: at.clone(),
+            updated_at: at,
+        };
+        let path = format!("modules/{id}.yaml");
+        fx.store
+            .save(&path, &module, None, false, &mut Vec::new())
+            .unwrap();
+        fx.store.module(id).expect("fixture module reads back");
+    }
+
+    #[test]
+    fn runbook_use_binds_real_task_and_atomic_work_and_the_bound_lead() {
+        let fx = fixture();
+        module_with_work(&fx, "M-001", Some("lead-1"));
+        module_with_work(&fx, "M-002", None);
+        let created = create(&fx, runbook());
+        let use_op = |work: &str| {
+            json!({"op":"use_runbook","ref":"RB-001","revision":1,"outcome":"succeeded","environment":"staging",
+                "checks":[{"label":"smoke","status":"passed","detail":null}],"work":work})
+        };
+        let mut version = created.version.clone();
+        for work in [
+            "M-001/T-001",
+            "M-001/A-001",
+            "M-001",
+            "M-002/T-001",
+            "M-002/A-001",
+        ] {
+            let actor = if work.starts_with("M-001") {
+                Some("lead-1")
+            } else {
+                None
+            };
+            let (result, effects) = run_as(&fx, &version, use_op(work), actor);
+            let ack = result
+                .unwrap_or_else(|e| panic!("{work} must be accepted: {} {}", e.code, e.message));
+            assert_eq!(effects, ["Published runbooks/RB-001.yaml."]);
+            version = ack.version;
+        }
+        let Any::Runbook(record) = knowledge::load(&fx.store, "RB-001").unwrap().value else {
+            panic!()
+        };
+        assert_eq!(record.uses.len(), 5);
+        assert_eq!(record.uses[1].work.as_deref(), Some("M-001/A-001"));
+        let before = fs::read(fx.store.path("runbooks/RB-001.yaml").unwrap()).unwrap();
+        for (work, actor, code, label) in [
+            (
+                "M-001/T-001",
+                Some("someone-else"),
+                "attribution",
+                "wrong actor for the bound lead",
+            ),
+            (
+                "M-001/A-001",
+                None,
+                "attribution",
+                "unknown actor for the bound lead",
+            ),
+            (
+                "M-001/T-009",
+                Some("lead-1"),
+                "invalid_arguments",
+                "missing task",
+            ),
+            (
+                "M-001/A-009",
+                Some("lead-1"),
+                "invalid_arguments",
+                "missing embedded atomic",
+            ),
+            (
+                "M-001/X-001",
+                Some("lead-1"),
+                "invalid_arguments",
+                "unknown child kind",
+            ),
+            (
+                "M-009/T-001",
+                Some("lead-1"),
+                "invalid_arguments",
+                "missing module",
+            ),
+        ] {
+            let (result, effects) = run_as(&fx, &version, use_op(work), actor);
+            assert_eq!(
+                result
+                    .err()
+                    .unwrap_or_else(|| panic!("{label} must be refused"))
+                    .code,
+                code,
+                "{label}"
+            );
+            assert!(effects.is_empty(), "{label} published something");
+        }
+        assert_eq!(
+            before,
+            fs::read(fx.store.path("runbooks/RB-001.yaml").unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_refused_create_leaves_no_home_and_no_effects() {
+        let fx = fixture();
+        fs::write(
+            fx.store.path(".agent-tasks/knowledge.yaml").unwrap(),
+            "schema_version: 9\n",
+        )
+        .unwrap();
+        let token = knowledge::allocation_version(&fx.store).unwrap();
+        let (result, effects) = run(&fx, &token, decision("Pick"));
+        let err = result.err().unwrap();
+        assert_eq!(err.code, "allocator", "{}", err.message);
+        assert!(err.message.contains("restore retained state"));
+        assert!(
+            effects.is_empty(),
+            "a refusal publishes nothing: {effects:?}"
+        );
+        assert!(
+            !fx.store.path("decisions").unwrap().exists(),
+            "a refusal creates no home"
+        );
+    }
+
     #[test]
     fn create_publishes_allocator_then_record_with_generated_metadata() {
         let fx = fixture();
@@ -1112,8 +1334,8 @@ mod tests {
         assert_eq!(
             effects,
             [
-                "Created directory decisions/.",
                 "Published .agent-tasks/knowledge.yaml.",
+                "Created directory decisions/.",
                 "Published decisions/D-001.yaml."
             ]
         );
