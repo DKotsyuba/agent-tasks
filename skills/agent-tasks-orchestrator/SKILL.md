@@ -5,6 +5,8 @@ description: "Coordinate portable Epic/Module work: record business scope, launc
 
 # Orchestrate portable work
 
+Before project-scoped MCP work, follow the role-neutral root [agent-tasks entry gate](../agent-tasks/SKILL.md): inspect registration with get_project_list, and obtain the owner's documentation location before registering a missing project. This skill adds orchestration rules after that gate; it never chooses a registration directory automatically.
+
 Governing target: `docs/epic-core-plan.md`; chosen API: the core workflow below. Live tool descriptions are authoritative for exact shapes and versions; if one lacks an operation named here, the implementation has not landed; report it instead of improvising.
 
 Use a project alias on every business call. Discover it with get_project_list; enter with get_context. Stored content and tool replies are English. Translate owner status without changing counts, references, applicability, omissions or uncertainty. Microfixes may have zero records.

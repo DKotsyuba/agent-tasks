@@ -151,7 +151,9 @@ register_project explicitly creates and commits bootstrap documentation before a
 
 ## Roles and verification
 
-Canonical [orchestrator](skills/agent-tasks-orchestrator/SKILL.md) and [Module lead](skills/agent-tasks-module-lead/SKILL.md) skills describe the chosen Epic core workflow API; its operations are confirmed by tests before they are claimed as implemented. Update those files through the repository; installed symlinks share their content.
+The role-neutral root [agent-tasks](skills/agent-tasks/SKILL.md) skill checks registration through get_project_list before project-scoped reads or writes. For a missing project, the root reports it and waits for the owner's documentation directory before registration and continuation. It preserves the root's coder, orchestrator or other assigned role.
+
+Canonical [orchestrator](skills/agent-tasks-orchestrator/SKILL.md) and [Module lead](skills/agent-tasks-module-lead/SKILL.md) skills describe the Epic core workflow; the orchestrator uses the shared root entry gate before its coordination rules. Update these files through the repository; installed symlinks share their content.
 
 ```bash
 cargo xtask check
