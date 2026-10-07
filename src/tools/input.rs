@@ -737,6 +737,45 @@ fn required_patch<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
     T::deserialize(d).map(Patch::Set)
 }
 
+/// Reduce a serde decoding failure to one bounded message that names at most one schema field.
+///
+/// Unknown-field and missing-field failures name the field (an unknown key is reduced to ASCII
+/// letters, digits and underscores and cut at 64 bytes); an unknown operation says so; every
+/// other failure is one generic shape message because serde exposes no field path without a
+/// new dependency. Supplied values never enter the text.
+pub fn shape_error(error: &serde_json::Error) -> String {
+    let text = error.to_string();
+    let name = |prefix: &str| {
+        text.strip_prefix(prefix)
+            .and_then(|rest| rest.split('`').next())
+            .map(|raw| {
+                raw.chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .take(64)
+                    .collect::<String>()
+            })
+            .filter(|clean| !clean.is_empty())
+    };
+    if let Some(field) = name("unknown field `") {
+        format!("Unknown field \"{field}\". Read the tool's input contract.")
+    } else if let Some(field) = name("missing field `") {
+        format!("Missing required field \"{field}\".")
+    } else if text.starts_with("unknown variant") {
+        "Unknown operation. Read the tool's input contract.".into()
+    } else {
+        "Invalid argument shape or type; field type details are unavailable. Read the tool's input contract."
+            .into()
+    }
+}
+
+/// Name the offending field in a bounded validation failure; the supplied value is never echoed.
+///
+/// `checked` is the result of a model validator such as `text` or `strings`, whose message states
+/// the rule and its limit. A failure becomes `invalid_arguments` reading `<name>: <rule>`.
+pub fn field<T>(name: &str, checked: Result<T, String>) -> crate::store::Result<T> {
+    checked.map_err(|rule| crate::store::Error::new("invalid_arguments", format!("{name}: {rule}")))
+}
+
 /// Decode flat common fields and the closed operation; no arbitrary patch data survives.
 pub fn mutation<T: serde::de::DeserializeOwned>(
     value: Value,
@@ -762,8 +801,8 @@ pub fn mutation<T: serde::de::DeserializeOwned>(
     } else {
         None
     };
-    let operation = serde_json::from_value(Value::Object(args))
-        .map_err(|_| "Unknown operation, field, missing value or invalid argument shape.")?;
+    let operation =
+        serde_json::from_value(Value::Object(args)).map_err(|error| shape_error(&error))?;
     Ok((
         Common {
             project,

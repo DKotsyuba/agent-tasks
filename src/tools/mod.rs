@@ -66,6 +66,10 @@ pub fn templates() -> Vec<(&'static str, &'static str)> {
 #[cfg(test)]
 mod core_tests;
 
+/// Focused regressions for the shared producer host seam.
+#[cfg(test)]
+mod host_tests;
+
 /// Report only actual unimplemented skeletons; release qualification stays independent.
 pub fn incomplete() -> Vec<&'static str> {
     let statuses: &[(&str, bool)] = &[

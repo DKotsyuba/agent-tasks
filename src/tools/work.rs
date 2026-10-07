@@ -18,10 +18,17 @@ pub struct Ack {
     pub version: String,
     /// Derived current phase, never externally verified delivery.
     pub phase: String,
-    /// Owning record phase label; embedded children always report their Module phase.
+    /// Owning record label including its own noun (`Module phase`, `Decision state`); embedded
+    /// children always report their Module phase. The template prints it before the colon.
     pub phase_label: &'static str,
     /// Whether the call changed any business record.
     pub changed: bool,
+    /// Producer notes (applied actions, blocked kind, warnings). Callers must supply at most
+    /// eight plain lines of 200 bytes each; this early seam does not bound them at dispatch.
+    pub notes: Vec<String>,
+    /// Affected canonical references. Callers must supply at most sixteen of 256 bytes each;
+    /// this early seam does not bound them at dispatch. Advisory labels, never publication proof.
+    pub refs: Vec<String>,
 }
 /// Typed compact semantic projection; raw storage structs never enter templates.
 #[derive(Clone, Serialize)]
@@ -83,7 +90,7 @@ pub fn templates() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "core_ack",
-            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }}\n{% if ack.target == \"Project\" %}Project state:{% else %}{{ ack.phase_label }} phase:{% endif %} {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}Next: {% if ack.target == \"Project\" %}get_context with project only; omit ref.{% else %}get_context with ref={{ ack.target }}.{% endif %} Use project_status for the complete tracked overview. Do not replay a lost reply blindly.\n",
+            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }}\n{% if ack.target == \"Project\" %}Project state:{% else %}{{ ack.phase_label }}:{% endif %} {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}{% for note in ack.notes %}{{ note }}\n{% endfor %}Next: {% if ack.target == \"Project\" %}get_context with project only; omit ref.{% else %}get_context with ref={{ ack.target }}.{% endif %} Use project_status for the complete tracked overview. Do not replay a lost reply blindly.\n",
         ),
         (
             "core_error",
@@ -207,38 +214,70 @@ fn arguments(message: impl Into<String>) -> Error {
 
 /// Validate generated-version preconditions and declared identity at the request boundary.
 fn validate_common(common: &Common) -> Result<()> {
-    text(&common.project, 128).map_err(arguments)?;
+    input::field("project", text(&common.project, 128))?;
     if common.version.len() != 64 || !common.version.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err(arguments(
             "Use the exact 64-character version returned by get_context.",
         ));
     }
-    optional(&common.actor, 256).map_err(arguments)
+    input::field("actor", optional(&common.actor, 256))
 }
 
 /// Render once after capturing the immutable receipt; a presentation failure still names the saved target/version.
-fn render_ack(templates: &Templates, ack: &Ack, effects: &[String]) -> String {
+pub(super) fn render_ack(templates: &Templates, ack: &Ack, effects: &[String]) -> String {
     templates.render("core_ack",&Saved {ack,effects}).unwrap_or_else(|_| format!(
         "{} {}. Version: {}. Presentation degraded.\nEffects:\n{}\nInspect get_context; do not replay.\n",
         if ack.changed {"SAVED"}else{"UNCHANGED"},ack.target,ack.version,effects.join("\n")))
 }
 
-/// Build a target receipt without deriving external success.
-fn ack(target: impl Into<String>, version: String, phase: impl Into<String>, changed: bool) -> Ack {
-    let target = target.into();
-    let phase_label = if target.starts_with("E-") {
-        "Epic"
+/// Label the record kind of a canonical target; the label carries its own noun.
+///
+/// `E-`, `A-` and `M-` keep the historical phase wording, so existing replies stay byte
+/// identical. Knowledge, document and compaction targets report a state. A target that is not a
+/// recognised canonical reference falls back to the Module label, exactly as before; callers
+/// never build a read route from a label.
+fn target_label(target: &str) -> &'static str {
+    if target.starts_with("E-") {
+        "Epic phase"
     } else if target.starts_with("A-") {
-        "Atomic"
+        "Atomic phase"
+    } else if target.starts_with("RB-") {
+        "Runbook state"
+    } else if target.starts_with("RS-") {
+        "Research state"
+    } else if target.starts_with("CL-") {
+        "Checklist state"
+    } else if target.starts_with("CP-") {
+        "Compaction state"
+    } else if target.starts_with("DOC-") || target == "README.md" || target.starts_with("docs/") {
+        "Document state"
+    } else if target.starts_with("D-") {
+        "Decision state"
     } else {
-        "Module"
-    };
+        "Module phase"
+    }
+}
+
+/// Build a target receipt without deriving external success.
+///
+/// `target` is the canonical reference usable with `get_context`; `version` the new record or
+/// observation version usable for the next write; `phase` a short lowercase state; `changed`
+/// whether the business record changed. Notes and refs start empty and are filled by the caller.
+pub(super) fn ack(
+    target: impl Into<String>,
+    version: String,
+    phase: impl Into<String>,
+    changed: bool,
+) -> Ack {
+    let target = target.into();
     Ack {
+        phase_label: target_label(&target),
         target,
-        phase_label,
         version,
         phase: phase.into(),
         changed,
+        notes: Vec::new(),
+        refs: Vec::new(),
     }
 }
 
@@ -289,6 +328,20 @@ fn current(store: &Store, id: &str, version: &str) -> Result<Snapshot<Module>> {
     }
     snapshot.value.counters().map_err(store::invalid)?;
     Ok(snapshot)
+}
+
+/// Check the bounded list fields of a record before whole-record validation so a rejected list
+/// names its field and limit (`criteria`, `required_checks`) and never echoes a value.
+///
+/// Covers the record's own criteria and required checks and every Task or Atomic's required
+/// checks. The record validator stays the authority; this only adds the field name.
+fn check_lists(value: &Module) -> Result<()> {
+    input::field("criteria", strings(&value.criteria, 1024, true))?;
+    input::field("required_checks", strings(&value.required_checks, 64, true))?;
+    for child in value.children() {
+        input::field("required_checks", strings(&child.required_checks, 64, true))?;
+    }
+    Ok(())
 }
 
 /// Save one module, advancing review epoch for semantic changes or explicit reopen.
@@ -374,6 +427,7 @@ fn save_module(
     value
         .event(target, action, &store::now(), actor)
         .map_err(store::invalid)?;
+    check_lists(&value)?;
     value.validate().map_err(store::invalid)?;
     store.save(
         &work_path(&value.id).map_err(arguments)?,
@@ -1000,6 +1054,7 @@ fn create_record(
     effects: &mut Vec<String>,
 ) -> Result<Ack> {
     expect_allocation(store, &common.version)?;
+    check_lists(&value)?;
     let project = store
         .project()?
         .ok_or_else(|| Error::new("not_initialized", "Initialize Project first."))?;
@@ -1159,11 +1214,11 @@ fn record(
                 resume_ref,
                 launch_ref,
             };
-            text(&identity.harness, 64).map_err(arguments)?;
-            text(&identity.agent_id, 256).map_err(arguments)?;
-            text(&identity.communication_ref, 256).map_err(arguments)?;
-            optional(&identity.resume_ref, 256).map_err(arguments)?;
-            text(&identity.launch_ref, 256).map_err(arguments)?;
+            input::field("harness", text(&identity.harness, 64))?;
+            input::field("agent_id", text(&identity.agent_id, 256))?;
+            input::field("communication_ref", text(&identity.communication_ref, 256))?;
+            input::field("resume_ref", optional(&identity.resume_ref, 256))?;
+            input::field("launch_ref", text(&identity.launch_ref, 256))?;
             let core = value.core_mut().map_err(arguments)?;
             if let Some(binding) = core.bindings.iter_mut().find(|b| b.role == role) {
                 let same = binding.current.identity.harness == identity.harness
@@ -1235,8 +1290,8 @@ fn record(
                     let observation = observation.ok_or_else(|| {
                         arguments("Observed inability to continue/resume required.")
                     })?;
-                    text(&reason, 512).map_err(arguments)?;
-                    text(&observation, 1024).map_err(arguments)?;
+                    input::field("reason", text(&reason, 512))?;
+                    input::field("observation", text(&observation, 1024))?;
                     binding.current.loss = Some(AgentLoss {
                         reason,
                         observation,
@@ -1253,10 +1308,10 @@ fn record(
                     }
                     let understanding = understanding
                         .ok_or_else(|| arguments("Recovered understanding required."))?;
-                    text(&understanding, 1024).map_err(arguments)?;
-                    strings(&sources, 256, false).map_err(arguments)?;
-                    strings(&unfinished, 256, false).map_err(arguments)?;
-                    strings(&gaps, 256, false).map_err(arguments)?;
+                    input::field("understanding", text(&understanding, 1024))?;
+                    input::field("sources", strings(&sources, 256, false))?;
+                    input::field("unfinished", strings(&unfinished, 256, false))?;
+                    input::field("gaps", strings(&gaps, 256, false))?;
                     let complete = gaps.is_empty();
                     binding.current.immersion = Some(Immersion {
                         understanding,
@@ -1281,11 +1336,11 @@ fn record(
             module_only(index)?;
             number(&value.id, "M-").map_err(arguments)?;
             core_actor(&value, AgentRole::Lead, &common.actor)?;
-            text(&responsibility, 1024).map_err(arguments)?;
-            text(&scope, 1024).map_err(arguments)?;
-            strings(&exclusions, 256, false).map_err(arguments)?;
-            strings(&read_refs, 256, false).map_err(arguments)?;
-            strings(&uncertainties, 256, false).map_err(arguments)?;
+            input::field("responsibility", text(&responsibility, 1024))?;
+            input::field("scope", text(&scope, 1024))?;
+            input::field("exclusions", strings(&exclusions, 256, false))?;
+            input::field("read_refs", strings(&read_refs, 256, false))?;
+            input::field("uncertainties", strings(&uncertainties, 256, false))?;
             let basis = value.plan_basis().map_err(arguments)?;
             value.core_mut().map_err(arguments)?.planning = Some(Planning {
                 responsibility,
@@ -1310,7 +1365,7 @@ fn record(
             module_only(index)?;
             number(&value.id, "M-").map_err(arguments)?;
             core_actor(&value, AgentRole::Lead, &common.actor)?;
-            text(&summary, 1024).map_err(arguments)?;
+            input::field("summary", text(&summary, 1024))?;
             let facts = store.contract_facts(&contract_id)?;
             if facts.revision != revision
                 || !facts.parties.contains(&value.id)
@@ -1359,13 +1414,13 @@ fn record(
             number(&value.id, "M-").map_err(arguments)?;
             core_actor(&value, AgentRole::Lead, &common.actor)?;
             running(&store, &value, index)?;
-            text(&candidate, 256).map_err(arguments)?;
-            text(&conditions, 1024).map_err(arguments)?;
-            text(&mutation, 1024).map_err(arguments)?;
-            strings(&artifacts, 256, false).map_err(arguments)?;
+            input::field("candidate", text(&candidate, 256))?;
+            input::field("conditions", text(&conditions, 1024))?;
+            input::field("mutation", text(&mutation, 1024))?;
+            input::field("artifacts", strings(&artifacts, 256, false))?;
             for observation in [&correct, &failed, &restored] {
-                text(&observation.detail, 512).map_err(arguments)?;
-                optional(&observation.artifact, 256).map_err(arguments)?;
+                input::field("detail", text(&observation.detail, 512))?;
+                input::field("artifact", optional(&observation.artifact, 256))?;
             }
             if correct.status != CheckStatus::Passed
                 || failed.status != CheckStatus::Failed
@@ -1448,11 +1503,11 @@ fn record(
                     "Exact zero-based criterion text and declared affected Module set required.",
                 ));
             }
-            text(&candidate, 256).map_err(arguments)?;
-            text(&environment, 1024).map_err(arguments)?;
-            text(&summary, 1024).map_err(arguments)?;
-            strings(&scenarios, 256, true).map_err(arguments)?;
-            strings(&artifacts, 256, false).map_err(arguments)?;
+            input::field("candidate", text(&candidate, 256))?;
+            input::field("environment", text(&environment, 1024))?;
+            input::field("summary", text(&summary, 1024))?;
+            input::field("scenarios", strings(&scenarios, 256, true))?;
+            input::field("artifacts", strings(&artifacts, 256, false))?;
             if scenarios.is_empty()
                 || checks.is_empty()
                 || checks.iter().any(|c| c.status != CheckStatus::Passed)
@@ -1579,9 +1634,9 @@ fn record(
                     "Deliver only the current begun/reviewed candidate.",
                 ));
             }
-            text(&target_branch, 128).map_err(arguments)?;
-            text(&summary, 1024).map_err(arguments)?;
-            optional(&artifact, 256).map_err(arguments)?;
+            input::field("target_branch", text(&target_branch, 128))?;
+            input::field("summary", text(&summary, 1024))?;
+            input::field("artifact", optional(&artifact, 256))?;
             if !value.modern() {
                 return Err(arguments(
                     "Begin this Module to opt into reported delivery.",
@@ -1793,7 +1848,7 @@ fn record(
         }
         Work::ClearBlocker { reason } => {
             module_only(index)?;
-            text(&reason, 512).map_err(arguments)?;
+            input::field("reason", text(&reason, 512))?;
             if value.blocker.take().is_none() {
                 return Ok(ack(reference, before.version, store.phase(&value), false));
             }
@@ -1808,7 +1863,7 @@ fn record(
         }
         Work::ClearHandoff { reason } => {
             module_only(index)?;
-            text(&reason, 512).map_err(arguments)?;
+            input::field("reason", text(&reason, 512))?;
             if value.handoff.take().is_none() {
                 return Ok(ack(reference, before.version, store.phase(&value), false));
             }
@@ -1822,7 +1877,7 @@ fn record(
             "handoff cleared"
         }
         Work::Cancel { reason } => {
-            text(&reason, 512).map_err(arguments)?;
+            input::field("reason", text(&reason, 512))?;
             let cancellation = Cancellation {
                 reason,
                 at: at.clone(),
@@ -1859,7 +1914,7 @@ fn record(
             "canceled"
         }
         Work::Reopen { reason } => {
-            text(&reason, 512).map_err(arguments)?;
+            input::field("reason", text(&reason, 512))?;
             if let Some(i) = index {
                 let task = value.child_mut(i);
                 task.state = TaskState::Open;
@@ -2058,7 +2113,7 @@ fn import_commits(
         .map(|c| c.summary.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    text(&summary, 1024).map_err(arguments)?;
+    input::field("summary", text(&summary, 1024))?;
     let mut checks = std::collections::BTreeMap::new();
     let mut gaps = Vec::new();
     let mut followups = Vec::new();
@@ -2069,8 +2124,8 @@ fn import_commits(
         gaps.extend(c.gaps.clone());
         followups.extend(c.followups.clone());
     }
-    strings(&gaps, 256, false).map_err(arguments)?;
-    strings(&followups, 256, false).map_err(arguments)?;
+    input::field("gaps", strings(&gaps, 256, false))?;
+    input::field("followups", strings(&followups, 256, false))?;
     if checks.len() > 8 {
         return Err(arguments(
             "Combined imported check set exceeds eight labels; import a bounded complete report.",
@@ -2154,7 +2209,7 @@ fn review_atomic(
             "Known Atomic executor/author cannot review their own result.",
         ));
     }
-    text(&args.summary, 1024).map_err(arguments)?;
+    input::field("summary", text(&args.summary, 1024))?;
     if args.findings.len() > 8
         || args.checks.len() > 8
         || args.verdict == Verdict::Accepted && args.findings.iter().any(|f| f.must_fix)
@@ -2537,7 +2592,7 @@ fn core_review_guard(m: &Module, args: &mut ReviewArgs, target: Option<usize>) -
             .map_or(&[], |w| w.reviews.as_slice())
     });
     let report = target.map_or(m.result.as_ref(), |i| m.child(i).result.as_ref());
-    strings(&args.changed_scope, 256, false).map_err(arguments)?;
+    input::field("changed_scope", strings(&args.changed_scope, 256, false))?;
     if args.resolved_findings.len() > 8 {
         return Err(arguments(
             "At most eight stable finding resolutions per round.",
@@ -2545,7 +2600,7 @@ fn core_review_guard(m: &Module, args: &mut ReviewArgs, target: Option<usize>) -
     }
     let mut resolving = std::collections::BTreeSet::new();
     for resolution in &args.resolved_findings {
-        text(&resolution.summary, 512).map_err(arguments)?;
+        input::field("summary", text(&resolution.summary, 512))?;
         let finding = reviews
             .get(resolution.review_index)
             .and_then(|r| r.findings.get(resolution.finding_index))
@@ -2614,7 +2669,7 @@ fn review(config: &Config, mut args: ReviewArgs, effects: &mut Vec<String>) -> R
     if value.core().is_some() && !value.id.starts_with("E-") {
         core_actor(&value, AgentRole::Reviewer, &args.actor)?;
     }
-    strings(&args.changed_scope, 256, false).map_err(arguments)?;
+    input::field("changed_scope", strings(&args.changed_scope, 256, false))?;
     let target_index = value.target(&args.module).map_err(arguments)?;
     core_review_guard(&value, &mut args, target_index)?;
     if let Some(i) = target_index {
@@ -2643,7 +2698,7 @@ fn review(config: &Config, mut args: ReviewArgs, effects: &mut Vec<String>) -> R
             "A known lead cannot independently review the same module.",
         ));
     }
-    text(&args.summary, 1024).map_err(arguments)?;
+    input::field("summary", text(&args.summary, 1024))?;
     if args.findings.len() > 8 || args.checks.len() > 8 {
         return Err(arguments(
             "At most eight findings/check updates per verdict.",
