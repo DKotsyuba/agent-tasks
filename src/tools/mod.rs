@@ -1,6 +1,9 @@
 //! Authoritative Rust registry; discovery and schema export share the same definitions.
 mod compaction_ops;
+#[allow(dead_code)]
+mod document_ops;
 mod input;
+mod knowledge_ops;
 mod pages;
 mod projects;
 mod read;

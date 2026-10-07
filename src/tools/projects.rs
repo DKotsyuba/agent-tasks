@@ -90,7 +90,7 @@ fn git(root: &Path, args: &[&str]) -> Result<bool> {
 
 /// Generate a short Markdown entrypoint; human fields are literal content, never executable templates.
 fn readme(alias: &str, project: &Project) -> Vec<u8> {
-    format!("# {}\n\n{}\n\n## Agent workflow\n\nUse project=\"{}\" with get_context, project_status and search.\nPlan Modules and Tasks with plan_work; record outcomes with record_work.\nReview the whole Module with review_module.\n\n## Storage\n\nproject.yaml owns project intent. modules/ contains structured work.\n.agent-tasks/state.yaml keeps generated numbering. Markdown holds free-form documents.\nSource code and docstrings describe implemented behavior.\n", project.title, project.purpose, alias).into_bytes()
+    format!("# {}\n\n{}\n\n## Agent workflow\n\nUse project=\"{}\" with get_context, project_status and search.\nPlan Modules and Tasks with plan_work; record outcomes with record_work.\nReview the whole Module with review_module.\n\n## Storage\n\nproject.yaml owns project intent. modules/ contains structured work.\n.agent-tasks/state.yaml keeps generated numbering. Markdown documents live in docs/ and are saved and read through the document tool.\nSource code and docstrings describe implemented behavior.\n", project.title, project.purpose, alias).into_bytes()
 }
 
 /// Create one missing bootstrap document without overwriting a differing existing file.
@@ -105,7 +105,49 @@ fn bootstrap(store: &Store, relative: &str, bytes: &[u8], effects: &mut Vec<Stri
     }
 }
 
-/// Initialize/finish a local documentation repository and commit only the four bootstrap records.
+/// Keep an existing README exactly as found and create the generated one only when it is missing.
+/// A completed registration is never compared against it and a human-edited README survives a
+/// partial retry, so no README bytes are an immutable bootstrap invariant.
+fn keep_or_create(
+    store: &Store,
+    relative: &str,
+    bytes: &[u8],
+    effects: &mut Vec<String>,
+) -> Result<()> {
+    match store.bytes(relative)? {
+        Some(_) => Ok(()),
+        None => store.publish(relative, bytes, None, effects),
+    }
+}
+
+/// Create `docs/` when absent and a zero-byte `docs/.gitkeep` only when the folder is empty, so a
+/// clone keeps the folder. A symlinked or non-folder `docs` is refused before any effect.
+fn bootstrap_docs(store: &Store, effects: &mut Vec<String>) -> Result<()> {
+    let dir = store.path("docs")?;
+    match fs::symlink_metadata(&dir) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => {
+            return Err(Error::new(
+                "conflict",
+                "docs exists and is not a folder; nothing is replaced.",
+            ));
+        }
+        Err(_) => {
+            fs::create_dir(&dir).map_err(|_| Error::new("io", "Cannot create the docs folder."))?;
+            effects.push("Created docs/.".into());
+        }
+    }
+    let empty = fs::read_dir(&dir)
+        .map_err(|_| Error::new("io", "Cannot inspect the docs folder."))?
+        .next()
+        .is_none();
+    if empty {
+        store.publish("docs/.gitkeep", b"", None, effects)?;
+    }
+    Ok(())
+}
+
+/// Initialize/finish a local documentation repository and commit only the bootstrap records.
 /// An existing HEAD is preserved. docs_remote is separate from the source-code manifest remote.
 /// No push, fetch, agent launch, history rewrite or ongoing auto-commit occurs.
 fn bootstrap_git(
@@ -166,14 +208,17 @@ fn bootstrap_git(
     if git(&store.root, &["rev-parse", "--verify", "--quiet", "HEAD"])? {
         return Ok(());
     }
-    let files = [
+    let mut files = vec![
         "project.yaml",
         ".agent-tasks/state.yaml",
         "README.md",
         ".gitignore",
     ];
+    if store.bytes("docs/.gitkeep")?.is_some() {
+        files.push("docs/.gitkeep");
+    }
     let mut add = vec!["add", "--"];
-    add.extend(files);
+    add.extend(files.iter().copied());
     if !git(&store.root, &add)? {
         return Err(Error::new(
             "git",
@@ -192,7 +237,7 @@ fn bootstrap_git(
         "docs: initialize project documentation",
         "--",
     ];
-    commit.extend(files);
+    commit.extend(files.iter().copied());
     if !git(&store.root, &commit)? {
         return Err(Error::new(
             "git",
@@ -321,9 +366,15 @@ pub(super) fn register(
         for entry in fs::read_dir(&store.root)
             .map_err(|_| Error::new("io", "Cannot inspect documentation root."))?
         {
-            let name = entry
-                .map_err(|_| Error::new("io", "Cannot inspect documentation entry."))?
-                .file_name();
+            let entry =
+                entry.map_err(|_| Error::new("io", "Cannot inspect documentation entry."))?;
+            let name = entry.file_name();
+            if name == "docs" && !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                return Err(Error::new(
+                    "conflict",
+                    "docs exists and is not a folder; nothing is replaced.",
+                ));
+            }
             if ![
                 "project.yaml",
                 "modules",
@@ -331,6 +382,7 @@ pub(super) fn register(
                 "atomics",
                 ".agent-tasks",
                 "README.md",
+                "docs",
                 ".gitignore",
                 ".git",
             ]
@@ -366,13 +418,14 @@ pub(super) fn register(
             })?
         }
     };
-    bootstrap(
+    keep_or_create(
         &store,
         "README.md",
         &readme(&args.project, &snapshot.value),
         effects,
     )?;
     bootstrap(&store, ".gitignore", IGNORE, effects)?;
+    bootstrap_docs(&store, effects)?;
     bootstrap_git(&store, docs_remote.as_deref(), effects)?;
     registry
         .aliases
@@ -476,4 +529,140 @@ pub(super) fn list(
         &value.version,
     )?;
     render_page(value, args.start, args.limit, true, templates)
+}
+
+/// Registration bootstrap behavior for the documentation home: `docs/`, its keeper, README
+/// tolerance, and legacy and partial-retry compatibility.
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "Test assertions")]
+    use super::*;
+    use crate::tools::input::RegisterArgs;
+
+    /// Disposable config directory with an empty registry.
+    fn setup() -> (tempfile::TempDir, Config, Templates) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        fs::write(&config, "schema_version = 1\n").unwrap();
+        let templates = Templates::new(&super::super::templates()).unwrap();
+        (dir, Config::new(Some(config)), templates)
+    }
+
+    /// Registration arguments for `root`.
+    fn args(root: &Path) -> RegisterArgs {
+        RegisterArgs {
+            project: "home".into(),
+            doc_dir: root.to_path_buf(),
+            name: "Home".into(),
+            description: "A documentation home".into(),
+            remote: None,
+            docs_remote: None,
+        }
+    }
+
+    /// Run Git in `root` against a clean configuration and return stdout.
+    fn git_out(root: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Fresh registration creates `docs/` with a keeper inside the single bootstrap commit and no
+    /// optional knowledge folder.
+    #[test]
+    fn fresh_registration_creates_docs_with_keeper_in_one_commit() {
+        let (dir, config, templates) = setup();
+        let root = dir.path().join("home");
+        register(&config, args(&root), &templates, &mut Vec::new()).unwrap();
+        assert_eq!(fs::read(root.join("docs/.gitkeep")).unwrap(), b"");
+        assert_eq!(git_out(&root, &["rev-list", "--count", "HEAD"]).trim(), "1");
+        let files = git_out(&root, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(
+            files.lines().any(|l| l == "docs/.gitkeep") && files.lines().any(|l| l == "README.md")
+        );
+        assert_eq!(git_out(&root, &["status", "--porcelain"]).trim(), "");
+        for optional in [
+            "documents",
+            "decisions",
+            "runbooks",
+            "research",
+            "checklists",
+            "compactions",
+        ] {
+            assert!(
+                !root.join(optional).exists(),
+                "{optional} is created on first use"
+            );
+        }
+    }
+
+    /// A completed legacy registration returns unchanged, creates no `docs/` and keeps a human README.
+    #[test]
+    fn completed_registration_is_unchanged_and_lazy() {
+        let (dir, config, templates) = setup();
+        let root = dir.path().join("home");
+        register(&config, args(&root), &templates, &mut Vec::new()).unwrap();
+        fs::remove_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("README.md"), "# Human edited\n").unwrap();
+        let mut effects = Vec::new();
+        let text = register(&config, args(&root), &templates, &mut effects).unwrap();
+        assert!(text.contains("UNCHANGED") && effects.is_empty());
+        assert!(!root.join("docs").exists());
+        assert_eq!(
+            fs::read(root.join("README.md")).unwrap(),
+            b"# Human edited\n"
+        );
+    }
+
+    /// A partial retry keeps a human-edited README and still completes registration.
+    #[test]
+    fn partial_retry_keeps_a_human_readme() {
+        let (dir, config, templates) = setup();
+        let root = dir.path().join("home");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("README.md"), "# Mine\n\nHuman text.\n").unwrap();
+        register(&config, args(&root), &templates, &mut Vec::new()).unwrap();
+        assert_eq!(
+            fs::read(root.join("README.md")).unwrap(),
+            b"# Mine\n\nHuman text.\n"
+        );
+        let committed = git_out(&root, &["show", "HEAD:README.md"]);
+        assert_eq!(committed, "# Mine\n\nHuman text.\n");
+    }
+
+    /// An existing `docs/` with Markdown is admitted, gets no keeper and its files stay untracked.
+    #[test]
+    fn existing_docs_folder_is_admitted_without_a_keeper() {
+        let (dir, config, templates) = setup();
+        let root = dir.path().join("home");
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/a.md"), "# A\n").unwrap();
+        register(&config, args(&root), &templates, &mut Vec::new()).unwrap();
+        assert!(!root.join("docs/.gitkeep").exists());
+        assert!(git_out(&root, &["status", "--porcelain"]).contains("?? docs/"));
+        assert_eq!(fs::read(root.join("docs/a.md")).unwrap(), b"# A\n");
+    }
+
+    /// A symlinked or file `docs` is refused before any file is written.
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_docs_is_refused_without_effect() {
+        let (dir, config, templates) = setup();
+        let root = dir.path().join("home");
+        fs::create_dir(&root).unwrap();
+        std::os::unix::fs::symlink(dir.path(), root.join("docs")).unwrap();
+        let err = register(&config, args(&root), &templates, &mut Vec::new()).unwrap_err();
+        assert_eq!(err.code, "conflict");
+        assert!(!root.join("project.yaml").exists());
+        fs::remove_file(root.join("docs")).unwrap();
+        fs::write(root.join("docs"), "file").unwrap();
+        let err = register(&config, args(&root), &templates, &mut Vec::new()).unwrap_err();
+        assert_eq!(err.code, "conflict");
+        assert!(!root.join("project.yaml").exists());
+    }
 }

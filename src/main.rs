@@ -1,9 +1,16 @@
 //! Rust MCP application; protocol, presentation and deployment have separate boundaries.
 mod compaction;
+#[allow(dead_code)]
+mod documents;
 /// Bounded read-only local Git report import; declared commits never imply Task completion.
 mod git_reports;
+mod knowledge;
+#[allow(dead_code)]
+mod markdown;
 mod model;
 mod persist;
+#[allow(dead_code)]
+mod references;
 mod response;
 mod store;
 mod tools;
