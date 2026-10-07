@@ -187,7 +187,7 @@ fn rows_from_message(operation: &str, commit: &str, message: &str) -> Vec<(Strin
 }
 
 /// Reverse of the trailer path encoding.
-fn decode_path(text: &str) -> String {
+pub(super) fn decode_path(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -259,7 +259,11 @@ fn journal_rows(
                 }),
                 (None, None) => EffectGit::Untracked,
             };
-            let superseded_into = entry.superseded_by.as_ref().and_then(|_| {
+            let superseded_into = entry.superseded_by.as_ref().and_then(|by| {
+                // The superseding image is recorded with the mark, so pruning its intent loses nothing.
+                if let Some((_, digest)) = by.split_once(':') {
+                    return Some(digest.to_owned());
+                }
                 journal
                     .intents
                     .iter()
@@ -285,10 +289,13 @@ fn journal_rows(
     (rows, unproven)
 }
 
+/// Most commits one history scan reads before it reports itself incomplete.
+const HISTORY_COMMITS: usize = 64;
+
 /// Bounded history scan: rows for `operation` from commits reachable from HEAD, verified against the
 /// commit tree. Returns `(rows, conflicting, complete)`.
 fn history_rows(store: &Store, operation: &str) -> (Vec<Row>, bool, bool) {
-    let deadline = Instant::now() + git::COMMAND_TIME;
+    let deadline = Instant::now() + git::SETTLEMENT_TIME;
     let out = git::run(
         &store.root,
         &[
@@ -297,7 +304,7 @@ fn history_rows(store: &Store, operation: &str) -> (Vec<Row>, bool, bool) {
             "--grep",
             &format!("Agent-Tasks-Effect: {operation} "),
             "-n",
-            "64",
+            "65",
             "--format=%H%x1f%B%x1e",
         ],
         None,
@@ -313,7 +320,15 @@ fn history_rows(store: &Store, operation: &str) -> (Vec<Row>, bool, bool) {
     let mut conflicting = false;
     let mut rows = Vec::new();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    for record in text.split('\u{1e}').filter(|r| !r.trim().is_empty()) {
+    let records: Vec<&str> = text
+        .split('\u{1e}')
+        .filter(|r| !r.trim().is_empty())
+        .collect();
+    // One record beyond the bound proves that older history was omitted.
+    if records.len() > HISTORY_COMMITS {
+        complete = false;
+    }
+    for record in records.into_iter().take(HISTORY_COMMITS) {
         let Some((commit, message)) = record.trim_start().split_once('\u{1f}') else {
             continue;
         };
@@ -323,28 +338,19 @@ fn history_rows(store: &Store, operation: &str) -> (Vec<Row>, bool, bool) {
                 (None, EffectKind::Removed) => None,
                 (None, _) => effect.after_sha256.clone(),
             };
-            let object = format!("{}:{}", commit.trim(), effect.relative);
-            let present = git::read_text(
-                &store.root,
-                &["rev-parse", "--verify", "-q", &object],
+            // A failed read is never "absent" and never a match: it makes the scan incomplete.
+            let ok = match super::verify::path_matches(
+                store,
+                commit.trim(),
+                &effect.relative,
+                expected.as_deref(),
                 deadline,
-            )
-            .is_some();
-            let ok = match &expected {
-                None => !present,
-                Some(digest) => {
-                    let blob =
-                        git::run(&store.root, &["cat-file", "blob", &object], None, deadline);
-                    match blob {
-                        Ok(b) if b.success() && !b.truncated => {
-                            format!("{:x}", Sha256::digest(&b.stdout)) == *digest
-                        }
-                        Ok(b) if b.truncated => {
-                            complete = false;
-                            true
-                        }
-                        _ => false,
-                    }
+            ) {
+                super::verify::Verdict::Exact => true,
+                super::verify::Verdict::Mismatch => false,
+                super::verify::Verdict::Unreadable => {
+                    complete = false;
+                    continue;
                 }
             };
             if ok {

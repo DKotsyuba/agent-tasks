@@ -17,6 +17,7 @@ pub mod recover;
 pub mod status;
 #[cfg(test)]
 mod tests;
+pub mod verify;
 
 pub use engine::{settle, settled};
 pub use policy::{
@@ -24,6 +25,7 @@ pub use policy::{
     Policy, PolicyInput, production_policy,
 };
 pub use receipt::{Attention, EarlierCommit, GitOutcome, GitReceipt, PendingRef, Phase, Reason};
+pub use recover::{PreservePath, PreserveRequest, preserve};
 pub use status::{
     CallIntents, EffectGit, EffectReceipt, EffectStatus, ExpectedEffect, ForeignReason, IntentView,
     PathEffect, PendingSummary, UnknownReason, call_intents, effect_status, intent_view, pending,

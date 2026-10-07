@@ -117,6 +117,8 @@ pub fn run_env(
     deadline: Instant,
     extra: &[(&str, &str)],
 ) -> Result<Output, RunError> {
+    // One command has COMMAND_TIME inside the caller's overall (settlement) deadline.
+    let deadline = deadline.min(Instant::now() + COMMAND_TIME);
     if Instant::now() >= deadline {
         return Err(RunError::Timeout);
     }

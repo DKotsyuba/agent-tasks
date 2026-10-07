@@ -13,7 +13,7 @@ use crate::{
     model,
     persist::{
         self, EventClass, GitReceipt,
-        recover::{Action, PreservePath, Report, recover},
+        recover::{Action, PreserveItem, Report, recover},
     },
     store::{self, Error, LockGuard, Result, Store},
 };
@@ -109,7 +109,7 @@ fn intents(name: &str, ids: Vec<String>) -> Result<Vec<String>> {
 }
 
 /// Validate the authorized byte identities of a preservation.
-fn preserve(paths: Vec<PreservePathIn>) -> Result<Vec<PreservePath>> {
+fn preserve(paths: Vec<PreservePathIn>) -> Result<Vec<PreserveItem>> {
     let checked = if paths.is_empty() || paths.len() > MAX_PATHS {
         Err(format!(
             "Name between one and {MAX_PATHS} files to preserve."
@@ -131,7 +131,7 @@ fn preserve(paths: Vec<PreservePathIn>) -> Result<Vec<PreservePath>> {
     input::field("paths", checked)?;
     Ok(paths
         .into_iter()
-        .map(|p| PreservePath {
+        .map(|p| PreserveItem {
             relative: p.relative,
             sha256: p.sha256,
             len: p.len,

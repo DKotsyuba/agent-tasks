@@ -6,23 +6,45 @@
 use super::{
     engine,
     journal::{self, Entry, EntryPhase, Intent, IntentOutcome},
-    locator::{self, Item, Proof},
+    locator::{self, Item, Locator, Proof},
     policy::{Event, EventClass, EventOutcome},
     receipt::{GitOutcome, GitReceipt, Reason},
     status,
 };
-use crate::store::{ABSOLUTE_CAP, EffectKind, Error, LockGuard, Result, Store};
+use crate::store::{
+    ABSOLUTE_CAP, EffectKind, Error, LockGuard, OperationId, Result, Store, UntrackedReason,
+};
 use std::time::Instant;
 
-/// One file the caller authorizes to be committed with exactly these bytes.
+/// One file the caller authorizes to be committed with exactly these bytes (owned wire form).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreservePath {
+pub struct PreserveItem {
     /// Owned relative path.
     pub relative: String,
     /// SHA-256 of the authorized bytes.
     pub sha256: String,
     /// Length of the authorized bytes.
     pub len: u64,
+}
+
+/// The exact bytes the caller authorizes for one file.
+#[derive(Debug, Clone, Copy)]
+pub struct PreservePath<'a> {
+    /// Owned relative path.
+    pub relative: &'a str,
+    /// Lowercase SHA-256 of the authorized bytes.
+    pub sha256: &'a str,
+    /// Length of the authorized bytes.
+    pub len: u64,
+}
+
+/// A preservation request: up to 32 files and an optional operation identity carried into the trailers.
+#[derive(Debug, Clone, Copy)]
+pub struct PreserveRequest<'a> {
+    /// Files to commit.
+    pub paths: &'a [PreservePath<'a>],
+    /// Caller operation identity for the preserved effects.
+    pub operation: Option<&'a OperationId>,
 }
 
 /// A recovery request over explicitly selected pending work.
@@ -37,7 +59,7 @@ pub enum Action {
     /// Stop tracking the named intents without committing; files are untouched.
     Release(Vec<String>),
     /// Commit exactly the authorized bytes of the named files.
-    Preserve(Vec<PreservePath>),
+    Preserve(Vec<PreserveItem>),
 }
 
 /// What a recovery did, as plain data.
@@ -69,6 +91,26 @@ pub fn recover(
     expected_version: &str,
     action: Action,
 ) -> Result<Report> {
+    recover_by(
+        store,
+        guard,
+        expected_version,
+        action,
+        Instant::now() + super::git::SETTLEMENT_TIME,
+    )
+}
+
+/// [`recover`] with an explicit deadline for the whole recovery, so tests can bound a stuck hook.
+///
+/// # Errors
+/// The same as [`recover`].
+pub fn recover_by(
+    store: &Store,
+    guard: &LockGuard,
+    expected_version: &str,
+    action: Action,
+    deadline: Instant,
+) -> Result<Report> {
     if !guard.is_for(store) {
         return Err(Error::new(
             "not_locked",
@@ -81,7 +123,6 @@ pub fn recover(
             "Pending state changed; read the pending facts again before recovering.",
         ));
     }
-    let deadline = Instant::now() + super::git::SETTLEMENT_TIME;
     let mut lines = Vec::new();
     let mut receipt = GitReceipt::saved_only();
     let changed = match action {
@@ -115,10 +156,23 @@ pub fn recover(
         Action::Retry(ids) => {
             check_ids(store, &ids, true)?;
             retry(store, &ids, deadline, &mut receipt, &mut lines)?;
-            receipt.outcome == GitOutcome::Committed
+            receipt.commit.is_some()
         }
-        Action::Preserve(paths) => {
-            preserve(store, &paths, deadline, &mut receipt, &mut lines)?;
+        Action::Preserve(items) => {
+            let paths: Vec<PreservePath<'_>> = items
+                .iter()
+                .map(|p| PreservePath {
+                    relative: &p.relative,
+                    sha256: &p.sha256,
+                    len: p.len,
+                })
+                .collect();
+            let locators = preserve_core(store, &paths, None, deadline, &mut receipt)?;
+            for locator in locators.iter().take(2) {
+                if let Ok(text) = locator.encode() {
+                    lines.push(format!("Preserved {} at {text}", locator.relative));
+                }
+            }
             true
         }
     };
@@ -194,6 +248,9 @@ fn adopt(store: &Store, ids: &[String], lines: &mut Vec<String>) -> Result<()> {
 }
 
 /// Commit the named intents as one composition through the engine rules.
+///
+/// The whole connected chain must be named: a recovery that would split paths shared with an unnamed
+/// intent is refused, naming the rest. If only part of the named set can land, the report says so.
 fn retry(
     store: &Store,
     ids: &[String],
@@ -201,6 +258,17 @@ fn retry(
     receipt: &mut GitReceipt,
     lines: &mut Vec<String>,
 ) -> Result<()> {
+    let extras = engine::connected_extras(store, ids);
+    if !extras.is_empty() {
+        let named: Vec<&str> = extras.iter().take(4).map(String::as_str).collect();
+        return Err(Error::new(
+            "recovery_blocked",
+            format!(
+                "Intents sharing files with the named ones must be named too: {}. A split chain is never committed.",
+                named.join(", ")
+            ),
+        ));
+    }
     let event = Event {
         class: EventClass::Recovery,
         refs: Vec::new(),
@@ -208,10 +276,20 @@ fn retry(
         outcome: EventOutcome::Success,
     };
     engine::run_engine(store, "", &event, receipt, deadline, ids);
-    match receipt.outcome {
-        GitOutcome::Committed => {
-            lines.push("Committed the named intents as one composition.".into())
+    match (receipt.outcome, receipt.commit.is_some()) {
+        (GitOutcome::Committed, _) => {
+            lines.push("Committed the named intents as one composition.".into());
         }
+        (GitOutcome::Unknown, _) => {
+            return Err(Error::new(
+                "recovery_blocked",
+                "The commit outcome is unknown; the named intents stay pending. Reconcile before retrying.",
+            ));
+        }
+        (_, true) => lines.push(format!(
+            "Committed only part of the named intents ({:?}); the rest stay pending.",
+            receipt.reason
+        )),
         _ => {
             return Err(Error::new(
                 "recovery_blocked",
@@ -226,13 +304,16 @@ fn retry(
 }
 
 /// Commit exactly the authorized bytes of the named files through a synthetic adopted intent.
-fn preserve(
+///
+/// The intent is kept whenever a commit may have landed, so a later reconcile can prove or release it;
+/// it is dropped only when Git reported that nothing was committed.
+fn preserve_core(
     store: &Store,
-    paths: &[PreservePath],
+    paths: &[PreservePath<'_>],
+    operation: Option<&OperationId>,
     deadline: Instant,
     receipt: &mut GitReceipt,
-    lines: &mut Vec<String>,
-) -> Result<()> {
+) -> Result<Vec<Locator>> {
     if paths.is_empty() || paths.len() > MAX_PATHS {
         return Err(crate::store::invalid(
             "Name between one and thirty-two files to preserve.",
@@ -243,7 +324,7 @@ fn preserve(
     let mut entries = Vec::new();
     for want in paths {
         let found = store
-            .read_exact(&want.relative, ABSOLUTE_CAP)?
+            .read_exact(want.relative, ABSOLUTE_CAP)?
             .ok_or_else(|| Error::new("stale", "A named file is absent."))?;
         if journal::sha256_hex(&found.bytes) != want.sha256 || found.bytes.len() as u64 != want.len
         {
@@ -257,16 +338,16 @@ fn preserve(
             .iter()
             .filter(|i| i.committed.is_none())
             .flat_map(|i| i.entries.iter())
-            .rfind(|e| e.path == want.relative)
+            .rfind(|e| e.path == want.relative && e.superseded_by.is_none())
             .and_then(|e| e.after_sha256.clone());
         entries.push(Entry {
-            path: want.relative.clone(),
+            path: want.relative.to_owned(),
             kind: EffectKind::Replaced,
-            operation: None,
+            operation: operation.map(|o| o.as_str().to_owned()),
             phase: EntryPhase::Published,
             before_version: None,
             before_sha256: previous,
-            after_sha256: Some(want.sha256.clone()),
+            after_sha256: Some(want.sha256.to_owned()),
             after_len: Some(want.len),
             after_version: Some(found.version),
             witness: None,
@@ -274,20 +355,42 @@ fn preserve(
         });
     }
     let id = journal::new_intent_id(store);
-    edit(store, |j| {
-        j.intents.push(Intent {
-            id: id.clone(),
-            created_at: crate::store::now(),
-            class: Some("recovery".into()),
-            refs: Vec::new(),
-            outcome: IntentOutcome::Partial,
-            adopted: true,
-            committing_from: None,
-            committed: None,
-            entries,
-        })
-    })
-    .map_err(|e| Error::new("preserve_blocked", e.message))?;
+    // The synthetic intent needs journal room like any admission: verified committed intents may be
+    // pruned for it, open ones never are, so a journal full of open work refuses honestly.
+    let (mut open, observed) = journal::load(store)
+        .map_err(|_| Error::new("preserve_blocked", "The pending journal is not readable."))?;
+    let intent = Intent {
+        id: id.clone(),
+        created_at: crate::store::now(),
+        class: Some("recovery".into()),
+        refs: Vec::new(),
+        outcome: IntentOutcome::Partial,
+        adopted: true,
+        committing_from: None,
+        committed: None,
+        entries,
+    };
+    open.intents.push(intent.clone());
+    let mut saved = journal::save(store, &open, observed.as_deref());
+    if saved == Err(UntrackedReason::JournalFull) {
+        let (mut pruned, observed) = journal::load(store)
+            .map_err(|_| Error::new("preserve_blocked", "The pending journal is not readable."))?;
+        if journal::prune(store, &mut pruned) {
+            pruned.intents.push(intent);
+            saved = journal::save(store, &pruned, observed.as_deref());
+        }
+    }
+    saved.map_err(|reason| {
+        Error::new(
+            "preserve_blocked",
+            match reason {
+                UntrackedReason::JournalFull => {
+                    "The pending journal is full of open intents; retry, adopt or release some first. Nothing was committed."
+                }
+                _ => "The pending journal cannot be written. Nothing was committed.",
+            },
+        )
+    })?;
     let event = Event {
         class: EventClass::Recovery,
         refs: Vec::new(),
@@ -302,27 +405,76 @@ fn preserve(
         deadline,
         std::slice::from_ref(&id),
     );
-    if receipt.outcome != GitOutcome::Committed {
-        let reason = receipt.reason.unwrap_or(Reason::CommitNotCompleted);
-        let _ = edit(store, |j| j.intents.retain(|i| i.id != id));
-        return Err(Error::new(
-            "preserve_blocked",
-            format!("Nothing was committed: {reason:?}."),
-        ));
+    match receipt.outcome {
+        GitOutcome::Committed => (),
+        GitOutcome::Unknown => {
+            return Err(Error::new(
+                "preserve_blocked",
+                format!(
+                    "The commit outcome is unknown; intent {id} stays pending. Reconcile before retrying."
+                ),
+            ));
+        }
+        _ => {
+            let reason = receipt.reason.unwrap_or(Reason::CommitNotCompleted);
+            let _ = edit(store, |j| j.intents.retain(|i| i.id != id));
+            return Err(Error::new(
+                "preserve_blocked",
+                format!("Nothing was committed: {reason:?}."),
+            ));
+        }
     }
+    let mut locators = Vec::new();
     for want in paths {
-        if let Proof::Committed(l) = locator::committed_original(
+        match locator::committed_original(
             store,
             &Item {
-                relative: &want.relative,
-                sha256: &want.sha256,
+                relative: want.relative,
+                sha256: want.sha256,
                 len: want.len,
                 at: None,
             },
-        ) && let Ok(text) = l.encode()
-        {
-            lines.push(format!("Preserved {} at {text}", want.relative));
+        ) {
+            Proof::Committed(l) => locators.push(l),
+            _ => {
+                return Err(Error::new(
+                    "preserve_blocked",
+                    format!(
+                        "The commit landed but {} could not be proven committed; inspect the pending state.",
+                        crate::store::safe(want.relative, 120)
+                    ),
+                ));
+            }
         }
     }
-    Ok(())
+    Ok(locators)
+}
+
+/// Commit exactly the authorized bytes of the named files and return a locator for each.
+///
+/// Allowed for unattested and untracked files because the caller is the explicit authorization; the
+/// commit trailers mark the intent adopted and carry the request's operation identity. Never uses the
+/// policy and never defers: the caller needs the proof.
+///
+/// # Errors
+/// `not_locked`, `stale` (a file's bytes changed or vanished), `invalid_data` (limits) and
+/// `preserve_blocked` (nothing committed, or the outcome is unknown and the intent stays pending).
+pub fn preserve(
+    store: &Store,
+    guard: &LockGuard,
+    request: PreserveRequest<'_>,
+) -> Result<Vec<Locator>> {
+    if !guard.is_for(store) {
+        return Err(Error::new(
+            "not_locked",
+            "The root write lock was not acquired through this Store.",
+        ));
+    }
+    preserve_core(
+        store,
+        request.paths,
+        request.operation,
+        Instant::now() + super::git::SETTLEMENT_TIME,
+        &mut GitReceipt::saved_only(),
+    )
 }

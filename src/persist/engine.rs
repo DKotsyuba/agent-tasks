@@ -181,7 +181,7 @@ pub fn analyze(store: &Store, journal: &Journal, current: Option<&str>) -> Selec
             continue;
         }
         for entry in &intent.entries {
-            if entry.phase == EntryPhase::Published {
+            if entry.phase == EntryPhase::Published && entry.superseded_by.is_none() {
                 chains
                     .entry(entry.path.as_str())
                     .or_default()
@@ -323,6 +323,13 @@ fn trailers(journal: &Journal, selected: &[usize], n: usize) -> String {
                 " into={}",
                 later.after_sha256.as_deref().unwrap_or("-")
             ));
+        } else if let Some((_, digest)) = entry
+            .superseded_by
+            .as_deref()
+            .and_then(|s| s.split_once(':'))
+        {
+            // A later commit already holds this path; its recorded image is the chain end.
+            text.push_str(&format!(" into={digest}"));
         }
         text.push('\n');
     }
@@ -425,6 +432,8 @@ pub enum Attempt {
     Landed(String, Vec<Attention>),
     /// Git refused or did not complete; nothing landed.
     NotCompleted,
+    /// A commit landed but its content, parent or trailers differ from the journal: not certified.
+    Unverified(String, Vec<Attention>),
     /// The outcome is unknown (timeout or lost reply).
     Unknown,
 }
@@ -446,8 +455,74 @@ fn run_indexed(
     )
 }
 
+/// One path's exact state to stage: raw bytes stored without filters, or a removal.
+struct Staged {
+    /// Owned relative path.
+    path: String,
+    /// File mode, kept from HEAD when the path exists there.
+    mode: String,
+    /// Object id of the exact bytes; `None` removes the path.
+    oid: Option<String>,
+}
+
+/// Store the exact recorded bytes of every path as raw blobs and describe the index entries to write.
+///
+/// Each file is read, compared with the recorded digest and hashed from the same bytes, so a late
+/// native edit or a clean filter can never change what is committed. `Err` means nothing can be staged.
+fn stage_exact(
+    store: &Store,
+    parent: &str,
+    paths: &[String],
+    expected: &BTreeMap<String, Option<String>>,
+    deadline: Instant,
+) -> Result<Vec<Staged>, ()> {
+    let mut staged = Vec::new();
+    for path in paths {
+        let want = expected.get(path).ok_or(())?;
+        let found = store.read_exact(path, ABSOLUTE_CAP).map_err(|_| ())?;
+        match (want, found) {
+            (None, None) => staged.push(Staged {
+                path: path.clone(),
+                mode: "0".into(),
+                oid: None,
+            }),
+            (Some(digest), Some(file)) if journal::sha256_hex(&file.bytes) == *digest => {
+                let mode = match super::verify::tree_entry(store, parent, path, deadline)? {
+                    Some((mode, _)) => mode,
+                    None => "100644".to_owned(),
+                };
+                let oid =
+                    super::verify::raw_blob_id(store, &file.bytes, true, deadline).ok_or(())?;
+                staged.push(Staged {
+                    path: path.clone(),
+                    mode,
+                    oid: Some(oid),
+                });
+            }
+            _ => return Err(()),
+        }
+    }
+    Ok(staged)
+}
+
+/// `update-index --index-info -z` input for the staged paths.
+fn index_info(staged: &[Staged], oid_len: usize) -> Vec<u8> {
+    let zero = "0".repeat(oid_len);
+    staged
+        .iter()
+        .flat_map(|s| {
+            let oid = s.oid.as_deref().unwrap_or(&zero);
+            format!("{} {oid}\t{}\0", s.mode, s.path).into_bytes()
+        })
+        .collect()
+}
+
 /// Commit exactly `paths` with `message` through a temporary index, then refresh only those paths in the
 /// real index. The user's configuration, hooks and signing apply; nothing is forced.
+///
+/// The commit stages the exact recorded bytes (no clean filters) and is certified only when its parent,
+/// changed set, trailers and every path's object id equal what was staged; anything else is reported as
+/// [`Attempt::Unverified`], never as landed.
 pub fn commit_paths(
     store: &Store,
     parent: &str,
@@ -469,14 +544,17 @@ pub fn commit_paths(
         lock.push(".lock");
         let _ = std::fs::remove_file(std::path::PathBuf::from(lock));
     };
-    let stdin: Vec<u8> = paths.iter().flat_map(|p| p.bytes().chain([0])).collect();
+    let Ok(staged) = stage_exact(store, parent, paths, expected, deadline) else {
+        return Attempt::NotCompleted;
+    };
+    let info = index_info(&staged, parent.len());
     let prepared = run_indexed(store, &index, &["read-tree", "HEAD"], None, deadline)
         .is_ok_and(|o| o.success())
         && run_indexed(
             store,
             &index,
-            &["update-index", "--add", "--remove", "-z", "--stdin"],
-            Some(&stdin),
+            &["update-index", "-z", "--index-info"],
+            Some(&info),
             deadline,
         )
         .is_ok_and(|o| o.success());
@@ -504,7 +582,7 @@ pub fn commit_paths(
         deadline,
     );
     cleanup(&index);
-    // The commit deadline may be spent by a stuck hook; the verification read gets its own short one.
+    // The commit deadline may be spent by a stuck hook; the verification reads get their own short one.
     let verify = Instant::now() + std::time::Duration::from_secs(5);
     let head = git::read_text(
         &store.root,
@@ -523,6 +601,7 @@ pub fn commit_paths(
         return Attempt::NotCompleted;
     };
     let mut attention = Vec::new();
+    let mut proven = true;
     if git::read_text(
         &store.root,
         &["rev-parse", "--verify", "-q", &format!("{new}^")],
@@ -531,7 +610,7 @@ pub fn commit_paths(
     .as_deref()
         != Some(parent)
     {
-        attention.push(Attention::TreeMismatch);
+        proven = false;
     }
     let changed = git::run(
         &store.root,
@@ -548,36 +627,39 @@ pub fn commit_paths(
         deadline,
     )
     .ok()
-    .filter(git::Output::success)
+    .filter(|o| o.success() && !o.truncated)
     .map(|o| nul_list(&o.stdout));
-    if changed.as_ref() != Some(&paths.iter().cloned().collect()) {
-        attention.push(Attention::TreeMismatch);
+    let wanted: BTreeSet<String> = paths.iter().cloned().collect();
+    if !changed.as_ref().is_some_and(|c| c.is_subset(&wanted)) {
+        proven = false;
     }
-    for (path, digest) in expected {
-        let committed = git::read_text(
-            &store.root,
-            &["rev-parse", "--verify", "-q", &format!("{new}:{path}")],
-            deadline,
-        );
-        let matches = match digest {
-            None => committed.is_none(),
-            Some(_) => {
-                let raw = git::read_text(
-                    &store.root,
-                    &["hash-object", "--no-filters", "--", path],
-                    deadline,
-                );
-                committed.is_some() && committed == raw
-            }
-        };
-        if !matches {
-            attention.push(Attention::TreeMismatch);
+    for s in &staged {
+        match super::verify::tree_entry(store, &new, &s.path, deadline) {
+            Ok(entry) if entry.as_ref().map(|(_, oid)| oid) == s.oid.as_ref() => (),
+            _ => proven = false,
         }
-        if file_sha(store, path).ok().as_ref() != Some(digest) {
+        if file_sha(store, &s.path).ok().as_ref() != expected.get(&s.path) {
             attention.push(Attention::HookChangedWorktree);
         }
     }
-    if !run_refresh(store, &stdin, deadline) {
+    let committed_message =
+        git::read_text(&store.root, &["log", "-1", "--format=%B", &new], deadline)
+            .unwrap_or_default();
+    let present: BTreeSet<&str> = committed_message.lines().collect();
+    if !message
+        .lines()
+        .filter(|l| l.starts_with("Agent-Tasks-"))
+        .all(|l| present.contains(l))
+    {
+        proven = false;
+    }
+    if !proven {
+        attention.push(Attention::TreeMismatch);
+        attention.sort_by_key(|a| format!("{a:?}"));
+        attention.dedup();
+        return Attempt::Unverified(new, attention);
+    }
+    if !run_refresh(store, &info, deadline) {
         attention.push(Attention::IndexRefreshFailed);
     }
     attention.sort_by_key(|a| format!("{a:?}"));
@@ -585,12 +667,12 @@ pub fn commit_paths(
     Attempt::Landed(new, attention)
 }
 
-/// Refresh only this engine's own paths in the real index after a landed commit.
-fn run_refresh(store: &Store, stdin: &[u8], deadline: Instant) -> bool {
+/// Refresh only this engine's own paths in the real index after a landed commit, to the committed blobs.
+fn run_refresh(store: &Store, info: &[u8], deadline: Instant) -> bool {
     git::run(
         &store.root,
-        &["update-index", "--add", "--remove", "-z", "--stdin"],
-        Some(stdin),
+        &["update-index", "-z", "--index-info"],
+        Some(info),
         deadline,
     )
     .is_ok_and(|o| o.success())
@@ -725,9 +807,14 @@ pub fn reconcile_committing(store: &Store, deadline: Instant) {
         )
         .filter(|s| !s.is_empty())
         {
-            intent.committed = Some(found);
-            intent.committing_from = None;
-            changed = true;
+            // A trailer match alone is not proof: the commit must hold what the journal recorded.
+            if super::verify::intent_in_commit(store, &found, intent, deadline)
+                == super::verify::Verdict::Exact
+            {
+                intent.committed = Some(found);
+                intent.committing_from = None;
+                changed = true;
+            }
         }
     }
     if changed {
@@ -843,6 +930,118 @@ pub fn settle_by(
     finish(receipt, Some(&intent))
 }
 
+/// Paths each intent still has to commit: entries no later commit has already superseded.
+fn live_paths(journal: &Journal) -> BTreeMap<usize, BTreeSet<String>> {
+    journal
+        .intents
+        .iter()
+        .enumerate()
+        .map(|(n, i)| {
+            (
+                n,
+                i.entries
+                    .iter()
+                    .filter(|e| e.superseded_by.is_none())
+                    .map(|e| e.path.clone())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Open intents of `ids` plus every open intent connected to them through a shared live path.
+///
+/// A recovery that names only part of such a chain would commit a split of it, so callers refuse and
+/// name the rest. Returns the identities connected to the named ones that were not named.
+pub fn connected_extras(store: &Store, ids: &[String]) -> Vec<String> {
+    let Ok((journal, _)) = journal::load(store) else {
+        return Vec::new();
+    };
+    let paths = live_paths(&journal);
+    let open = |n: usize| journal.intents[n].committed.is_none();
+    let mut members: BTreeSet<usize> = journal
+        .intents
+        .iter()
+        .enumerate()
+        .filter(|(n, i)| open(*n) && ids.contains(&i.id))
+        .map(|(n, _)| n)
+        .collect();
+    loop {
+        let grew: Vec<usize> = (0..journal.intents.len())
+            .filter(|n| open(*n) && !members.contains(n))
+            .filter(|n| members.iter().any(|m| !paths[m].is_disjoint(&paths[n])))
+            .collect();
+        if grew.is_empty() {
+            break;
+        }
+        members.extend(grew);
+    }
+    members
+        .into_iter()
+        .map(|n| journal.intents[n].id.clone())
+        .filter(|id| !ids.contains(id))
+        .collect()
+}
+
+/// Intents in `set` that remove a path under an operation identity while an older open intent outside
+/// `set` still holds a replacement written under the same identity.
+///
+/// This is the engine's limited removal guard: the original must stay in history until the replacement
+/// that justifies the removal is committed (or in the same commit).
+fn barrier_hits(journal: &Journal, set: &BTreeSet<usize>) -> Vec<usize> {
+    set.iter()
+        .copied()
+        .filter(|n| {
+            journal.intents[*n]
+                .entries
+                .iter()
+                .filter(|e| e.kind == EffectKind::Removed && e.superseded_by.is_none())
+                .filter_map(|e| e.operation.as_deref())
+                .any(|op| {
+                    (0..*n).any(|m| {
+                        journal.intents[m].committed.is_none()
+                            && !set.contains(&m)
+                            && journal.intents[m].entries.iter().any(|e| {
+                                e.kind != EffectKind::Removed && e.operation.as_deref() == Some(op)
+                            })
+                    })
+                })
+        })
+        .collect()
+}
+
+/// Remove barrier hits and everything connected to them from `set`, recording the reason.
+fn apply_barrier(
+    journal: &Journal,
+    paths: &BTreeMap<usize, BTreeSet<String>>,
+    set: &mut BTreeSet<usize>,
+    excluded: &mut BTreeMap<usize, Reason>,
+) {
+    loop {
+        let hits = barrier_hits(journal, set);
+        if hits.is_empty() {
+            return;
+        }
+        let mut doomed: BTreeSet<usize> = hits.into_iter().collect();
+        loop {
+            let more: Vec<usize> = set
+                .iter()
+                .copied()
+                .filter(|n| !doomed.contains(n))
+                .filter(|n| doomed.iter().any(|d| !paths[d].is_disjoint(&paths[n])))
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            doomed.extend(more);
+        }
+        for n in doomed {
+            set.remove(&n);
+            excluded.insert(n, Reason::RemovalBarrier);
+        }
+    }
+}
+
 /// Select, commit and verify, then fill the call-scoped part of `receipt`.
 pub fn run_engine(
     store: &Store,
@@ -877,19 +1076,14 @@ pub fn run_engine(
         }
         intent.outcome = IntentOutcome::Success;
     }
-    let mut selection = analyze(store, &journal, Some(current));
+    let selection = analyze(store, &journal, Some(current));
     let candidate = |n: usize| selection_candidate(&journal, n);
-    let all_paths: BTreeMap<usize, BTreeSet<String>> = journal
-        .intents
-        .iter()
-        .enumerate()
-        .map(|(n, i)| (n, i.entries.iter().map(|e| e.path.clone()).collect()))
-        .collect();
+    let all_paths = live_paths(&journal);
     let mut excluded: BTreeMap<usize, Reason> = selection.deferred.clone();
     let selected_paths: Vec<String> = selection
         .selected
         .iter()
-        .flat_map(|n| journal.intents[*n].entries.iter().map(|e| e.path.clone()))
+        .flat_map(|n| all_paths[n].iter().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -911,12 +1105,17 @@ pub fn run_engine(
         }
         close_over_paths(&journal, &all_paths, &mut excluded, &candidate);
     }
+    let mut live: BTreeSet<usize> = selection
+        .selected
+        .iter()
+        .copied()
+        .filter(|n| !excluded.contains_key(n))
+        .collect();
+    apply_barrier(&journal, &all_paths, &mut live, &mut excluded);
     let order: Vec<usize> = {
-        let mut order: Vec<usize> = selection
-            .selected
+        let mut order: Vec<usize> = live
             .iter()
             .copied()
-            .filter(|n| !excluded.contains_key(n))
             .filter(|n| forced.is_empty() || forced.contains(&journal.intents[*n].id))
             .collect();
         order.sort_by_key(|n| journal.intents[*n].id != current);
@@ -960,6 +1159,10 @@ pub fn run_engine(
         used += size;
         chosen.extend(component);
     }
+    // A budget exclusion may have dropped the replacement a removal waits for.
+    let mut chosen_set: BTreeSet<usize> = chosen.iter().copied().collect();
+    apply_barrier(&journal, &all_paths, &mut chosen_set, &mut excluded);
+    chosen.retain(|n| chosen_set.contains(n));
     chosen.sort_unstable();
     chosen.dedup();
     let this_index = journal.intents.iter().position(|i| i.id == current);
@@ -975,18 +1178,34 @@ pub fn run_engine(
             receipt.attention.push(Attention::NativeDrift);
         }
     }
+    let recovering = !forced.is_empty();
     if chosen.is_empty() {
+        if recovering {
+            receipt.reason = forced
+                .iter()
+                .filter_map(|id| journal.intents.iter().position(|i| i.id == *id))
+                .find_map(|n| excluded.get(&n).or(selection.deferred.get(&n)).copied())
+                .or(Some(Reason::IncompleteOutcome));
+        }
         return;
     }
     let paths: Vec<String> = chosen
         .iter()
-        .flat_map(|n| journal.intents[*n].entries.iter().map(|e| e.path.clone()))
+        .flat_map(|n| all_paths[n].iter().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    if paths.is_empty() {
+        receipt.reason = Some(Reason::IncompleteOutcome);
+        return;
+    }
     let mut expected: BTreeMap<String, Option<String>> = BTreeMap::new();
     for n in &chosen {
-        for e in &journal.intents[*n].entries {
+        for e in journal.intents[*n]
+            .entries
+            .iter()
+            .filter(|e| e.superseded_by.is_none())
+        {
             expected.insert(e.path.clone(), e.after_sha256.clone());
         }
     }
@@ -1009,22 +1228,38 @@ pub fn run_engine(
                 after.intents[*n].committed = Some(commit.clone());
                 after.intents[*n].committing_from = None;
             }
-            let chosen_ids: BTreeSet<String> = chosen
-                .iter()
-                .map(|n| after.intents[*n].id.clone())
-                .collect();
+            // Each committed path now holds the last chosen image; older open writes to it are superseded.
+            let mut winners: BTreeMap<&str, (String, String)> = BTreeMap::new();
+            for n in &chosen {
+                for e in journal.intents[*n]
+                    .entries
+                    .iter()
+                    .filter(|e| e.superseded_by.is_none())
+                {
+                    winners.insert(
+                        e.path.as_str(),
+                        (
+                            journal.intents[*n].id.clone(),
+                            e.after_sha256.clone().unwrap_or_else(|| "-".to_owned()),
+                        ),
+                    );
+                }
+            }
             for intent in after.intents.iter_mut().filter(|i| i.committed.is_none()) {
-                let winner = chosen_ids.iter().next().cloned();
                 for entry in &mut intent.entries {
-                    if paths.contains(&entry.path) && entry.superseded_by.is_none() {
-                        entry.superseded_by = winner.clone();
+                    if entry.superseded_by.is_none()
+                        && let Some((id, digest)) = winners.get(entry.path.as_str())
+                    {
+                        entry.superseded_by = Some(format!("{id}:{digest}"));
                     }
                 }
             }
             let _ = journal::save(store, &after, observed.as_deref());
-            // An explicit recovery names its intents; they are the call, not "older" work.
-            let recovering = !forced.is_empty();
-            let mine = recovering || this_index.is_some_and(|n| chosen.contains(&n));
+            let chosen_ids: BTreeSet<&String> =
+                chosen.iter().map(|n| &journal.intents[*n].id).collect();
+            let all_named = recovering && forced.iter().all(|id| chosen_ids.contains(id));
+            let mine =
+                all_named || (!recovering && this_index.is_some_and(|n| chosen.contains(&n)));
             let older = if recovering {
                 0
             } else {
@@ -1037,6 +1272,15 @@ pub fn run_engine(
                 .sum();
             if recovering {
                 receipt.paths = paths.clone();
+                receipt.commit = Some(commit.clone());
+                if !all_named {
+                    receipt.reason = forced
+                        .iter()
+                        .filter(|id| !chosen_ids.contains(id))
+                        .filter_map(|id| journal.intents.iter().position(|i| i.id == *id))
+                        .find_map(|n| excluded.get(&n).or(selection.deferred.get(&n)).copied())
+                        .or(Some(Reason::IncompleteOutcome));
+                }
             }
             if mine {
                 receipt.outcome = GitOutcome::Committed;
@@ -1051,6 +1295,12 @@ pub fn run_engine(
                 });
             }
             receipt.attention.extend(attention);
+        }
+        Attempt::Unverified(_, attention) => {
+            receipt.outcome = GitOutcome::Unknown;
+            receipt.reason = None;
+            receipt.attention.extend(attention);
+            receipt.attention.push(Attention::UnknownPending);
         }
         Attempt::NotCompleted => {
             for n in &chosen {
@@ -1071,7 +1321,6 @@ pub fn run_engine(
             receipt.attention.push(Attention::UnknownPending);
         }
     }
-    let _ = &mut selection;
 }
 
 /// Whether intent `n` is a commit candidate (successful and fully published).

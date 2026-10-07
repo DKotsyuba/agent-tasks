@@ -915,12 +915,12 @@ fn recovery_retry_commits_a_held_intent() {
 /// Preserve commits exactly the authorized bytes and refuses a mismatch.
 #[test]
 fn recovery_preserve_requires_the_authorized_bytes() {
-    use super::recover::{Action, PreservePath, recover};
+    use super::recover::{Action, PreserveItem, recover};
     let f = GitFixture::new();
     std::fs::write(f.dir.path().join("note.md"), b"native").unwrap();
     let (store, guard) = call(&f);
     let version = super::pending_version(&store);
-    let wrong = PreservePath {
+    let wrong = PreserveItem {
         relative: "note.md".into(),
         sha256: digest(b"other"),
         len: 5,
@@ -928,7 +928,7 @@ fn recovery_preserve_requires_the_authorized_bytes() {
     let refused = recover(&store, &guard, &version, Action::Preserve(vec![wrong]));
     assert_eq!(refused.unwrap_err().code, "stale");
     assert_eq!(f.git(&["ls-files", "note.md"]), "");
-    let right = PreservePath {
+    let right = PreserveItem {
         relative: "note.md".into(),
         sha256: digest(b"native"),
         len: 6,
@@ -1325,5 +1325,621 @@ fn the_oracle_returns_generated_effects_and_survives_a_pruned_journal() {
             .paths
             .iter()
             .all(|p| matches!(p.git, super::EffectGit::Committed { .. }))
+    );
+}
+
+/// Open intent identities in journal order.
+fn open_intents(store: &Store) -> Vec<String> {
+    journal::load(store)
+        .unwrap()
+        .0
+        .intents
+        .iter()
+        .filter(|i| i.committed.is_none())
+        .map(|i| i.id.clone())
+        .collect()
+}
+
+/// A hook that stages different bytes into the commit's own index must not be certified as committed.
+#[cfg(unix)]
+#[test]
+fn a_hook_that_stages_other_bytes_is_not_certified() {
+    let f = GitFixture::new();
+    hook(&f, "pre-commit", "echo tamper >> doc.md; git add doc.md");
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", b"mine");
+    let receipt = commit_now(&store, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Unknown, "{receipt:?}");
+    assert!(
+        receipt.attention.contains(&Attention::TreeMismatch),
+        "{receipt:?}"
+    );
+    assert_eq!(
+        open_intents(&store).len(),
+        1,
+        "an unverified commit leaves the intent open"
+    );
+    assert!(
+        journal::load(&store).unwrap().0.intents[0]
+            .committed
+            .is_none()
+    );
+}
+
+/// A landed commit whose tree or trailers disagree with the journal is never recorded as committed.
+#[test]
+fn reconcile_never_certifies_a_commit_that_disagrees_with_the_journal() {
+    let f = GitFixture::new();
+    let parent = f.git(&["rev-parse", "HEAD"]);
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", b"mine");
+    assert_eq!(commit_now(&store, &guard).outcome, GitOutcome::Committed);
+    let (mut j, observed) = journal::load(&store).unwrap();
+    j.intents[0].committed = None;
+    j.intents[0].committing_from = Some(parent);
+    j.intents[0].entries[0].after_sha256 = Some(digest(b"something else"));
+    journal::save(&store, &j, observed.as_deref()).unwrap();
+    super::engine::reconcile_committing(
+        &store,
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+    );
+    let (j, _) = journal::load(&store).unwrap();
+    assert!(
+        j.intents[0].committed.is_none(),
+        "a trailer or tree mismatch is not proof"
+    );
+}
+
+/// A forced retry that names part of a connected path chain is blocked, naming the rest.
+#[test]
+fn retry_requires_the_whole_connected_chain() {
+    use super::recover::{Action, recover};
+    let f = GitFixture::new();
+    let (first, guard) = call(&f);
+    create(&first, "doc.md", b"v1");
+    defer_now(&first, &guard);
+    drop(guard);
+    let (second, guard) = call(&f);
+    replace(&second, "doc.md", b"v2", b"v1");
+    defer_now(&second, &guard);
+    let ids = open_intents(&second);
+    assert_eq!(ids.len(), 2);
+    let before = commits(&f);
+    let version = super::pending_version(&second);
+    let error = recover(
+        &second,
+        &guard,
+        &version,
+        Action::Retry(vec![ids[0].clone()]),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "recovery_blocked");
+    assert!(error.message.contains(&ids[1]), "{}", error.message);
+    assert_eq!(commits(&f), before, "a split chain is never committed");
+    let version = super::pending_version(&second);
+    let both = recover(&second, &guard, &version, Action::Retry(ids)).unwrap();
+    assert_eq!(
+        both.receipt.outcome,
+        GitOutcome::Committed,
+        "{:?}",
+        both.receipt
+    );
+    assert_eq!(f.git(&["show", "HEAD:doc.md"]), "v2");
+}
+
+/// A held counter write superseded by a committed later call must not poison the next counter write.
+#[test]
+fn a_superseded_held_counter_does_not_poison_later_calls() {
+    use super::recover::{Action, recover};
+    let f = GitFixture::new();
+    let (zero, guard) = call(&f);
+    create(&zero, "counter.yaml", b"c0");
+    commit_now(&zero, &guard);
+    drop(guard);
+    let (held, guard) = call(&f);
+    replace(&held, "counter.yaml", b"c1", b"c0");
+    create(&held, "body.md", b"half");
+    settle(&held, &guard, &partial(), production_policy());
+    let held_id = open_intents(&held)[0].clone();
+    drop(guard);
+    let (second, guard) = call(&f);
+    replace(&second, "counter.yaml", b"c2", b"c1");
+    assert_eq!(commit_now(&second, &guard).outcome, GitOutcome::Committed);
+    drop(guard);
+    let (third, guard) = call(&f);
+    replace(&third, "counter.yaml", b"c3", b"c2");
+    let receipt = commit_now(&third, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert_eq!(f.git(&["show", "HEAD:counter.yaml"]), "c3");
+    let version = super::pending_version(&third);
+    let retry = recover(&third, &guard, &version, Action::Retry(vec![held_id])).unwrap();
+    assert_eq!(
+        retry.receipt.outcome,
+        GitOutcome::Committed,
+        "{:?}",
+        retry.receipt
+    );
+    assert_eq!(
+        f.git(&["show", "HEAD:counter.yaml"]),
+        "c3",
+        "the held old counter is never recommitted"
+    );
+    assert_eq!(f.git(&["show", "HEAD:body.md"]), "half");
+}
+
+/// A removal under an operation identity waits while an older held replacement of that identity exists.
+#[test]
+fn a_removal_waits_for_an_older_held_replacement_of_the_same_operation() {
+    let f = GitFixture::new();
+    let (zero, guard) = call(&f);
+    create(&zero, "old.md", b"old");
+    commit_now(&zero, &guard);
+    drop(guard);
+    let (held, guard) = call(&f);
+    create_op(&held, "new.md", b"new", "compact:one");
+    settle(&held, &guard, &partial(), production_policy());
+    drop(guard);
+    let (removal, guard) = call(&f);
+    let op = OperationId::new("compact:one").unwrap();
+    removal
+        .remove(
+            crate::store::Remove {
+                relative: "old.md",
+                observed: b"old",
+                cap: RECORD_CAP,
+                operation: Some(&op),
+                attest: Attest::Required,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+    let before = commits(&f);
+    let receipt = commit_now(&removal, &guard);
+    assert_eq!(
+        (receipt.outcome, receipt.reason),
+        (GitOutcome::Deferred, Some(Reason::RemovalBarrier)),
+        "{receipt:?}"
+    );
+    assert_eq!(commits(&f), before);
+    assert_eq!(
+        f.git(&["ls-files", "old.md"]),
+        "old.md",
+        "the original stays in history until the replacement is committed"
+    );
+}
+
+/// More matching history than the bounded scan can read is incomplete, never complete.
+#[test]
+fn a_history_longer_than_the_scan_is_unknown_not_attested() {
+    let f = GitFixture::new();
+    let (store, _guard) = call(&f);
+    for n in 0..66 {
+        let name = format!("h{n}.md");
+        let body = format!("body {n}");
+        std::fs::write(f.dir.path().join(&name), &body).unwrap();
+        f.git(&["add", "--", &name]);
+        let message = format!(
+            "docs: history {n}\n\nAgent-Tasks-Intent: PG-{n:024x}\nAgent-Tasks-Effect: hist:op created {name} - {}\n",
+            digest(body.as_bytes())
+        );
+        f.git(&["commit", "--quiet", "-m", &message]);
+    }
+    let op = OperationId::new("hist:op").unwrap();
+    let newest = expect_created("h65.md", b"body 65");
+    match super::effect_status(&store, &op, &[newest]) {
+        super::EffectStatus::Unknown { reason, .. } => {
+            assert_eq!(reason, super::UnknownReason::HistoryScanIncomplete);
+        }
+        other => panic!("expected Unknown, got {other:?}"),
+    }
+}
+
+/// An unknown preserve outcome keeps its intent so a later reconcile can prove or release it.
+#[cfg(unix)]
+#[test]
+fn an_unknown_preserve_keeps_its_intent_and_does_not_claim_nothing_committed() {
+    use super::recover::{Action, PreserveItem, recover_by};
+    let f = GitFixture::new();
+    std::fs::write(f.dir.path().join("note.md"), b"native").unwrap();
+    hook(&f, "pre-commit", "touch .git/hook-started; sleep 60");
+    let (store, guard) = call(&f);
+    let version = super::pending_version(&store);
+    let path = PreserveItem {
+        relative: "note.md".into(),
+        sha256: digest(b"native"),
+        len: 6,
+    };
+    let budget = std::time::Duration::from_secs(10);
+    let error = recover_by(
+        &store,
+        &guard,
+        &version,
+        Action::Preserve(vec![path]),
+        std::time::Instant::now() + budget,
+    )
+    .err()
+    .unwrap();
+    assert!(f.dir.path().join(".git/hook-started").exists());
+    assert_eq!(error.code, "preserve_blocked");
+    assert!(
+        !error.message.contains("Nothing was committed"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        open_intents(&store).len(),
+        1,
+        "the unknown intent is retained for reconciliation"
+    );
+}
+
+/// When part of a named retry cannot land, the report says so and the rest stays pending.
+#[test]
+fn retry_reports_a_partial_result_when_part_of_the_named_set_cannot_land() {
+    use super::recover::{Action, recover};
+    let f = GitFixture::new();
+    std::fs::write(f.dir.path().join("shared.md"), "base").unwrap();
+    f.git(&["add", "--", "shared.md"]);
+    f.git(&["commit", "--quiet", "-m", "fixture: shared"]);
+    let (first, guard) = call(&f);
+    create(&first, "doc.md", b"one");
+    defer_now(&first, &guard);
+    drop(guard);
+    let (second, guard) = call(&f);
+    replace(&second, "shared.md", b"mcp", b"base");
+    defer_now(&second, &guard);
+    std::fs::write(f.dir.path().join("shared.md"), "mcp").unwrap();
+    f.git(&["add", "--", "shared.md"]);
+    let ids = open_intents(&second);
+    let version = super::pending_version(&second);
+    let report = recover(&second, &guard, &version, Action::Retry(ids.clone())).unwrap();
+    assert_eq!(
+        report.receipt.outcome,
+        GitOutcome::Deferred,
+        "{:?}",
+        report.receipt
+    );
+    assert!(report.receipt.commit.is_some() && report.changed);
+    assert!(
+        report.lines.iter().any(|l| l.contains("only part")),
+        "{:?}",
+        report.lines
+    );
+    assert_eq!(f.git(&["ls-files", "doc.md"]), "doc.md");
+    assert_eq!(
+        open_intents(&second),
+        vec![ids[1].clone()],
+        "the foreign-staged intent stays pending"
+    );
+}
+
+/// Once the replacement is committed, the waiting removal lands on the next settlement.
+#[test]
+fn a_waiting_removal_lands_after_its_replacement_is_retried() {
+    use super::recover::{Action, recover};
+    let f = GitFixture::new();
+    let (zero, guard) = call(&f);
+    create(&zero, "old.md", b"old");
+    commit_now(&zero, &guard);
+    drop(guard);
+    let (held, guard) = call(&f);
+    create_op(&held, "new.md", b"new", "compact:two");
+    let held_id = settle(&held, &guard, &partial(), production_policy()).pending[0]
+        .intent
+        .clone();
+    drop(guard);
+    let (removal, guard) = call(&f);
+    let op = OperationId::new("compact:two").unwrap();
+    removal
+        .remove(
+            crate::store::Remove {
+                relative: "old.md",
+                observed: b"old",
+                cap: RECORD_CAP,
+                operation: Some(&op),
+                attest: Attest::Required,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        commit_now(&removal, &guard).reason,
+        Some(Reason::RemovalBarrier)
+    );
+    let version = super::pending_version(&removal);
+    recover(&removal, &guard, &version, Action::Retry(vec![held_id])).unwrap();
+    assert_eq!(f.git(&["ls-files", "new.md"]), "new.md");
+    assert_eq!(
+        f.git(&["ls-files", "old.md"]),
+        "old.md",
+        "retry commits only what it names"
+    );
+    drop(guard);
+    let (next, guard) = call(&f);
+    create(&next, "tick.md", b"x");
+    let receipt = commit_now(&next, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert_eq!(
+        f.git(&["ls-files", "old.md"]),
+        "",
+        "the removal landed once its replacement was committed"
+    );
+}
+
+/// The pinned public surface: preserve returns a locator per file and carries the operation identity.
+#[test]
+fn the_public_preserve_surface_returns_locators_and_carries_the_operation() {
+    use super::{PreservePath, PreserveRequest, preserve};
+    let f = GitFixture::new();
+    std::fs::write(f.dir.path().join("note.md"), b"native").unwrap();
+    let (store, guard) = call(&f);
+    let op = OperationId::new("preserve:one").unwrap();
+    let sha = digest(b"native");
+    let paths = [PreservePath {
+        relative: "note.md",
+        sha256: &sha,
+        len: 6,
+    }];
+    let locators = preserve(
+        &store,
+        &guard,
+        PreserveRequest {
+            paths: &paths,
+            operation: Some(&op),
+        },
+    )
+    .unwrap();
+    assert_eq!(locators.len(), 1);
+    assert_eq!(locators[0].relative, "note.md");
+    assert_eq!(
+        super::locator::read_committed(&store, &locators[0].encode().unwrap(), 1024).unwrap(),
+        b"native"
+    );
+    assert!(
+        f.git(&["log", "-1", "--format=%B"])
+            .contains("preserve:one"),
+        "operation identity reaches the trailers"
+    );
+    let stale = [PreservePath {
+        relative: "note.md",
+        sha256: &digest(b"other"),
+        len: 5,
+    }];
+    assert_eq!(
+        preserve(
+            &store,
+            &guard,
+            PreserveRequest {
+                paths: &stale,
+                operation: None
+            }
+        )
+        .err()
+        .unwrap()
+        .code,
+        "stale"
+    );
+    drop(guard);
+    let other = Store::from_root(f.dir.path()).unwrap();
+    let foreign = store.lock(true, &mut Vec::new());
+    drop(foreign);
+    let wrong_guard = other.lock(true, &mut Vec::new()).unwrap().unwrap();
+    assert_eq!(
+        preserve(
+            &store,
+            &wrong_guard,
+            PreserveRequest {
+                paths: &paths,
+                operation: None
+            }
+        )
+        .err()
+        .unwrap()
+        .code,
+        "not_locked"
+    );
+}
+
+/// One Git command has ten seconds even when the settlement allows thirty: a slower hook is unknown.
+#[cfg(unix)]
+#[test]
+fn a_hook_slower_than_one_command_is_unknown() {
+    let f = GitFixture::new();
+    hook(&f, "pre-commit", "touch .git/hook-started; sleep 15");
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", b"mine");
+    let started = std::time::Instant::now();
+    let receipt = commit_now(&store, &guard);
+    assert!(f.dir.path().join(".git/hook-started").exists());
+    assert!(
+        started.elapsed() >= super::git::COMMAND_TIME,
+        "the limit applies, not earlier"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "the hook was not waited for"
+    );
+    assert_eq!(receipt.outcome, GitOutcome::Unknown, "{receipt:?}");
+}
+
+/// A hook that appends to a nested file is visible in both the receipt data and its rendered lines.
+#[cfg(unix)]
+#[test]
+fn a_hook_append_on_a_nested_path_is_reported_in_the_receipt_lines() {
+    let f = GitFixture::new();
+    hook(&f, "pre-commit", "echo more >> docs/seven.md");
+    let (store, guard) = call(&f);
+    store.create_dir("docs", &mut Vec::new()).unwrap();
+    create(&store, "docs/seven.md", b"seven");
+    let receipt = commit_now(&store, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert!(
+        receipt.attention.contains(&Attention::HookChangedWorktree),
+        "{receipt:?}"
+    );
+    assert!(
+        receipt
+            .lines()
+            .iter()
+            .any(|l| l.contains("HookChangedWorktree")),
+        "{:?}",
+        receipt.lines()
+    );
+    assert_eq!(f.git(&["show", "HEAD:docs/seven.md"]), "seven");
+    assert!(
+        f.git(&["status", "--porcelain", "--", "docs/seven.md"])
+            .contains("M docs/seven.md"),
+        "the hook's edit stays visible"
+    );
+}
+
+/// An older eligible chain left by a rejecting hook is committed with the next call that shares its counter.
+#[cfg(unix)]
+#[test]
+fn an_older_eligible_chain_lands_with_the_next_call_sharing_its_counter() {
+    let f = GitFixture::new();
+    let (zero, guard) = call(&f);
+    create(&zero, "counter.yaml", b"c0");
+    commit_now(&zero, &guard);
+    drop(guard);
+    hook(&f, "pre-commit", "exit 1");
+    let (older, guard) = call(&f);
+    replace(&older, "counter.yaml", b"c1", b"c0");
+    create(&older, "K-1.yaml", b"first");
+    assert_eq!(
+        commit_now(&older, &guard).reason,
+        Some(Reason::CommitNotCompleted)
+    );
+    drop(guard);
+    std::fs::remove_file(f.dir.path().join(".git/hooks/pre-commit")).unwrap();
+    let (current, guard) = call(&f);
+    replace(&current, "counter.yaml", b"c2", b"c1");
+    create(&current, "K-2.yaml", b"second");
+    let receipt = commit_now(&current, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert_eq!(
+        receipt.earlier.len(),
+        1,
+        "the older chain is reported as an extra fact"
+    );
+    assert_eq!(
+        f.git(&["ls-files", "K-1.yaml", "K-2.yaml"]),
+        "K-1.yaml\nK-2.yaml"
+    );
+    assert_eq!(f.git(&["show", "HEAD:counter.yaml"]), "c2");
+    assert!(open_intents(&current).is_empty());
+}
+
+/// A journal full of open intents refuses preserve; verified committed ones are pruned for it.
+#[test]
+fn preserve_refuses_a_full_journal_of_open_intents_but_prunes_committed_ones() {
+    use super::{PreservePath, PreserveRequest, preserve};
+    let f = GitFixture::new();
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", b"mine");
+    defer_now(&store, &guard);
+    let (mut j, observed) = journal::load(&store).unwrap();
+    let template = j.intents[0].clone();
+    for n in 0..63 {
+        let mut copy = template.clone();
+        copy.id = format!("PG-{n:024x}");
+        copy.entries.clear();
+        j.intents.push(copy);
+    }
+    journal::save(&store, &j, observed.as_deref()).unwrap();
+    std::fs::write(f.dir.path().join("note.md"), b"native").unwrap();
+    let sha = digest(b"native");
+    let paths = [PreservePath {
+        relative: "note.md",
+        sha256: &sha,
+        len: 6,
+    }];
+    let refused = preserve(
+        &store,
+        &guard,
+        PreserveRequest {
+            paths: &paths,
+            operation: None,
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(refused.code, "preserve_blocked");
+    assert!(refused.message.contains("full"), "{}", refused.message);
+    assert_eq!(
+        journal::load(&store).unwrap().0.intents.len(),
+        64,
+        "no open intent was dropped"
+    );
+    // Mark one verified committed: its room can be reused.
+    let (mut j, observed) = journal::load(&store).unwrap();
+    let head = f.git(&["rev-parse", "HEAD"]);
+    j.intents[5].committed = Some(head);
+    journal::save(&store, &j, observed.as_deref()).unwrap();
+    let locators = preserve(
+        &store,
+        &guard,
+        PreserveRequest {
+            paths: &paths,
+            operation: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(locators.len(), 1);
+}
+
+/// An explicit Release of open intents makes journal room; it is a different path from pruning verified
+/// committed intents, and the released work's files are left untouched.
+#[test]
+fn release_makes_room_then_preserve() {
+    use super::recover::{Action, recover};
+    use super::{PreservePath, PreserveRequest, preserve};
+    let f = GitFixture::new();
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", b"mine");
+    defer_now(&store, &guard);
+    let (mut j, observed) = journal::load(&store).unwrap();
+    let template = j.intents[0].clone();
+    for n in 0..63 {
+        let mut copy = template.clone();
+        copy.id = format!("PG-{n:024x}");
+        copy.entries.clear();
+        j.intents.push(copy);
+    }
+    journal::save(&store, &j, observed.as_deref()).unwrap();
+    std::fs::write(f.dir.path().join("note.md"), b"native").unwrap();
+    let sha = digest(b"native");
+    let paths = [PreservePath {
+        relative: "note.md",
+        sha256: &sha,
+        len: 6,
+    }];
+    let request = PreserveRequest {
+        paths: &paths,
+        operation: None,
+    };
+    assert_eq!(
+        preserve(&store, &guard, request).err().unwrap().code,
+        "preserve_blocked"
+    );
+    let version = super::pending_version(&store);
+    let released = recover(
+        &store,
+        &guard,
+        &version,
+        Action::Release(vec![format!("PG-{:024x}", 3)]),
+    )
+    .unwrap();
+    assert!(released.changed);
+    assert!(
+        f.dir.path().join("doc.md").exists(),
+        "release leaves files untouched"
+    );
+    assert_eq!(preserve(&store, &guard, request).unwrap().len(), 1);
+    assert_eq!(
+        open_intents(&store).len(),
+        63,
+        "only the released intent was dropped"
     );
 }
