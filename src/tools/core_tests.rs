@@ -3099,3 +3099,192 @@ async fn core_unified_intrinsic_approval_survives_parent_and_unknown_scope() {
     f.record(&m, json!({"op":"begin"}), true).await;
     assert_eq!(before.bytes, f.store().module(&m).unwrap().bytes);
 }
+
+/// Valid plain prose, including the exact AT-002 text, with punctuation and Markdown markers that
+/// the canonical writer may emit unquoted and the read gate must therefore accept.
+const YAML_PROSE: &[&str] = &[
+    "Maps valid_reference(store,&str) to B",
+    "valid_reference(store,&str)",
+    "wait ! now",
+    "ends with bang !",
+    "uses *args and **kwargs, *star",
+    "Tom & Jerry, & friends",
+    "pair a,&b and c,*d and e,!f",
+    "list [a, &b] and {c, *d}",
+    "**bold** and *emphasis* and `code` & more",
+    "see [link](http://example.invalid/a?b=1&c=2), &co",
+    "a:&b and a:*b and a:!b",
+    "100% sure | maybe > not",
+    "x # not a comment but y#z",
+    "trailing colon:",
+    "unicode ✓ & ünïcode, *ok*",
+    "mid ' quote and mid \" quote & more",
+];
+
+/// Canonical encode of valid plain prose must always pass the exact read gate and decode equal,
+/// as scalar, sequence item, map value and nested field, including multiline literal text.
+#[test]
+fn yaml_canonical_prose_round_trips_through_the_read_gate() {
+    use std::collections::BTreeMap;
+    for text in YAML_PROSE {
+        let bytes = store::encode(&vec![*text]).unwrap();
+        assert_eq!(
+            store::decode::<Vec<String>>(&bytes).unwrap(),
+            [*text],
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let mut map = BTreeMap::new();
+        map.insert("description".to_owned(), vec![(*text).to_owned()]);
+        map.insert("nested".to_owned(), vec![format!("{text}\n{text}")]);
+        map.insert("literal".to_owned(), vec![format!("{text}\n  &x {text}\n")]);
+        let bytes = store::encode(&map).unwrap();
+        assert_eq!(
+            store::decode::<BTreeMap<String, Vec<String>>>(&bytes).unwrap(),
+            map,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+}
+
+/// Real router path: an Epic-core Module whose contract description is the exact AT-002 prose is
+/// saved, read by a cold second configuration, then edited again; nothing becomes unreadable.
+#[tokio::test]
+async fn yaml_router_contract_prose_survives_restart_and_next_write() {
+    let f = Fixture::epic_core();
+    f.init().await;
+    let a = epic_fixture_module(&f, "provider").await;
+    let b = epic_fixture_module(&f, "consumer").await;
+    for (m, id) in [(&a, "lead-a"), (&b, "lead-b")] {
+        epic_fixture_bind(&f, m, "lead", id).await;
+        epic_fixture_planning(&f, m, id).await;
+    }
+    let description = "Maps valid_reference(store,&str) to B, wait ! now, uses *args";
+    f.plan(&a,json!({"op":"edit_module","module":a,"contracts":{"not_required":false,"provides":[{"peer":b,"id":"mapping","revision":1,"description":description,"reference":"contract:mapping","ready":false}]}}),false).await;
+    let saved = fs::read(f.root.join(format!("modules/{a}.yaml"))).unwrap();
+    let cold = Config::new(Some(f.directory.path().join("config.toml")));
+    let reply = super::call(
+        "get_context",
+        json!({"project":"alpha","ref":a}),
+        &f.identity,
+        &f.templates,
+        &cold,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply.is_error, Some(false), "{reply:?}");
+    assert_eq!(
+        cold.resolve("alpha")
+            .unwrap()
+            .module(&a)
+            .unwrap()
+            .value
+            .workflow
+            .unwrap()
+            .contracts
+            .unwrap()
+            .provides[0]
+            .description,
+        description
+    );
+    assert_eq!(
+        fs::read(f.root.join(format!("modules/{a}.yaml"))).unwrap(),
+        saved,
+        "reads never rewrite the saved record"
+    );
+    f.plan(&b,json!({"op":"edit_module","module":b,"contracts":{"not_required":false,"consumes":[{"peer":a,"id":"mapping","revision":1,"description":description,"reference":"contract:mapping","ready":false}]}}),false).await;
+    f.record(&a,json!({"op":"agree_contract","contract_id":"mapping","revision":1,"summary":"Agreed valid_reference(store,&str) mapping","actor":"lead-a"}),false).await;
+}
+
+/// Raw bytes already written by the previous canonical writer become readable unchanged.
+#[test]
+fn yaml_legacy_plain_scalar_bytes_read_without_rewrite() {
+    let legacy = b"description: Maps valid_reference(store,&str) to B\nitems:\n- a,*b\n- c,!d\n";
+    let value: Value = store::decode(legacy).unwrap();
+    assert_eq!(
+        value["description"],
+        "Maps valid_reference(store,&str) to B"
+    );
+    assert_eq!(value["items"], json!(["a,*b", "c,!d"]));
+}
+
+/// Forbidden syntax stays refused in block, flow, nested, key, separator and block-scalar-sibling
+/// positions, while quoted, literal, folded, commented and multiline controls remain accepted.
+#[test]
+fn yaml_forbidden_syntax_negatives_and_literal_controls() {
+    for bad in [
+        "a: &x 1\nb: *x\n",
+        "a: !!str x\n",
+        "a: !Tag x\n",
+        "a: ! x\n",
+        "a:\t&x 1\n",
+        "- &x one\n- *x\n",
+        "- - &x a\n",
+        "a:\n  - &x b\n",
+        "a:\n  &x b\n",
+        "&x a: 1\n",
+        "*x : 1\n",
+        "!t a: 1\n",
+        "? &x k\n: v\n",
+        "? [a, b]\n: x\n",
+        "[a]: x\n",
+        "{a: 1}: x\n",
+        "<<: *d\n",
+        "a: {<<: x}\n",
+        "k: [&x a, *x]\n",
+        "k: [a, !t b]\n",
+        "k: {a: &x 1}\n",
+        "k: {a: 1, b: *x}\n",
+        "k: [a,\n  &x b]\n",
+        "k: {a:\n  *x}\n",
+        "--- &x\na: 1\n",
+        "--- !t\na: 1\n",
+        "a: 1\n---\na: 2\n",
+        "---\na: 1\n---\na: 2\n",
+        "a: |\n  text\nb: &x 1\nc: *x\n",
+        "- a: |\n    x\n  b: &x 1\n  c: *x\n",
+        "a: >-\n  text\n&y z: 1\n",
+        "a: 1\na: 2\n",
+    ] {
+        assert!(store::decode::<Value>(bad.as_bytes()).is_err(), "{bad:?}");
+    }
+    for good in [
+        "a: 'x &y *z !w, &v'\n",
+        "a: \"x &y *z !w, &v \\\" &q\"\n",
+        "a: valid_reference(store,&str)\n",
+        "a: [b, \"&c\", 'd, *e']\n",
+        "a: {b: \"&c\", d: 'e, !f'}\n",
+        "a: |\n  &x text\n  *y !z\nb: ok\n",
+        "a: >-\n  &x folded\n  *y\nb: ok\n",
+        "- a: |\n    &x text\n  b: ok\n",
+        "- |\n  &x text\n- ok\n",
+        "# &x comment\na: b # *y !z\n",
+        "a: \"multi\n  line &x\n  quoted\"\nb: ok\n",
+        "a: 'multi\n  line *y\n  quoted'\nb: ok\n",
+        "a: b&c\nd: e*f\ng: h!i\n",
+        "a: x - &y\n",
+    ] {
+        assert!(store::decode::<Value>(good.as_bytes()).is_ok(), "{good:?}");
+    }
+}
+
+/// A serialization the read gate would refuse is never published: encode and save refuse with a
+/// classified error, create no file and leave no ledger of publication.
+#[test]
+fn yaml_unreadable_encoding_is_refused_before_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::from_root(&dir.path().join("docs")).unwrap();
+    let mut effects = Vec::new();
+    store.prepare(&mut effects).unwrap();
+    effects.clear();
+    let tagged: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str("!Tag value").expect("test serializer-side tagged value");
+    let error = store::encode(&tagged).unwrap_err();
+    assert_eq!(error.code, "encoding_unreadable");
+    let error = store
+        .save("tagged.yaml", &tagged, None, false, &mut effects)
+        .unwrap_err();
+    assert_eq!(error.code, "encoding_unreadable");
+    assert!(effects.is_empty() && !store.root.join("tagged.yaml").exists());
+}

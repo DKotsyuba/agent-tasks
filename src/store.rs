@@ -338,65 +338,143 @@ fn read_path(path: &Path, cap: usize) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-/// Reject unsupported YAML syntax before parsing aliases can expand. This is a
-/// deliberately conservative subset gate, not a YAML lexer: quoted and block
-/// prose are accepted, special anchor/tag/alias tokens in plain text are refused.
+/// Refuse anchors, aliases, tags and extra documents before the parser could expand them.
+///
+/// This is a small node-context scanner, not a YAML lexer. A property indicator (`&`, `*`, `!`)
+/// is refused only where a node may begin: at a line start in block context, after a block
+/// sequence or complex-key indicator, after a mapping separator, after `[`, `{`, `,` or `:` in
+/// flow context, and after a document marker. The same characters inside a plain scalar
+/// (`valid_reference(store,&str)`), a quoted scalar, a comment or a literal/folded block scalar
+/// are ordinary text. A block scalar ends at the first non-empty line that is not indented past the
+/// column of the node that owns it, so mapping siblings after it are scanned again. Ambiguous
+/// shapes (a continuation line of a multi-line plain scalar that starts with an indicator) are
+/// refused, never accepted. The canonical writer never emits those, and `encode` verifies its own
+/// output through this same gate.
+///
+/// Errors: non-UTF-8 input, more than one document, a property indicator at a node start, or a
+/// malformed block scalar header.
 fn yaml_subset(bytes: &[u8]) -> Result<()> {
     let source = std::str::from_utf8(bytes).map_err(|_| invalid("YAML must be UTF-8."))?;
+    let refused =
+        || invalid("YAML tags, anchors and aliases are unsupported; quote literal prose.");
+    let separated = |next: Option<&(usize, char)>| next.is_none_or(|(_, c)| c.is_whitespace());
     let mut quote = None;
-    let mut block_indent = None;
+    let mut block: Option<usize> = None;
+    let mut flow = 0usize;
+    let mut start = true;
     let mut documents = 0;
     for line in source.lines() {
         let indent = line.bytes().take_while(|b| *b == b' ').count();
-        if let Some(base) = block_indent {
+        if let Some(base) = block {
             if line.trim().is_empty() || indent > base {
                 continue;
             }
-            block_indent = None;
+            block = None;
         }
-        if line.trim() == "---" {
-            documents += 1;
-            if documents > 1 {
-                return Err(invalid("One YAML document is allowed."));
-            }
-        }
-        let mut chars = line.char_indices().peekable();
-        let mut previous = ' ';
-        let mut escape = false;
-        while let Some((_, c)) = chars.next() {
-            if let Some(q) = quote {
-                if q == '"' && c == '\\' && !escape {
-                    escape = true;
-                    continue;
-                }
-                if c == q && !escape {
-                    if q == '\'' && chars.peek().is_some_and(|(_, n)| *n == '\'') {
-                        chars.next();
-                    } else {
-                        quote = None;
-                    }
-                }
-                escape = false;
-                previous = c;
+        let chars: Vec<(usize, char)> = line.char_indices().collect();
+        let mut at = 0;
+        let mut entry_start = true;
+        let mut entry = indent;
+        let mut parent = indent;
+        if quote.is_none() && flow == 0 {
+            start = true;
+            if line.starts_with("...") && line[3..].trim().is_empty() {
                 continue;
             }
-            if c == '#' && previous.is_whitespace() {
+            if line.starts_with("---") && line[3..].chars().next().is_none_or(char::is_whitespace) {
+                documents += 1;
+                if documents > 1 {
+                    return Err(invalid("One YAML document is allowed."));
+                }
+                at = 3;
+                entry_start = false;
+            }
+        }
+        while at < chars.len() {
+            let (col, c) = chars[at];
+            let next = chars.get(at + 1);
+            if let Some(q) = quote {
+                if q == '"' && c == '\\' {
+                    at += 2;
+                    continue;
+                }
+                if c == q {
+                    if q == '\'' && next.is_some_and(|(_, n)| *n == '\'') {
+                        at += 2;
+                        continue;
+                    }
+                    quote = None;
+                    start = false;
+                }
+                at += 1;
+                continue;
+            }
+            if c == ' ' || c == '\t' {
+                at += 1;
+                continue;
+            }
+            if c == '#' && (at == 0 || chars[at - 1].1.is_whitespace()) {
                 break;
             }
-            if (c == '\'' || c == '"') && (previous.is_whitespace() || "[{:,-".contains(previous)) {
-                quote = Some(c);
+            let opened = start;
+            if opened && matches!(c, '&' | '*' | '!') {
+                return Err(refused());
             }
-            if matches!(c, '&' | '*' | '!')
-                && (previous.is_whitespace() || "[{,:".contains(previous))
-            {
-                return Err(invalid(
-                    "YAML tags, anchors and aliases are unsupported; quote literal prose.",
-                ));
+            if flow > 0 {
+                match c {
+                    ',' | ':' => start = true,
+                    '[' | '{' => {
+                        flow += 1;
+                        start = true;
+                    }
+                    ']' | '}' => {
+                        flow -= 1;
+                        start = false;
+                    }
+                    '\'' | '"' if opened => {
+                        quote = Some(c);
+                        start = false;
+                    }
+                    _ => start = false,
+                }
+            } else if opened {
+                let owner = entry_start.then_some(col);
+                match c {
+                    '-' | '?' if separated(next) => {
+                        parent = col;
+                        entry_start = true;
+                    }
+                    ':' if separated(next) => parent = entry,
+                    '|' | '>' => {
+                        let header = line[col + 1..]
+                            .trim_start_matches(|h: char| {
+                                h.is_ascii_digit() || h == '+' || h == '-'
+                            })
+                            .trim_start();
+                        if !header.is_empty() && !header.starts_with('#') {
+                            return Err(invalid("Invalid block scalar header."));
+                        }
+                        block = Some(parent);
+                        break;
+                    }
+                    _ => {
+                        match c {
+                            '\'' | '"' => quote = Some(c),
+                            '[' | '{' => flow += 1,
+                            _ => (),
+                        }
+                        start = matches!(c, '[' | '{');
+                        if let Some(owner) = owner {
+                            entry = owner;
+                            entry_start = false;
+                        }
+                    }
+                }
+            } else if c == ':' && separated(next) {
+                start = true;
+                parent = entry;
             }
-            if matches!(c, '|' | '>') && previous.is_whitespace() {
-                block_indent = Some(indent);
-            }
-            previous = c;
+            at += 1;
         }
     }
     Ok(())
@@ -430,21 +508,39 @@ fn yaml_tree(value: &serde_yaml_ng::Value, depth: usize) -> Result<()> {
     Ok(())
 }
 
-/// Decode the closed YAML subset, rejecting duplicates before typed deserialization.
-pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+/// Run the exact read gate up to a generic tree: subset preflight, duplicate-key-free parse and
+/// the closed tree rules. `decode` continues from this tree and `encode` verifies its own output
+/// with it, so the writer and reader can never disagree about what is acceptable.
+fn read_tree(bytes: &[u8]) -> Result<serde_yaml_ng::Value> {
     yaml_subset(bytes)?;
     let value: serde_yaml_ng::Value =
         serde_yaml_ng::from_slice(bytes).map_err(|_| invalid("Invalid YAML or duplicate keys."))?;
     yaml_tree(&value, 0)?;
-    serde_yaml_ng::from_value(value)
+    Ok(value)
+}
+
+/// Decode the closed YAML subset, rejecting duplicates before typed deserialization.
+pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    serde_yaml_ng::from_value(read_tree(bytes)?)
         .map_err(|_| invalid("Invalid fields, types or missing required schema data."))
 }
 
-/// Encode canonical YAML; callers enforce semantic validation before publication.
+/// Encode canonical YAML and prove the bytes pass the exact read gate before returning them.
+///
+/// Errors: `encoding` when serialization fails; `encoding_unreadable` when the canonical bytes
+/// would be refused by `decode`'s preflight or parser. Nothing is published by this function, and
+/// callers must not publish bytes it refused. Callers still enforce semantic validation.
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    serde_yaml_ng::to_string(value)
+    let bytes = serde_yaml_ng::to_string(value)
         .map(String::into_bytes)
-        .map_err(|_| Error::new("encoding", "Cannot encode owned record."))
+        .map_err(|_| Error::new("encoding", "Cannot encode owned record."))?;
+    read_tree(&bytes).map_err(|_| {
+        Error::new(
+            "encoding_unreadable",
+            "Canonical record bytes would not pass the read gate; nothing was published.",
+        )
+    })?;
+    Ok(bytes)
 }
 
 impl Store {
@@ -1665,6 +1761,9 @@ impl Store {
     }
 
     /// Preserve exact noncanonical bytes before a guarded canonical replacement.
+    ///
+    /// The canonical bytes must pass the exact read gate and decode back to `T` before anything is
+    /// created, backed up or replaced; otherwise `encoding_unreadable` is returned with no effect.
     pub fn save<T: Serialize + DeserializeOwned>(
         &self,
         relative: &str,
@@ -1674,6 +1773,12 @@ impl Store {
         effects: &mut Vec<String>,
     ) -> Result<String> {
         let bytes = encode(value)?;
+        decode::<T>(&bytes).map_err(|_| {
+            Error::new(
+                "encoding_unreadable",
+                "Canonical record would not read back as its own type; nothing was published.",
+            )
+        })?;
         let cap = if terminal {
             RECORD_CAP
         } else {
