@@ -338,12 +338,14 @@ fn read_path(path: &Path, cap: usize) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-/// Refuse anchors, aliases, tags and extra documents before the parser could expand them.
+/// Refuse anchors, aliases and tags before the parser could expand them, and count explicit
+/// document starts.
 ///
 /// This is a small node-context scanner, not a YAML lexer. A property indicator (`&`, `*`, `!`)
 /// is refused only where a node may begin: at a line start in block context, after a block
 /// sequence or explicit-key indicator, after a mapping separator, after `[`, `{`, `,`, `:` or an
-/// explicit-key `?` in flow context, and after a document marker. The same characters inside a
+/// explicit-key `?` in flow context (with or without a following space, as the parser allows),
+/// and after a document marker. The same characters inside a
 /// plain scalar (`valid_reference(store,&str)`), a quoted scalar, a comment or a literal/folded
 /// block scalar are ordinary text. A block scalar ends at the first non-blank line that is not
 /// indented past the column of the node that owns it, so mapping siblings after it are scanned
@@ -362,8 +364,13 @@ fn read_path(path: &Path, cap: usize) -> Result<Option<Vec<u8>>> {
 ///
 /// `encode` verifies its own output through this same gate.
 ///
-/// Errors: non-UTF-8 input, forbidden line breaks, more than one document, a property indicator
-/// at a node start, a line that leaves a quote or flow collection open, or a malformed block
+/// Document count: only explicit `---` starts are counted here. An implicit first document
+/// followed by a later `---` passes this scanner and is refused by the parser stage of
+/// `read_tree`, before any typed value is built; a rejected later document cannot expand aliases
+/// because every later line is scanned like any other.
+///
+/// Errors: non-UTF-8 input, forbidden line breaks, more than one explicit document start, a
+/// property indicator at a node start, a line that leaves a quote or flow collection open, or a malformed block
 /// scalar header.
 fn yaml_subset(bytes: &[u8]) -> Result<()> {
     let source = std::str::from_utf8(bytes).map_err(|_| invalid("YAML must be UTF-8."))?;
@@ -441,7 +448,7 @@ fn yaml_subset(bytes: &[u8]) -> Result<()> {
             if flow > 0 {
                 match c {
                     ',' | ':' => start = true,
-                    '?' if separated(next) => start = true,
+                    '?' if opened || separated(next) => start = true,
                     '[' | '{' => {
                         flow += 1;
                         start = true;
@@ -2552,6 +2559,8 @@ mod yaml_preflight_tests {
             ("a: |\n  x\n\u{85}  &y z: 1\n", BREAKS),
             ("a: x\u{2028}  &y z: 1\n", BREAKS),
             ("a: x\u{2029}b: &y 1\n", BREAKS),
+            ("[?&x a : 1, ?*x : 2]\n", PROPERTY),
+            ("{?!t a: 1}\n", PROPERTY),
         ]);
         for raw in [
             "a: x\n  [y\nb:\n- &anc v\n- *anc\n",
@@ -2562,6 +2571,18 @@ mod yaml_preflight_tests {
                 serde_yaml_ng::from_slice::<serde_yaml_ng::Value>(raw.as_bytes()).is_ok(),
                 "{raw:?} must be accepted by the raw parser for this proof"
             );
+        }
+    }
+
+    /// Inside a flow collection the real parser takes `?` as an explicit-key marker even without
+    /// a following space, so a property right after it starts a node. The raw parser is checked
+    /// first; the scanner has to be the one that refuses what the parser accepts.
+    #[test]
+    fn flow_question_mark_key_without_space_is_a_node_start() {
+        for raw in ["[?&x a : 1, ?*x : 2]\n", "{?!t a: 1}\n"] {
+            let parsed = serde_yaml_ng::from_slice::<serde_yaml_ng::Value>(raw.as_bytes());
+            assert!(parsed.is_ok(), "{raw:?} raw parser: {parsed:?}");
+            assert_refused([(raw, PROPERTY)]);
         }
     }
 
