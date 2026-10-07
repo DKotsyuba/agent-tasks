@@ -1,4 +1,5 @@
 //! Authoritative Rust registry; discovery and schema export share the same definitions.
+mod compaction_ops;
 mod input;
 mod pages;
 mod projects;
