@@ -496,9 +496,10 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
             ));
         }
         View::Summary => {
+            let is_epic = m.id.starts_with("E-");
             value.lines.push(format!(
-                "{} phase: {}; Task counts: {} done, {} open, {} canceled.",
-                if m.id.starts_with("E-") {
+                "{} phase: {}; {}: {} done, {} open, {} canceled.",
+                if is_epic {
                     "Epic"
                 } else if m.id.starts_with("A-") {
                     "Atomic"
@@ -506,10 +507,22 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                     "Module"
                 },
                 store.phase(m),
+                if is_epic {
+                    "Direct Epic Tasks (members excluded)"
+                } else {
+                    "Task counts"
+                },
                 count(m, TaskState::Done),
                 count(m, TaskState::Open),
                 count(m, TaskState::Canceled)
             ));
+            if is_epic {
+                let roll = rollup(&store, m);
+                value.lines.push(roll.line());
+                if !roll.unreadable.is_empty() {
+                    value.coverage = "PARTIAL".into();
+                }
+            }
             value
                 .lines
                 .push(format!("Outcome: {}", store::safe(&m.outcome, 1024)));
@@ -603,7 +616,16 @@ pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Res
                     reviews.len()
                 ));
             }
-            value.lines.push("Next: view=tasks/results/checks/review/log for detail; record_work result for current evidence; review_module for a whole-module verdict.".into());
+            value.lines.push(
+                if m.id.starts_with("E-") {
+                    "Next: view=tasks/results/checks/review/log for detail; record_work verify_criterion or result for current evidence; review_work for a whole-Epic verdict. Open a member with get_context ref=<member> view=tasks."
+                } else if m.id.starts_with("A-") || child.is_some_and(|c| c.id.starts_with("A-")) {
+                    "Next: view=tasks/results/checks/review/log for detail; record_work result for current evidence; review_work for an independent Atomic verdict."
+                } else {
+                    "Next: view=tasks/results/checks/review/log for detail; record_work result for current evidence; review_module for a whole-module verdict."
+                }
+                .into(),
+            );
         }
         View::Tasks => {
             if index.is_some() {
@@ -1678,6 +1700,105 @@ fn scope_version(selection: &str, version: &str, scan: &str) -> String {
     format!("{:x}", digest.finalize())
 }
 
+/// Scan the selected record; an Epic is read together with its declared members.
+///
+/// Without a selection this is the whole-project scan. A Module, Atomic or other record is read
+/// alone, as before. For an Epic every declared Module and Atomic is scanned and merged, so the
+/// result names an unreadable or missing member and reports PARTIAL coverage instead of claiming
+/// a complete zero. The merged snapshot digests every part.
+fn scoped_scan(store: &Store, module: Option<&str>) -> Result<store::Scan> {
+    let mut scan = store.scan(module)?;
+    let Some(id) = module.filter(|id| id.starts_with("E-")) else {
+        return Ok(scan);
+    };
+    let members: Vec<String> = scan
+        .modules
+        .iter()
+        .find(|s| s.value.id == id)
+        .map(|s| {
+            s.value
+                .modules
+                .iter()
+                .chain(&s.value.atomic_members)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut digest = Sha256::new();
+    digest.update(scan.version.as_bytes());
+    for member in members {
+        let part = store.scan(Some(&member))?;
+        scan.complete &= part.complete;
+        scan.modules.extend(part.modules);
+        scan.unreadable.extend(part.unreadable);
+        scan.warnings.extend(part.warnings);
+        digest.update(part.version.as_bytes());
+    }
+    scan.version = format!("{:x}", digest.finalize());
+    Ok(scan)
+}
+
+/// Roll-up of one Epic's declared members, read one by one.
+///
+/// Counts cover only readable members and are lower bounds whenever `unreadable` is not empty;
+/// an unread member is named, never counted as zero or as unreviewed.
+struct Rollup {
+    /// Declared Module and Atomic members of the Epic.
+    declared: usize,
+    /// Members that parsed and validated.
+    readable: usize,
+    /// Done Tasks across readable members.
+    done: usize,
+    /// Open Tasks across readable members.
+    open: usize,
+    /// Canceled Tasks across readable members.
+    canceled: usize,
+    /// Canonical references of members that could not be read; the reason appears in the
+    /// scoped readable rows and warnings.
+    unreadable: Vec<String>,
+}
+
+impl Rollup {
+    /// One bounded summary line stating the member totals, the lower-bound caveat and every
+    /// unreadable member.
+    fn line(&self) -> String {
+        let mut text = format!(
+            "Members: {} readable of {} declared Modules and Atomics; member Tasks across readable members: {} done, {} open, {} canceled.",
+            self.readable, self.declared, self.done, self.open, self.canceled
+        );
+        if !self.unreadable.is_empty() {
+            text.push_str(" Counts are lower bounds. Unreadable: ");
+            text.push_str(&self.unreadable.join(", "));
+            text.push('.');
+        }
+        text
+    }
+}
+
+/// Read every declared member of an Epic and total their Tasks without hiding unread ones.
+fn rollup(store: &Store, epic: &Module) -> Rollup {
+    let mut roll = Rollup {
+        declared: epic.modules.len() + epic.atomic_members.len(),
+        readable: 0,
+        done: 0,
+        open: 0,
+        canceled: 0,
+        unreadable: Vec::new(),
+    };
+    for id in epic.modules.iter().chain(&epic.atomic_members) {
+        match store.module(id) {
+            Ok(member) => {
+                roll.readable += 1;
+                roll.done += count(&member.value, TaskState::Done);
+                roll.open += count(&member.value, TaskState::Open);
+                roll.canceled += count(&member.value, TaskState::Canceled);
+            }
+            Err(_) => roll.unreadable.push(id.clone()),
+        }
+    }
+    roll
+}
+
 /// Count task lifecycle over healthy tracked work only.
 fn count(module: &Module, state: TaskState) -> usize {
     module.tasks.iter().filter(|t| t.state == state).count()
@@ -1750,8 +1871,14 @@ fn module_brief(store: &Store, m: &Module) -> String {
                     .is_ok_and(|c| matches!(store.phase(&c.value), "done" | "accepted"))
             })
             .count();
+        let unreadable = m
+            .modules
+            .iter()
+            .chain(&m.atomic_members)
+            .filter(|id| store.module(id).is_err())
+            .count();
         return format!(
-            "{} {} — {} — Modules {accepted}/{} {}; Atomics {done}/{} done; {} — last reported: {}",
+            "{} {} — {} — Modules {accepted}/{} {}; Atomics {done}/{} done{}; {} — last reported: {}",
             m.id,
             store::safe(&m.title, 120),
             store.phase(m),
@@ -1762,6 +1889,11 @@ fn module_brief(store: &Store, m: &Module) -> String {
                 "accepted"
             },
             m.atomic_members.len(),
+            if unreadable == 0 {
+                String::new()
+            } else {
+                format!("; {unreadable} member(s) unreadable, not counted as reviewed or zero")
+            },
             lead_line(m),
             m.updated_at
         );
@@ -2017,7 +2149,7 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
             "Project has no manifest; inspect get_context before explicit initialization.",
         )
     })?;
-    let scan = store.scan(args.module.as_deref())?;
+    let scan = scoped_scan(&store, args.module.as_deref())?;
     let mut value = page(
         format!(
             "Project status — {}",
@@ -2029,7 +2161,13 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
     value.lines.push(
         args.module
             .as_ref()
-            .map(|id| format!("Scope: module {id}; project-wide totals are excluded."))
+            .map(|id| {
+                if id.starts_with("E-") {
+                    format!("Scope: Epic {id} and its declared members; project-wide totals are excluded. Each member shows a few Tasks; open a member with get_context ref=<member> view=tasks.")
+                } else {
+                    format!("Scope: module {id}; project-wide totals are excluded.")
+                }
+            })
             .unwrap_or("Scope: all tracked project work within the disclosed read bounds.".into()),
     );
     let modules = scan
@@ -2174,7 +2312,11 @@ pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Resul
                 r.findings.len()
             ));
         }
-        let task_limit = if args.module.is_some() { MAX_TASKS } else { 4 };
+        let task_limit = if args.module.as_ref().is_some_and(|id| !id.starts_with("E-")) {
+            MAX_TASKS
+        } else {
+            4
+        };
         for t in m.children().take(task_limit) {
             value.rows.push(format!(
                 "{} — {}",

@@ -3,7 +3,7 @@ use super::input::{self, Common, Completion, Plan, ReviewArgs, ReviewWorkArgs, T
 use crate::{
     model::*,
     response::Templates,
-    store::{self, Config, Error, Result, Snapshot, Store},
+    store::{self, Config, Error, LockGuard, Result, Snapshot, Store},
 };
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde::Serialize;
@@ -139,19 +139,26 @@ pub fn call(
                 let (common, operation) =
                     input::mutation::<Plan>(args, false).map_err(arguments)?;
                 validate_common(&common)?;
-                let ack = plan(config, &common, operation, &mut effects)?;
+                let prepare = matches!(operation, Plan::InitProject { .. });
+                let ack =
+                    mutation_scope(config, &common.project, prepare, &mut effects, |s, g, e| {
+                        plan(s, g, &common, operation, e)
+                    })?;
                 Ok(render_ack(templates, &ack, &effects))
             }
             "record_work" => {
                 let (common, operation) = input::mutation::<Work>(args, true).map_err(arguments)?;
                 validate_common(&common)?;
-                let ack = record(config, &common, operation, &mut effects)?;
+                let ack =
+                    mutation_scope(config, &common.project, false, &mut effects, |s, g, e| {
+                        record(s, g, &common, operation, e)
+                    })?;
                 Ok(render_ack(templates, &ack, &effects))
             }
             "review_module" => {
                 let args: ReviewArgs = decode_args(args)?;
                 number(&args.module, "M-").map_err(arguments)?;
-                let ack = review(config, args, &mut effects)?;
+                let ack = review_call(config, args, &mut effects)?;
                 Ok(render_ack(templates, &ack, &effects))
             }
             "review_work" => {
@@ -168,7 +175,7 @@ pub fn call(
                     changed_scope: a.changed_scope,
                     resolved_findings: a.resolved_findings,
                 };
-                let ack = review(config, args, &mut effects)?;
+                let ack = review_call(config, args, &mut effects)?;
                 Ok(render_ack(templates, &ack, &effects))
             }
             _ => Err(arguments("Unknown business tool.")),
@@ -201,6 +208,50 @@ pub fn call(
     let mut reply = CallToolResult::success(vec![ContentBlock::text(text)]);
     reply.is_error = Some(error);
     Some(reply)
+}
+
+/// The one place a mutating call resolves its project and takes the single root write lock.
+///
+/// The alias is resolved, `prepare_first` creates the state directory before locking (only
+/// `init_project` needs it), the write lock is taken exactly once, and `body` runs while the
+/// guard is held. The guard drops when the scope returns, so nothing inside `body` may lock
+/// again. Business code, errors and replies of the hoisted handlers are unchanged.
+///
+/// # Errors
+/// Alias, preparation and lock failures (`busy` when another writer owns the lock) and every
+/// error `body` returns, unchanged.
+fn mutation_scope<T>(
+    config: &Config,
+    project: &str,
+    prepare_first: bool,
+    effects: &mut Vec<String>,
+    body: impl FnOnce(&Store, &LockGuard, &mut Vec<String>) -> Result<T>,
+) -> Result<T> {
+    let store = config.resolve(project)?;
+    if prepare_first {
+        store.prepare(effects)?;
+    }
+    let guard = store
+        .lock(true, effects)?
+        .ok_or_else(|| Error::new("io", "Cannot take the writer lock."))?;
+    body(&store, &guard, effects)
+}
+
+/// Validate and run one whole-record review inside the shared mutation scope.
+///
+/// Request validation happens before the alias is resolved or any lock is taken, exactly as the
+/// review always did.
+fn review_call(config: &Config, args: ReviewArgs, effects: &mut Vec<String>) -> Result<Ack> {
+    validate_common(&Common {
+        project: args.project.clone(),
+        version: args.version.clone(),
+        actor: args.actor.clone(),
+        reference: None,
+    })?;
+    let project = args.project.clone();
+    mutation_scope(config, &project, false, effects, |s, g, e| {
+        review(s, g, args, e)
+    })
 }
 
 /// Closed serde argument decoding; parser source values never enter diagnostics.
@@ -500,25 +551,20 @@ pub(super) fn initialize(
 
 /// Execute the closed plan operation under one root lock; creations reserve numbers before publication.
 fn plan(
-    config: &Config,
+    store: &Store,
+    _guard: &LockGuard,
     common: &Common,
     operation: Plan,
     effects: &mut Vec<String>,
 ) -> Result<Ack> {
-    let store = config.resolve(&common.project)?;
-    let init = matches!(operation, Plan::InitProject { .. });
-    if init {
-        store.prepare(effects)?;
-    }
-    let _lock = store.lock(true, effects)?;
     match operation {
         Plan::FreezeEpic { epic } => {
-            let before = current(&store, &epic, &common.version)?;
+            let before = current(store, &epic, &common.version)?;
             let mut value = before.value.clone();
             open_module(&value)?;
-            freeze_epic(&store, &mut value)?;
+            freeze_epic(store, &mut value)?;
             save_module(
-                &store,
+                store,
                 &before,
                 value,
                 &epic,
@@ -532,10 +578,10 @@ fn plan(
             purpose,
             remote,
         } => {
-            expect_allocation(&store, &common.version)?;
+            expect_allocation(store, &common.version)?;
             let at = store::now();
             initialize(
-                &store,
+                store,
                 Project {
                     schema_version: SCHEMA,
                     title,
@@ -610,7 +656,7 @@ fn plan(
                 .enumerate()
                 .map(|(i, t)| make_task(t, i as u64 + 1, &at))
                 .collect();
-            create_record(&store, common, value, effects)
+            create_record(store, common, value, effects)
         }
         Plan::CreateEpic {
             title,
@@ -628,7 +674,7 @@ fn plan(
                 &store::now(),
             );
             value.criteria = criteria;
-            create_record(&store, common, value, effects)
+            create_record(store, common, value, effects)
         }
         Plan::CreateAtomic {
             title,
@@ -655,7 +701,7 @@ fn plan(
             w.scenarios = scenarios;
             value.validate().map_err(arguments)?;
             store.participant_basis(&value.participants)?;
-            create_record(&store, common, value, effects)
+            create_record(store, common, value, effects)
         }
         Plan::EditEpic {
             epic,
@@ -669,7 +715,7 @@ fn plan(
             criterion_scopes,
         } => {
             number(&epic, "E-").map_err(arguments)?;
-            let before = current(&store, &epic, &common.version)?;
+            let before = current(store, &epic, &common.version)?;
             let mut value = before.value.clone();
             open_module(&value)?;
             title.required(&mut value.title).map_err(arguments)?;
@@ -707,7 +753,7 @@ fn plan(
                 }
             }
             save_module(
-                &store,
+                store,
                 &before,
                 value,
                 &epic,
@@ -724,7 +770,7 @@ fn plan(
             required_checks,
         } => {
             number(&module, "M-").map_err(arguments)?;
-            let before = current(&store, &module, &common.version)?;
+            let before = current(store, &module, &common.version)?;
             let mut value = before.value.clone();
             open_module(&value)?;
             if value.atomics.len() >= MAX_TASKS {
@@ -752,7 +798,7 @@ fn plan(
             );
             value.atomics.push(atomic);
             save_module(
-                &store,
+                store,
                 &before,
                 value,
                 &target,
@@ -772,7 +818,7 @@ fn plan(
             environment,
             scenarios,
         } => {
-            let before = current(&store, module_id(&reference)?, &common.version)?;
+            let before = current(store, module_id(&reference)?, &common.version)?;
             let mut value = before.value.clone();
             open_module(&value)?;
             let index = value.target(&reference).map_err(arguments)?;
@@ -839,7 +885,7 @@ fn plan(
                 }
             }
             save_module(
-                &store,
+                store,
                 &before,
                 value,
                 &reference,
@@ -860,7 +906,7 @@ fn plan(
             dependencies,
         } => {
             number(&module, "M-").map_err(arguments)?;
-            let before = current(&store, &module, &common.version)?;
+            let before = current(store, &module, &common.version)?;
             let mut value = before.value.clone();
             open_module(&value)?;
             title.required(&mut value.title).map_err(arguments)?;
@@ -891,10 +937,10 @@ fn plan(
                     .required(&mut w.dependencies)
                     .map_err(arguments)?;
             }
-            contract_edit(&store, &before.value, &mut value)?;
+            contract_edit(store, &before.value, &mut value)?;
             store.links(&value)?;
             save_module(
-                &store,
+                store,
                 &before,
                 value,
                 &module,
@@ -909,7 +955,7 @@ fn plan(
             criterion,
             required_checks,
         } => {
-            let before = current(&store, &module, &common.version)?;
+            let before = current(store, &module, &common.version)?;
             let mut value = before.value.clone();
             open_module(&value)?;
             core_actor(&value, AgentRole::Lead, &common.actor)?;
@@ -938,7 +984,7 @@ fn plan(
             );
             value.tasks.push(task);
             save_module(
-                &store,
+                store,
                 &before,
                 value,
                 &target,
@@ -953,7 +999,7 @@ fn plan(
             criterion,
             required_checks,
         } => {
-            let before = current(&store, module_id(&reference)?, &common.version)?;
+            let before = current(store, module_id(&reference)?, &common.version)?;
             let mut value = before.value.clone();
             open_module(&value)?;
             core_actor(&value, AgentRole::Lead, &common.actor)?;
@@ -983,7 +1029,7 @@ fn plan(
                 task.updated_at = store::now();
             }
             save_module(
-                &store,
+                store,
                 &before,
                 value,
                 &reference,
@@ -1160,18 +1206,17 @@ fn open_module(value: &Module) -> Result<()> {
 
 /// Apply reported current substance/lifecycle under the whole-module version.
 fn record(
-    config: &Config,
+    store: &Store,
+    _guard: &LockGuard,
     common: &Common,
     operation: Work,
     effects: &mut Vec<String>,
 ) -> Result<Ack> {
-    let store = config.resolve(&common.project)?;
-    let _lock = store.lock(true, effects)?;
     let reference = common
         .reference
         .as_deref()
         .ok_or_else(|| arguments("Missing target."))?;
-    let before = current(&store, module_id(reference)?, &common.version)?;
+    let before = current(store, module_id(reference)?, &common.version)?;
     let mut value = before.value.clone();
     let index = value.target(reference).map_err(arguments)?;
     let reopening = matches!(operation, Work::Reopen { .. });
@@ -1413,7 +1458,7 @@ fn record(
             module_only(index)?;
             number(&value.id, "M-").map_err(arguments)?;
             core_actor(&value, AgentRole::Lead, &common.actor)?;
-            running(&store, &value, index)?;
+            running(store, &value, index)?;
             input::field("candidate", text(&candidate, 256))?;
             input::field("conditions", text(&conditions, 1024))?;
             input::field("mutation", text(&mutation, 1024))?;
@@ -1616,7 +1661,7 @@ fn record(
             "begun"
         }
         Work::Complete {} => {
-            running(&store, &value, index)?;
+            running(store, &value, index)?;
             complete_local(&mut value, index, &common.actor)?;
             "local outcome completed"
         }
@@ -1628,7 +1673,7 @@ fn record(
             module_only(index)?;
             number(&value.id, "M-").map_err(arguments)?;
             if value.core().is_none() {
-                running(&store, &value, index)?;
+                running(store, &value, index)?;
             } else if !value.workflow.as_ref().is_some_and(|w| w.active) {
                 return Err(arguments(
                     "Deliver only the current begun/reviewed candidate.",
@@ -1685,7 +1730,7 @@ fn record(
                 },
                 &common.actor,
             )?;
-            running(&store, &value, index)?;
+            running(store, &value, index)?;
             if value.core().is_some()
                 && value.id.starts_with("A-")
                 && !value.participants.is_empty()
@@ -1730,7 +1775,7 @@ fn record(
             candidate,
             changed_scope,
         } => {
-            running(&store, &value, index)?;
+            running(store, &value, index)?;
             if value.core().is_some()
                 && value.id.starts_with("A-")
                 && !value.participants.is_empty()
@@ -1951,7 +1996,7 @@ fn record(
         value.child_mut(i).updated_at = at;
     }
     save_module(
-        &store,
+        store,
         &before,
         value,
         reference,
@@ -2653,17 +2698,14 @@ fn core_review_guard(m: &Module, args: &mut ReviewArgs, target: Option<usize>) -
 }
 
 /// Independently review the whole module, applying new check reports before basis/epoch capture.
-fn review(config: &Config, mut args: ReviewArgs, effects: &mut Vec<String>) -> Result<Ack> {
-    validate_common(&Common {
-        project: args.project.clone(),
-        version: args.version.clone(),
-        actor: args.actor.clone(),
-        reference: None,
-    })?;
-    let store = config.resolve(&args.project)?;
-    let _lock = store.lock(true, effects)?;
+fn review(
+    store: &Store,
+    _guard: &LockGuard,
+    mut args: ReviewArgs,
+    effects: &mut Vec<String>,
+) -> Result<Ack> {
     let id = module_id(&args.module)?.to_owned();
-    let before = current(&store, &id, &args.version)?;
+    let before = current(store, &id, &args.version)?;
     let mut value = before.value.clone();
     open_module(&value)?;
     if value.core().is_some() && !value.id.starts_with("E-") {
@@ -2676,7 +2718,7 @@ fn review(config: &Config, mut args: ReviewArgs, effects: &mut Vec<String>) -> R
         if !value.child(i).id.starts_with("A-") {
             return Err(arguments("Tasks have no individual review."));
         }
-        return review_atomic(&store, &before, args, i, effects);
+        return review_atomic(store, &before, args, i, effects);
     }
     if value.id.starts_with("A-") && !value.modern() {
         return Err(arguments(

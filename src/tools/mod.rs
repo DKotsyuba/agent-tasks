@@ -1,5 +1,6 @@
 //! Authoritative Rust registry; discovery and schema export share the same definitions.
 mod input;
+mod pages;
 mod projects;
 mod read;
 mod work;
@@ -59,6 +60,7 @@ pub fn templates() -> Vec<(&'static str, &'static str)> {
         // xtask:templates
     ];
     result.extend(work::templates());
+    result.extend(pages::templates());
     result
 }
 
@@ -69,6 +71,10 @@ mod core_tests;
 /// Focused regressions for the shared producer host seam.
 #[cfg(test)]
 mod host_tests;
+
+/// Regressions for scoped context guidance and Epic member roll-up.
+#[cfg(test)]
+mod context_tests;
 
 /// Report only actual unimplemented skeletons; release qualification stays independent.
 pub fn incomplete() -> Vec<&'static str> {
