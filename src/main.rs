@@ -2,6 +2,7 @@
 /// Bounded read-only local Git report import; declared commits never imply Task completion.
 mod git_reports;
 mod model;
+mod persist;
 mod response;
 mod store;
 mod tools;

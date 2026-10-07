@@ -1,11 +1,21 @@
 //! Portable bounded file access, optimistic versions and cooperating-writer publication.
+mod publish;
+#[allow(
+    unused_imports,
+    reason = "Early primitives handoff: consumers in other Modules land later and this allowance is removed with them"
+)]
+pub use publish::{
+    ABSOLUTE_CAP, Attest, DirEntry, DirListing, Durability, EffectKind, EntryKind, LIST_CAP,
+    Observed, OperationId, Publication, Publish, Remove, Tracking, UntrackedReason, not_applicable,
+};
+
 use crate::model::{self, Module, Project};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::Read,
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::SystemTime,
@@ -193,6 +203,34 @@ impl Config {
 pub struct LockGuard {
     /// Acquired open-file description; callers cannot unlock another owner's handle.
     file: File,
+    /// Request state of the Store that acquired the root write lock, so primitives can prove the
+    /// cooperative lock is held; `None` for coordination locks other than the root write lock.
+    state: Option<std::sync::Arc<RequestState>>,
+}
+
+impl LockGuard {
+    /// Whether this guard is the root write lock acquired through `store` in this request.
+    #[allow(
+        dead_code,
+        reason = "Early primitives handoff: settlement uses it when it lands and this allowance is removed with it"
+    )]
+    pub fn is_for(&self, store: &Store) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|s| std::sync::Arc::ptr_eq(s, &store.state))
+    }
+}
+
+/// Request-local state shared by clones of one [`Store`]: the typed event ledger, the root write lock
+/// token and the journal intent of this request.
+#[derive(Default)]
+pub(crate) struct RequestState {
+    /// Typed publication events in order, kept even when a later step failed.
+    pub(crate) events: std::sync::Mutex<Vec<Publication>>,
+    /// True while the root write lock acquired through this Store is held.
+    pub(crate) locked: std::sync::atomic::AtomicBool,
+    /// Journal intent shared by every tracked publication of this request.
+    pub(crate) intent: std::sync::Mutex<Option<String>>,
 }
 
 /// A cloned/inherited descriptor must not prolong the parent's completed lock lifetime.
@@ -219,6 +257,9 @@ fn lock_release_survives_a_duplicate_descriptor() {
 impl Drop for LockGuard {
     /// Release this owned lock before closing the descriptor; close remains the error fallback.
     fn drop(&mut self) {
+        if let Some(state) = &self.state {
+            state.locked.store(false, Ordering::SeqCst);
+        }
         let _ = self.file.unlock();
     }
 }
@@ -228,6 +269,8 @@ impl Drop for LockGuard {
 pub struct Store {
     /// Canonical existing root or canonical parent plus one absent final directory name.
     pub root: PathBuf,
+    /// Request-local ledger and lock token shared by clones of this Store.
+    pub(crate) state: std::sync::Arc<RequestState>,
 }
 
 /// Exact observed record and its whole-file version; no stale field-level patches.
@@ -585,6 +628,7 @@ impl Store {
         }
         Ok(Self {
             root: prospective(root)?,
+            state: Default::default(),
         })
     }
 
@@ -1498,8 +1542,16 @@ impl Store {
         Ok(combined)
     }
 
-    /// Enumerate one bounded kind directory; absence is empty and unknown entries remain warnings.
-    fn kind_inventory(&self, directory: &str, prefix: &str) -> Result<Inventory> {
+    /// The bounded one-directory ID inventory, public so knowledge, document and compaction code reuse it.
+    ///
+    /// Lists `directory` without recursion. An entry is an ID when it is a regular file named
+    /// `<prefix><canonical digits>.yaml`; an ID-named link or non-regular entry sets `complete=false`.
+    /// Entries beyond [`MODULE_CAP`] set `complete=false`. Any other name, every subdirectory
+    /// included, sets `complete=false` with a warning; nothing is deleted or silently ignored. Own
+    /// publication leftovers are warnings only: for `modules`, `epics` and `atomics` the rule is the
+    /// original one (canonical `M-` stems only), and for every other directory a leftover is own when
+    /// [`own_temp_name`] holds and its stem is `<prefix><digits>.yaml` for the requested prefix.
+    pub fn kind_inventory(&self, directory: &str, prefix: &str) -> Result<Inventory> {
         let path = self.path(directory)?;
         if !path.exists() {
             return Ok(Inventory {
@@ -1527,7 +1579,7 @@ impl Store {
             }
             let entry = entry.map_err(|_| Error::new("io", "Cannot inspect module entry."))?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if own_temp(&name) {
+            if own_inventory_temp(directory, prefix, &name) {
                 inventory.warnings.push(format!(
                     "Orphan publication temp ignored: {}",
                     safe(&name, 160)
@@ -1788,7 +1840,11 @@ impl Store {
                 "Another cooperating call owns the store lock; retry later.",
             )
         })?;
-        Ok(Some(LockGuard { file }))
+        let state = (write && relative == ".agent-tasks/write.lock").then(|| {
+            self.state.locked.store(true, Ordering::SeqCst);
+            self.state.clone()
+        });
+        Ok(Some(LockGuard { file, state }))
     }
 
     /// Preserve exact noncanonical bytes before a guarded canonical replacement.
@@ -1829,6 +1885,7 @@ impl Store {
                     fs::create_dir(&dir).map_err(|_| {
                         Error::new("backup", "Cannot create normalization backup directory.")
                     })?;
+                    self.record_directory(".agent-tasks/backups");
                     effects.push("Created .agent-tasks/backups/.".into());
                 }
                 if !dir.is_dir() {
@@ -1871,60 +1928,18 @@ impl Store {
         observed: Option<&[u8]>,
         effects: &mut Vec<String>,
     ) -> Result<()> {
-        let path = self.path(relative)?;
-        let parent = path
-            .parent()
-            .ok_or_else(|| Error::new("path", "Record has no parent."))?;
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| Error::new("path", "Invalid record name."))?;
-        let temp = parent.join(format!(
-            ".{name}.tmp-{}-{}",
-            std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temp)
-            .map_err(|_| Error::new("io", "Cannot exclusively create publication temp."))?;
-        let publication = (|| {
-            file.write_all(bytes)
-                .and_then(|_| file.sync_all())
-                .map_err(|_| {
-                    Error::new("io", "Cannot write/sync candidate; work not published.")
-                })?;
-            if self.bytes(relative)?.as_deref() != observed {
-                return Err(Error::new(
-                    "stale",
-                    "Observed bytes changed; work not published. Read context before retrying.",
-                ));
-            }
-            self.path(relative)?;
-            if observed.is_some() {
-                fs::rename(&temp, &path)
-                    .map_err(|_| Error::new("io", "Atomic replacement failed."))?;
-            } else {
-                fs::hard_link(&temp, &path).map_err(|_| {
-                    Error::new(
-                        "publication",
-                        "No-clobber publication failed; no overwrite fallback.",
-                    )
-                })?;
-            }
-            effects.push(format!("Published {relative}."));
-            sync_parent(parent).map_err(|_| Error::new("durability_unknown",format!("{relative} is visibly published; directory sync failed. Inspect current context; do not blindly replay.")))?;
-            Ok(())
-        })();
-        drop(file);
-        let _ = fs::remove_file(&temp);
-        publication
+        self.publish_inner(
+            Publish {
+                relative,
+                bytes,
+                observed,
+                cap: RECORD_CAP,
+                operation: None,
+                attest: Attest::Optional,
+            },
+            effects,
+        )
+        .map(|_| ())
     }
 }
 
@@ -1949,6 +1964,37 @@ fn sync_parent(path: &Path) -> std::io::Result<()> {
         ));
     }
     File::open(path)?.sync_all()
+}
+
+/// Whether `name` is this store's own publication leftover: `.<name>.tmp-<pid>-<seq>` or
+/// `.<name>.rm-<pid>-<seq>` for a nonempty file name without separators; foreign dotfiles stay foreign.
+pub fn own_temp_name(name: &str) -> bool {
+    temp_stem(name).is_some()
+}
+
+/// The file name a leftover was made for, when `name` is one of our temp or detach siblings.
+fn temp_stem(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix('.')?;
+    [".tmp-", ".rm-"].iter().find_map(|marker| {
+        let (stem, suffix) = rest.rsplit_once(marker)?;
+        let (pid, seq) = suffix.split_once('-')?;
+        (!stem.is_empty()
+            && !stem.contains(['/', '\0'])
+            && pid.parse::<u32>().is_ok()
+            && seq.parse::<u64>().is_ok())
+        .then_some(stem)
+    })
+}
+
+/// Leftover recognition for one inventory: the original `M-` rule for the work directories and the
+/// prefix-specific stem rule for every other directory.
+fn own_inventory_temp(directory: &str, prefix: &str, name: &str) -> bool {
+    if matches!(directory, "modules" | "epics" | "atomics") {
+        return own_temp(name);
+    }
+    temp_stem(name)
+        .and_then(|stem| stem.strip_suffix(".yaml"))
+        .is_some_and(|id| model::number(id, prefix).is_ok())
 }
 
 /// Recognize only our target-specific publication temps; foreign dotfiles remain foreign.
