@@ -103,6 +103,16 @@ Final acceptance (your independent `review_work` on the Epic) needs required Mod
 
 Required checks must pass; not_applicable is not a waiver. Gaps are unfinished scope; followups are outside scope. Canceled work is excluded but its history stays; cancellation never cascades. Reopen with reasons, parent before child. Preserve unknown/partial coverage.
 
+## Knowledge, documents, automatic Git and compaction
+
+When the live catalog lists them, the same MCP also carries typed knowledge and managed Markdown. Typed Decisions, Runbooks, Research and procedural Checklists use `knowledge_work`; creation takes the single knowledge allocation version printed by project context, every other operation the record version. A Runbook use is evidence about the revision actually used and never verifies a newer one. Work TODO stays the canonical Tasks; a checklist never copies them. Managed Markdown uses `document_work`; `get_context view=content` returns exact pages whose framing line states the wire form, byte range and encoded length, and a continuation is valid only against its snapshot.
+
+The MCP commits each successful actual change of work, knowledge, documents and compaction records to the documentation repository, and never for reads, true no-ops, refused or partial calls. A reply reports one truthful Git outcome (committed, deferred or unknown). Saved bytes survive any Git failure. Pending facts appear in project context. A partial call is held and is never certified by a later success; `git_recovery` (reconcile, retry, adopt, release, preserve) is the explicit exception and needs the exact pending version. Nothing pushes, merges or rewrites history.
+
+Compaction is a reviewed, bounded proposal over `README.md` and `docs/**/*.md`, never typed bodies. `compaction_work` proposes and revises under one actor, an independent bound reviewer accepts, and apply refuses while incoming coverage is incomplete, an original is not committed, or an earlier replacement is held (retry that intent explicitly, then repeat the same apply). Originals stay recoverable from Git.
+
+Treat these as available only when the live catalog and its schemas list them; state no operational claim from this text alone.
+
 ## One code report
 
 A coding lead writes `Result:` and optional `Checks:`, `Gaps:`, `Followups:` once in local commit messages; check lines are `status | label | optional detail` with passed/failed/not_run/not_applicable. Import explicit commits through `record_work op=import_commits` using the owning Version. Imported checks are lead assertions; import does not run tests or close a Task. Noncode outcomes, reviews and integration use ordinary semantic reports. Never fabricate a commit or URL.
@@ -118,4 +128,4 @@ get_context supplies the assignment, parent background, criteria, contracts, dep
 | Owning record Version | Plan/report/begin/bind/import/review; embedded children share the whole Module |
 | Snapshot version | Read continuation only |
 
-Chain new Versions from confirmed receipts. Plan omission preserves; result replaces the complete current report. On stale refusal reconcile fresh context. On lost/partial/unknown outcomes inspect context/results/log/review before another mutation; equal text is not replay identity. Ordinary work does not commit, push, install or repair state.
+Chain new Versions from confirmed receipts. Plan omission preserves; result replaces the complete current report. On stale refusal reconcile fresh context. On lost/partial/unknown outcomes inspect context/results/log/review before another mutation; equal text is not replay identity. Ordinary work never pushes, installs or repairs state; documentation-repository commits come only from the MCP's own settlement of a successful change.

@@ -86,6 +86,10 @@ If a contract revision affects you, readiness is invalid even with unchanged cod
 
 A positive review makes the Module ready for integration; merge/delivery is separate bookkeeping and not a prerequisite. The MCP never merges. You own Module internals: defects the integrator finds come back to you through the orchestrator, while the integrator owns wiring, assembly and checks only.
 
+## Documentation and knowledge tools
+
+When the live catalog lists `document_work` or `knowledge_work`, use them, not tracker YAML or file edits, for durable prose and reusable knowledge your task produces. The MCP commits each successful change to the documentation repository itself and reports one truthful Git outcome; that is separate from the Result commit report you write in your own source repository and import with `record_work op=import_commits`. Reads write nothing. A deferred or unknown commit keeps the saved bytes: inspect pending facts in `get_context`, never replay the business call, and use `git_recovery` only for explicit recovery with the exact pending version.
+
 ## Versions and unknown outcomes
 
 All Task/Module/embedded Atomic writes use the owning Module Version. Serialize tracker writes within the Module; helpers handle bounded source work. Chain the confirmed receipt Version; refresh after other actors. Snapshot version is read pagination only.

@@ -69,11 +69,7 @@ Canceled targets permit reopen only; canceled parents block child writes. Parent
 
 ## Publication, limits and outcomes
 
-Closed work-record schema version 1, extended by explicitly defaulted fields for old 0.8.0 records, and allocator schema revision 2 support one YAML document with ordinary string-key maps/sequences/scalars.
-
-The YAML preflight accepts LF/CRLF and one leading UTF-8 byte order mark. Native quoted scalars and flow collections stay on one line; multiline prose uses literal or folded blocks. Alternate raw line separators and stray byte order marks refuse before parsing. Ordinary property-like characters inside scalar prose remain text. Canonical encode must pass the same read gate, and the owning typed value must decode before preservation or publication; an unencodable value refuses with no publication.
-
-Reject tags/anchors/aliases/merges/complex keys, duplicates, unknown fields/revisions and invalid owned data. Conservative preflight prevents alias expansion; quote literal special tokens. serde_yaml_ng 0.10.0 supports YAML 1.1; no YAML 1.2/comment-preserving claim is made.
+Closed work-record schema version 1, extended by explicitly defaulted fields for old 0.8.0 records, and allocator schema revision 2 support one YAML document with ordinary string-key maps/sequences/scalars. Reject tags/anchors/aliases/merges/complex keys, duplicates, unknown fields/revisions and invalid owned data. Conservative preflight prevents alias expansion; quote literal special tokens. serde_yaml_ng 0.10.0 supports YAML 1.1; no YAML 1.2/comment-preserving claim is made.
 
 Read cap+one before parsing. Canonical writes serialize typed data. Before normalizing external formatting/comments, preserve exact observed original bytes in a no-clobber version-bound backup. Failed preservation leaves work untouched.
 
@@ -111,14 +107,6 @@ The real SDK/stdio test plans work, completes a Task, independently accepts a Mo
 Full gate: cargo xtask check. Supply-chain gate: cargo deny check after explicit fetch. Native acceptance additionally uses the independent MCP Inspector CLI, including fresh-process work persistence. This is not power-loss certification or qualification of other platforms/filesystems/hosts.
 
 Standard installation manages immutable releases under declared product home/bin only. Portable roots are external user-selected data. Binary rollback does not undo their data/schema/effects. Migration/repair or service restart is never implicit.
-
-## E-001 qualification suite
-
-The real-process qualification of the knowledge, document, Git and compaction work lives under `tests/` and is owned by the qualification Module. Its matrix and the pinned provider artifacts are in [contracts/knowledge-qualification.md](contracts/knowledge-qualification.md). Every scenario starts the shipped binary through the Rust SDK stdio client with `env_clear`, a disposable HOME, configuration, registry and independent documentation repository below `/private/tmp`. `tests/support/mod.rs` holds the shared helpers: the scrubbed client, exact tree snapshots (kind, length, sha256, nanosecond time) that prove reads write nothing, real Git inspection, repository hooks, the document framing parser and the `md-text-v1` decoder, deterministic byte vectors, a synthetic work lifecycle and a commit-measuring step wrapper.
-
-No product switch selects a policy or injects a fault. Faults come only from ordinary levers the test controls: failing, slow or process-killing hooks (a hook runs during settlement, after the handler returned, so a kill models a crash during the commit only), repository configuration such as an unusable signing key, natively written files (index lock, merge marker, native edits, staged foreign files, a user ignore rule), read-only parent directories that fail a later step after an earlier one published, and detached HEAD. A crash inside a handler stays with the provider's own in-crate fault points, which a binary-only crate cannot expose to `tests/`.
-
-Files: `catalog_surface.rs` (fourteen-tool catalog, closed schemas, field-named errors, read-writeless, Epic child counts), `knowledge_lifecycle.rs`, `markdown_documents.rs`, `auto_git.rs`, `compaction_flows.rs`, `search_quality.rs` (a declared query corpus measured for hits, rank, reply bytes and detected misses; no semantic retrieval) and the frozen legacy fixture `tests/fixtures/legacy-docs/` (the 11 documents of the base commit). A test that needs a producer tool the binary does not carry is `#[ignore]`d with its exact reason; `cargo test -- --include-ignored` runs the whole suite on the combined candidate. Ignored tests are written against the pinned artifacts and have not run until that candidate exists, so they are not evidence.
 
 ## Epic membership and Atomic integration
 

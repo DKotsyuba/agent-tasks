@@ -4,23 +4,6 @@
 
 Native target: aarch64-apple-darwin on macOS arm64. Independent host: MCP Inspector CLI 2.7.0, running with Node 24.4.0. Qualification is limited to that named target/client; it does not certify Linux/Windows, Codex/Claude, arbitrary filesystems or power-loss durability.
 
-## Epic E-001 qualification suite: baseline observations, 2026-10-07
-
-Source-only observations of the qualification suite against the 0.9.2 baseline binary (native debug build, macOS arm64, Rust SDK stdio client with a scrubbed environment and disposable HOME, configuration, registry and documentation repository). No packaged payload, installed product or Inspector run is involved, so no host or payload claim follows. The pinned provider artifacts and the full matrix are in [contracts/knowledge-qualification.md](contracts/knowledge-qualification.md).
-
-Observed on the baseline:
-
-- The synthetic work lifecycle (create, bind, plan, add Task, begin, import, complete, boundary evidence, bind reviewer, review) ran through the real tools as eleven saved successes. Its binding receipts and boundary observations are synthetic fixture data used only to measure commit behavior.
-- Reads of work records (`get_context`, `project_status`, `search`, `get_project_list`) changed no byte, lock, directory, modification time or index entry, created no knowledge home, and a cold restart read the same project.
-- Lexical search over three work Modules: six declared queries (exact title, body field, spread over fields, case) hit at rank 1 with replies of 619 to 661 bytes; a paraphrase, a misspelling and a nonsense query were detected as misses. No semantic service exists or is proposed. Semantic retrieval is considered only after a demonstrated lexical need: a vocabulary-gap miss on a source that is present. The typed and document sources are absent on this baseline, so their unrun queries are capability gaps, not evidence that the lexical algorithm needs embeddings; the full corpus has not run.
-- AT-003 reproduced on the baseline: an over-long `criteria` list returns `invalid_data: "At most eight values are allowed."` with no field named, and a wrong field name returns the generic shape message. The two regression tests are ignored until the field-named errors land.
-- AT-004 reproduced on the baseline: `project_status module=E-001` prints `Modules: 0 current-reviewed / 0 readable` beside an Epic row declaring two Modules. The regression test is ignored until the Epic roll-up lands.
-- The shared helpers (length-delimited frame parser with look-alike payloads and every wrong-frame case, the `md-text-v1` decoder, deterministic vectors, the tree snapshot) are checked by five self-tests that need no product tool.
-
-Gate: `cargo xtask check` (fmt, all-features clippy, all tests, rustdoc, contract drift) passed with exit 0 on the source and tests of this checkpoint: 63 unit tests, 11 core scenarios plus 1 ignored receipt test, 5 helper self-tests and the qualification crates (their baseline-runnable tests passed; every producer-dependent test is ignored with its reason). This is a source-only baseline result.
-
-Not run: every scenario that needs `knowledge_work`, `document_work`, `compaction_work`, `git_recovery` or production Git settlement is `#[ignore]`d with its exact reason (typed knowledge 10, documents 13, Git 13, compaction 6, catalog and field errors 3, full search corpus 1). They are written against the pinned artifacts and are not evidence until the combined candidate runs them with `cargo test -- --include-ignored`, together with the implementation-mutation controls of each consumed boundary.
-
 ## Patch 0.9.1 — source checks on 2026-10-06
 
 Version 0.9.1 changes only the connected multi-step SDK scenario's whole-test budget from 180 to 600 seconds. All real candidate assemblies, meaningful mutation controls, negative business-coverage checks and stale assertions remain; application behavior and request/read limits are unchanged. The release check had exhausted the previous cumulative debug/host budget rather than failed a business assertion. The targeted scenario passed against the native debug binary in 110.48 seconds and the exact optimized 0.9.0 CI payload in 18.80 seconds.
