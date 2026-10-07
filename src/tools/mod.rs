@@ -7,6 +7,7 @@ mod knowledge_ops;
 mod pages;
 mod projects;
 mod read;
+mod recovery_ops;
 mod work;
 use crate::{response::Templates, store::Config};
 use mcp_presentation::Renderer;

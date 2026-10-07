@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// Confirmed mutation receipt, captured before presentation. It never replays an effect.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Ack {
     /// Target or project reference.
     pub target: String,
@@ -23,12 +23,113 @@ pub struct Ack {
     pub phase_label: &'static str,
     /// Whether the call changed any business record.
     pub changed: bool,
-    /// Producer notes (applied actions, blocked kind, warnings). Callers must supply at most
-    /// eight plain lines of 200 bytes each; this early seam does not bound them at dispatch.
+    /// Producer notes (applied actions, blocked kind, warnings). Producers supply at most eight
+    /// plain lines of 200 bytes each; the presenter sanitizes control characters, cuts longer
+    /// lines and adds an explicit omitted count for any excess, never silently.
     pub notes: Vec<String>,
-    /// Affected canonical references. Callers must supply at most sixteen of 256 bytes each;
-    /// this early seam does not bound them at dispatch. Advisory labels, never publication proof.
+    /// Affected canonical references. Producers supply at most sixteen of 256 bytes each; the
+    /// presenter drops any reference over the bound rather than truncating an identity.
+    /// Advisory labels, never publication proof.
     pub refs: Vec<String>,
+}
+
+/// Most producer note lines shown in one reply; excess is counted, not hidden.
+const MAX_NOTES: usize = 8;
+/// Most bytes of one producer note line.
+const MAX_NOTE_BYTES: usize = 200;
+/// Most affected references one acknowledgement carries.
+const MAX_REFS: usize = 16;
+/// Most bytes of one affected reference.
+const MAX_REF_BYTES: usize = 256;
+
+/// Closed kind of tool whose acknowledgement is presented; selects the layout and the route.
+///
+/// The presenter chooses from this kind and never from a target string or a template name that a
+/// producer or a user supplied.
+#[allow(
+    dead_code,
+    reason = "Producer dispatch constructs the remaining kinds when the producer modules land"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ToolKind {
+    /// `plan_work`, `record_work`, `review_work` and `review_module`.
+    Work,
+    /// `knowledge_work`.
+    Knowledge,
+    /// `document_work`.
+    Document,
+    /// `compaction_work`.
+    Compaction,
+    /// `git_recovery`, the one tool whose target is a display label, not a canonical reference.
+    GitRecovery,
+}
+
+/// Whether `target` is a canonical reference that `get_context` can open: a work, knowledge,
+/// document or compaction ID with an optional child (`M-001/T-001`, `CL-001/I-001`) or a
+/// managed Markdown path (`README.md` or `docs/...md`, ASCII, no `..`).
+pub(super) fn is_canonical_ref(target: &str) -> bool {
+    let numbered = |part: &str, prefixes: &[&str]| {
+        prefixes.iter().any(|prefix| {
+            part.strip_prefix(prefix).is_some_and(|digits| {
+                digits.len() >= 3 && digits.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+    };
+    let mut parts = target.split('/');
+    let head = parts.next().unwrap_or_default();
+    if numbered(
+        head,
+        &["E-", "M-", "A-", "D-", "RB-", "RS-", "CL-", "DOC-", "CP-"],
+    ) {
+        return parts.all(|child| numbered(child, &["T-", "A-", "I-"])) && target.len() <= 64;
+    }
+    target.len() <= MAX_REF_BYTES
+        && target.is_ascii()
+        && (target == "README.md" || target.starts_with("docs/"))
+        && target.ends_with(".md")
+        && !target.contains("..")
+        && !target.chars().any(|c| c.is_control() || c == '\\')
+}
+
+/// One plain line of producer text: control characters become spaces, ends are trimmed and the
+/// text is cut at a character boundary within `cap` bytes.
+fn plain_line(text: &str, cap: usize) -> String {
+    let line: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let line = line.trim();
+    let mut end = line.len().min(cap);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line[..end].trim_end().to_owned()
+}
+
+impl Ack {
+    /// Bound producer text before presentation.
+    ///
+    /// Notes keep their first eight lines, sanitized and cut to 200 bytes; excess becomes one
+    /// explicit `N notes omitted; <route>` line. References over 256 bytes or containing control
+    /// characters are dropped and only the first sixteen are kept. `route` is the reply's own
+    /// read route, so the omitted line never invents one.
+    fn bounded(mut self, route: &str) -> Ack {
+        let omitted = self.notes.len().saturating_sub(MAX_NOTES);
+        self.notes = self
+            .notes
+            .iter()
+            .take(MAX_NOTES)
+            .map(|note| plain_line(note, MAX_NOTE_BYTES))
+            .filter(|note| !note.is_empty())
+            .collect();
+        if omitted > 0 {
+            self.notes.push(format!("{omitted} notes omitted; {route}"));
+        }
+        self.refs
+            .retain(|r| r.len() <= MAX_REF_BYTES && !r.chars().any(char::is_control));
+        self.refs.truncate(MAX_REFS);
+        self
+    }
 }
 /// Typed compact semantic projection; raw storage structs never enter templates.
 #[derive(Clone, Serialize)]
@@ -75,6 +176,10 @@ struct Saved<'a> {
     ack: &'a Ack,
     /// Exact observed side effects.
     effects: &'a [String],
+    /// Plain Git receipt lines of the current call, rendered after the producer notes.
+    git: &'a [String],
+    /// The single read route this reply recommends, built from the tool kind and target.
+    next: String,
 }
 
 /// Closed text layouts preserve execution effects, scope labels and exact continuation tokens.
@@ -90,7 +195,11 @@ pub fn templates() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "core_ack",
-            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }}\n{% if ack.target == \"Project\" %}Project state:{% else %}{{ ack.phase_label }}:{% endif %} {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}{% for note in ack.notes %}{{ note }}\n{% endfor %}Next: {% if ack.target == \"Project\" %}get_context with project only; omit ref.{% else %}get_context with ref={{ ack.target }}.{% endif %} Use project_status for the complete tracked overview. Do not replay a lost reply blindly.\n",
+            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }}\n{% if ack.target == \"Project\" %}Project state:{% else %}{{ ack.phase_label }}:{% endif %} {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}{% for note in ack.notes %}{{ note }}\n{% endfor %}{% for line in git %}{{ line }}\n{% endfor %}Next: {{ next }} Use project_status for the complete tracked overview. Do not replay a lost reply blindly.\n",
+        ),
+        (
+            "recovery_ack",
+            "{% if ack.changed %}SAVED{% else %}UNCHANGED{% endif %} {{ ack.target }}\n{{ ack.phase_label }}: {{ ack.phase }}\nVersion: {{ ack.version }}\n{% for effect in effects %}{{ effect }}\n{% endfor %}{% for note in ack.notes %}{{ note }}\n{% endfor %}{% for line in git %}{{ line }}\n{% endfor %}Next: {{ next }} Do not replay a lost reply blindly.\n",
         ),
         (
             "core_error",
@@ -144,7 +253,7 @@ pub fn call(
                     mutation_scope(config, &common.project, prepare, &mut effects, |s, g, e| {
                         plan(s, g, &common, operation, e)
                     })?;
-                Ok(render_ack(templates, &ack, &effects))
+                Ok(render_ack(templates, ToolKind::Work, &ack, &effects, &[]))
             }
             "record_work" => {
                 let (common, operation) = input::mutation::<Work>(args, true).map_err(arguments)?;
@@ -153,13 +262,13 @@ pub fn call(
                     mutation_scope(config, &common.project, false, &mut effects, |s, g, e| {
                         record(s, g, &common, operation, e)
                     })?;
-                Ok(render_ack(templates, &ack, &effects))
+                Ok(render_ack(templates, ToolKind::Work, &ack, &effects, &[]))
             }
             "review_module" => {
                 let args: ReviewArgs = decode_args(args)?;
                 number(&args.module, "M-").map_err(arguments)?;
                 let ack = review_call(config, args, &mut effects)?;
-                Ok(render_ack(templates, &ack, &effects))
+                Ok(render_ack(templates, ToolKind::Work, &ack, &effects, &[]))
             }
             "review_work" => {
                 let a: ReviewWorkArgs = decode_args(args)?;
@@ -176,7 +285,7 @@ pub fn call(
                     resolved_findings: a.resolved_findings,
                 };
                 let ack = review_call(config, args, &mut effects)?;
-                Ok(render_ack(templates, &ack, &effects))
+                Ok(render_ack(templates, ToolKind::Work, &ack, &effects, &[]))
             }
             _ => Err(arguments("Unknown business tool.")),
         }
@@ -275,8 +384,30 @@ fn validate_common(common: &Common) -> Result<()> {
 }
 
 /// Render once after capturing the immutable receipt; a presentation failure still names the saved target/version.
-pub(super) fn render_ack(templates: &Templates, ack: &Ack, effects: &[String]) -> String {
-    templates.render("core_ack",&Saved {ack,effects}).unwrap_or_else(|_| format!(
+pub(super) fn render_ack(
+    templates: &Templates,
+    kind: ToolKind,
+    ack: &Ack,
+    effects: &[String],
+    git: &[String],
+) -> String {
+    let next = if kind == ToolKind::GitRecovery {
+        "get_context with project only; omit ref, to read the pending version and facts.".to_owned()
+    } else if ack.target == "Project" {
+        "get_context with project only; omit ref.".to_owned()
+    } else if is_canonical_ref(&ack.target) {
+        format!("get_context with ref={}.", ack.target)
+    } else {
+        "the target is not a canonical reference; use get_context with project only and omit ref."
+            .to_owned()
+    };
+    let layout = if kind == ToolKind::GitRecovery {
+        "recovery_ack"
+    } else {
+        "core_ack"
+    };
+    let ack = ack.clone().bounded(&next);
+    templates.render(layout,&Saved {ack:&ack,effects,git,next}).unwrap_or_else(|_| format!(
         "{} {}. Version: {}. Presentation degraded.\nEffects:\n{}\nInspect get_context; do not replay.\n",
         if ack.changed {"SAVED"}else{"UNCHANGED"},ack.target,ack.version,effects.join("\n")))
 }
@@ -300,6 +431,8 @@ fn target_label(target: &str) -> &'static str {
         "Checklist state"
     } else if target.starts_with("CP-") {
         "Compaction state"
+    } else if target == "Git recovery" {
+        "Git recovery state"
     } else if target.starts_with("DOC-") || target == "README.md" || target.starts_with("docs/") {
         "Document state"
     } else if target.starts_with("D-") {
@@ -734,6 +867,7 @@ fn plan(
                     .required(&mut value.core_mut().map_err(arguments)?.criterion_scopes)
                     .map_err(arguments)?;
             }
+            check_lists(&value)?;
             value.validate().map_err(arguments)?;
             store.membership(&value)?;
             let adds_edges = value
@@ -925,6 +1059,7 @@ fn plan(
                 .required(&mut value.required_checks)
                 .map_err(arguments)?;
             criteria.required(&mut value.criteria).map_err(arguments)?;
+            check_lists(&value)?;
             if !matches!(execution, input::Patch::Absent)
                 || !matches!(contracts, input::Patch::Absent)
                 || !matches!(dependencies, input::Patch::Absent)

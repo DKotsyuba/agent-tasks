@@ -993,3 +993,68 @@ fn recovery_adopt_turns_an_unknown_intent_into_a_commit() {
             .contains("Agent-Tasks-Adopted")
     );
 }
+
+/// A full journal drops only committed intents whose commit is reachable and keeps the rest.
+#[test]
+fn a_full_journal_prunes_only_verified_committed_intents() {
+    let f = GitFixture::new();
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", b"first");
+    assert_eq!(commit_now(&store, &guard).outcome, GitOutcome::Committed);
+    drop(guard);
+    let (mut j, observed) = journal::load(&store).unwrap();
+    let template = j.intents[0].clone();
+    let real = template.committed.clone().unwrap();
+    for n in 0..63 {
+        let mut copy = template.clone();
+        copy.id = format!("PG-{n:024x}");
+        copy.entries.clear();
+        if n == 0 {
+            copy.committed = Some("1".repeat(40));
+        }
+        j.intents.push(copy);
+    }
+    journal::save(&store, &j, observed.as_deref()).unwrap();
+    assert_eq!(journal::load(&store).unwrap().0.intents.len(), 64);
+    let (next, _guard) = call(&f);
+    create(&next, "later.md", b"second");
+    assert!(matches!(next.publications()[0].tracking, Tracking::Tracked));
+    let (after, _) = journal::load(&next).unwrap();
+    assert!(
+        after
+            .intents
+            .iter()
+            .all(|i| i.committed.as_deref() != Some(real.as_str()))
+    );
+    assert!(
+        after
+            .intents
+            .iter()
+            .any(|i| i.committed.as_deref() == Some("1".repeat(40).as_str())),
+        "an unreachable commit is never trusted for pruning"
+    );
+    assert!(after.intents.iter().any(|i| i.committed.is_none()));
+}
+
+/// Explicit Reconcile resolves a committing intent whose reply was lost.
+#[test]
+fn recovery_reconcile_resolves_a_lost_commit_reply() {
+    use super::recover::{Action, recover};
+    let f = GitFixture::new();
+    let parent = f.git(&["rev-parse", "HEAD"]);
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", b"mine");
+    assert_eq!(commit_now(&store, &guard).outcome, GitOutcome::Committed);
+    let landed = f.git(&["rev-parse", "HEAD"]);
+    let (mut j, observed) = journal::load(&store).unwrap();
+    let id = j.intents[0].id.clone();
+    j.intents[0].committed = None;
+    j.intents[0].committing_from = Some(parent);
+    journal::save(&store, &j, observed.as_deref()).unwrap();
+    let version = super::pending_version(&store);
+    let report = recover(&store, &guard, &version, Action::Reconcile(vec![id])).unwrap();
+    assert!(report.changed);
+    let (j, _) = journal::load(&store).unwrap();
+    assert_eq!(j.intents[0].committed.as_deref(), Some(landed.as_str()));
+    assert_eq!(commits(&f), 2, "reconcile never commits again");
+}
