@@ -69,7 +69,11 @@ Canceled targets permit reopen only; canceled parents block child writes. Parent
 
 ## Publication, limits and outcomes
 
-Closed work-record schema version 1, extended by explicitly defaulted fields for old 0.8.0 records, and allocator schema revision 2 support one YAML document with ordinary string-key maps/sequences/scalars. Reject tags/anchors/aliases/merges/complex keys, duplicates, unknown fields/revisions and invalid owned data. Conservative preflight prevents alias expansion; quote literal special tokens. serde_yaml_ng 0.10.0 supports YAML 1.1; no YAML 1.2/comment-preserving claim is made.
+Closed work-record schema version 1, extended by explicitly defaulted fields for old 0.8.0 records, and allocator schema revision 2 support one YAML document with ordinary string-key maps/sequences/scalars.
+
+The YAML preflight accepts LF/CRLF and one leading UTF-8 byte order mark. Native quoted scalars and flow collections stay on one line; multiline prose uses literal or folded blocks. Alternate raw line separators and stray byte order marks refuse before parsing. Ordinary property-like characters inside scalar prose remain text. Canonical encode must pass the same read gate, and the owning typed value must decode before preservation or publication; an unencodable value refuses with no publication.
+
+Reject tags/anchors/aliases/merges/complex keys, duplicates, unknown fields/revisions and invalid owned data. Conservative preflight prevents alias expansion; quote literal special tokens. serde_yaml_ng 0.10.0 supports YAML 1.1; no YAML 1.2/comment-preserving claim is made.
 
 Read cap+one before parsing. Canonical writes serialize typed data. Before normalizing external formatting/comments, preserve exact observed original bytes in a no-clobber version-bound backup. Failed preservation leaves work untouched.
 

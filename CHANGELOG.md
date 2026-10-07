@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.9.2
+
+### Fixed
+
+- Keep canonical YAML records containing ordinary punctuation readable, and validate encoded bytes with the same guarded decoder before publication.
+- Close preflight bypasses involving plain continuation text, explicit flow keys, alternate raw line breaks and stray byte order marks. Native quoted scalars and flow collections must be single-line; canonical records remain compatible without read-side migration.
+- Add direct preflight refusal, canonical round-trip and cold-router restart regressions with meaningful mutation controls.
+
 ## 0.9.1
 
 ### Fixed
