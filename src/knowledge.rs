@@ -1746,13 +1746,16 @@ pub struct Allocation {
     pub version: String,
 }
 
-/// Observe one home through the shared bounded one-directory inventory of the store.
+/// Observe one home through the shared bounded inventories.
 ///
-/// The five flat homes use [`Store::kind_inventory`] directly. The compactions home currently uses
-/// the same flat listing, so nested `CP-NNN/` staging directories report the home incomplete; the
-/// compaction module's own inventory replaces that single call once its source handoff lands.
+/// The five flat homes use [`Store::kind_inventory`]. The compactions home uses the compaction
+/// module's own inventory, which recognizes its nested staging names, reads names only and never
+/// calls back into allocation.
 fn home_state(store: &Store, prefix: Prefix) -> Result<HomeState> {
-    let inventory = store.kind_inventory(prefix.directory(), prefix.as_str())?;
+    let inventory = match prefix {
+        Prefix::Compaction => crate::compaction::inventory(store)?,
+        _ => store.kind_inventory(prefix.directory(), prefix.as_str())?,
+    };
     let max = inventory
         .ids
         .iter()
@@ -2805,6 +2808,26 @@ mod tests {
     }
 
     #[test]
+    fn reserve_requires_the_lock_acquired_through_the_same_store() {
+        let fx = fixture();
+        let other = fixture();
+        let foreign_guard = lock(&other.store);
+        let token = allocation_version(&fx.store).unwrap();
+        let mut effects = Vec::new();
+        let err = reserve(
+            &fx.store,
+            &foreign_guard,
+            Prefix::Decision,
+            &token,
+            &mut effects,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "not_locked");
+        assert!(effects.is_empty());
+        assert!(fx.store.bytes(ALLOCATOR_PATH).unwrap().is_none());
+    }
+
+    #[test]
     fn allocator_never_guesses_or_recycles() {
         let fx = fixture();
         let guard = lock(&fx.store);
@@ -2906,23 +2929,104 @@ mod tests {
     }
 
     #[test]
-    fn nested_compaction_staging_keeps_allocation_closed_until_its_inventory_is_consumed() {
+    fn second_allocation_succeeds_after_a_real_staged_compaction() {
+        let fx = fixture();
+        let guard = lock(&fx.store);
+        let mut effects = Vec::new();
+        let token = allocation_version(&fx.store).unwrap();
+        assert_eq!(
+            reserve(&fx.store, &guard, Prefix::Compaction, &token, &mut effects).unwrap(),
+            "CP-001"
+        );
+        fs::create_dir_all(fx.store.path("compactions/CP-001/r1").unwrap()).unwrap();
+        fs::write(fx.store.path("compactions/CP-001.yaml").unwrap(), "x: 1\n").unwrap();
+        fs::write(
+            fx.store.path("compactions/CP-001/r1/A-01.md").unwrap(),
+            "staged\n",
+        )
+        .unwrap();
+        let token = allocation_version(&fx.store).unwrap();
+        assert_eq!(
+            reserve(&fx.store, &guard, Prefix::Compaction, &token, &mut effects).unwrap(),
+            "CP-002",
+            "a staged compaction directory must not close allocation"
+        );
+        let token = allocation_version(&fx.store).unwrap();
+        assert_eq!(
+            reserve(&fx.store, &guard, Prefix::Decision, &token, &mut effects).unwrap(),
+            "D-001"
+        );
+        let counters = observe_allocation(&fx.store).unwrap().counters.unwrap();
+        assert_eq!(
+            (counters.compaction, counters.decision, counters.document),
+            (3, 2, 1)
+        );
+        fs::create_dir_all(fx.store.path("compactions/CP-009/r1").unwrap()).unwrap();
+        let orphan = observe_allocation(&fx.store).unwrap();
+        let home = orphan
+            .homes
+            .iter()
+            .find(|h| h.prefix == Prefix::Compaction)
+            .unwrap();
+        assert_eq!(
+            home.max, 9,
+            "an orphan staged directory counts its identifier"
+        );
+        let token = orphan.version;
+        let err = reserve(&fx.store, &guard, Prefix::Compaction, &token, &mut effects).unwrap_err();
+        assert_eq!(
+            err.code, "allocator",
+            "a counter at or below an existing staged id is refused, never guessed"
+        );
+    }
+
+    #[test]
+    fn compaction_staging_is_recognized_and_foreign_names_close_allocation() {
         let fx = fixture();
         let guard = lock(&fx.store);
         let mut effects = Vec::new();
         fs::create_dir_all(fx.store.path("compactions/CP-001/r1").unwrap()).unwrap();
         fs::write(fx.store.path("compactions/CP-001.yaml").unwrap(), "x: 1\n").unwrap();
-        let observed = observe_allocation(&fx.store).unwrap();
+        fs::write(
+            fx.store.path("compactions/CP-001/r1/A-01.md").unwrap(),
+            "staged\n",
+        )
+        .unwrap();
+        let known = observe_allocation(&fx.store).unwrap();
         assert!(
-            !observed.complete,
+            known.complete,
+            "closed nested staging names are recognized: {:?}",
+            known.warnings
+        );
+        let compactions = known
+            .homes
+            .iter()
+            .find(|h| h.prefix == Prefix::Compaction)
+            .unwrap();
+        assert_eq!(
+            (compactions.ids.as_slice(), compactions.max),
+            (["CP-001".to_owned()].as_slice(), 1)
+        );
+        fs::write(
+            fx.store.path("compactions/CP-001/r1/notes.txt").unwrap(),
+            "x",
+        )
+        .unwrap();
+        let foreign = observe_allocation(&fx.store).unwrap();
+        assert!(
+            !foreign.complete,
             "unrecognized nested names are never ignored"
         );
-        assert!(observed.warnings.iter().any(|w| w.contains("CP-001")));
+        assert!(
+            foreign.warnings.iter().any(|w| w.contains("notes.txt")),
+            "{:?}",
+            foreign.warnings
+        );
         let err = reserve(
             &fx.store,
             &guard,
             Prefix::Decision,
-            &observed.version,
+            &foreign.version,
             &mut effects,
         )
         .unwrap_err();

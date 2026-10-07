@@ -321,18 +321,22 @@ fn record_id(reference: &str, expected: Kind) -> Result<String> {
     Ok(reference.to_owned())
 }
 
-/// Validate an optional detail reference through the document module.
+/// Validate an optional detail reference through the document module's reference validator.
 ///
-/// ponytail: the document reference validator is not part of this branch yet, so a supplied detail
-/// is refused rather than stored unvalidated. Replace the refusal by a call to its
-/// `valid_reference(store, raw)` when that module lands.
-fn check_detail(_store: &Store, detail: &Option<String>) -> Result<()> {
-    if detail.is_some() {
-        return Err(bad(
-            "detail: the document reference validator is not available; omit detail.",
-        ));
+/// A supplied detail must be a root-relative managed document path with an optional fragment whose
+/// document and section exist; the provider's refusal is reported under the `detail` field and any
+/// other failure is passed through unchanged. Absent details need no validation.
+fn check_detail(store: &Store, detail: &Option<String>) -> Result<()> {
+    let Some(raw) = detail else {
+        return Ok(());
+    };
+    match crate::references::valid_reference(&crate::documents::StorePort::new(store), raw) {
+        Err(e) if e.code == "invalid_arguments" => Err(bad(format!(
+            "detail: {}",
+            e.message.trim_start_matches("reference: ")
+        ))),
+        other => other,
     }
-    Ok(())
 }
 
 /// Require the caller's expected version to equal the record's current file version.
@@ -1047,6 +1051,56 @@ mod tests {
                 assert!(!effects.iter().any(|f| f.contains("decisions/D-001.yaml")));
             }
         }
+    }
+
+    #[test]
+    fn detail_is_stored_only_after_the_real_document_reference_validator() {
+        let fx = fixture();
+        fs::create_dir_all(fx.store.path("docs").unwrap()).unwrap();
+        fs::write(
+            fx.store.path("docs/why.md").unwrap(),
+            "# Context\n\nBecause.\n",
+        )
+        .unwrap();
+        let token = knowledge::allocation_version(&fx.store).unwrap();
+        for (raw, label) in [
+            ("docs/missing.md", "missing document"),
+            ("docs/why.md#nowhere", "missing fragment"),
+            ("D-001", "typed id"),
+            ("/docs/why.md", "absolute path"),
+            ("docs/../docs/why.md", "dot segments"),
+        ] {
+            let mut op = decision("Pick");
+            op["detail"] = json!(raw);
+            let (result, effects) = run(&fx, &token, op);
+            let err = result
+                .err()
+                .unwrap_or_else(|| panic!("{label} must be refused"));
+            assert_eq!(err.code, "invalid_arguments", "{label}");
+            assert!(
+                err.message.starts_with("detail:"),
+                "{label}: {}",
+                err.message
+            );
+            assert!(effects.is_empty(), "{label} published something");
+        }
+        let mut ok = decision("Pick");
+        ok["detail"] = json!("docs/why.md#context");
+        let created = run(&fx, &token, ok).0.unwrap();
+        let Any::Decision(record) = knowledge::load(&fx.store, &created.target).unwrap().value
+        else {
+            panic!()
+        };
+        assert_eq!(
+            record.content.detail.as_deref(),
+            Some("docs/why.md#context")
+        );
+        let (edit, _) = run(
+            &fx,
+            &created.version,
+            json!({"op":"edit_decision","ref":"D-001","detail":"docs/missing.md"}),
+        );
+        assert_eq!(edit.err().unwrap().code, "invalid_arguments");
     }
 
     #[test]
