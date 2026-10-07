@@ -15,7 +15,11 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{cell::RefCell, collections::BTreeMap, ops::Range};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+};
 
 /// Largest managed body, in bytes, that a save accepts and a read treats as supported.
 pub const BODY_CAP: usize = 512 * 1024;
@@ -617,7 +621,20 @@ pub fn quote(name: &str) -> String {
 /// Load and validate every record under `documents/`, enumerated with the store's bounded ID
 /// inventory (its own publication leftovers are warnings, any other entry makes it incomplete).
 pub fn load_records(port: &dyn Port) -> Result<Records> {
-    let inv = port.inventory("documents", "DOC-")?;
+    let inv = match port.inventory("documents", "DOC-") {
+        Ok(inv) => inv,
+        // A home that is a file or a link is a named gap: claims are unknown, never a hard error.
+        Err(e) if e.code == "file_type" => {
+            return Ok(Records {
+                gaps: vec![Gap {
+                    what: "documents/".into(),
+                    reason: GapReason::NotADirectory,
+                }],
+                ..Default::default()
+            });
+        }
+        Err(e) => return Err(e),
+    };
     let mut out = Records {
         complete: inv.complete,
         ..Default::default()
@@ -1062,6 +1079,7 @@ pub fn walk(port: &dyn Port) -> Result<Walk> {
         bytes_read: 0,
     };
     let mut pending: Vec<String> = vec!["README.md".into()];
+    let mut collisions: BTreeSet<String> = BTreeSet::new();
     let mut dirs = vec![("docs".to_string(), 0usize)];
     while let Some((dir, depth)) = dirs.pop() {
         let listing = port.list(&dir, FILE_CAP * 2)?;
@@ -1107,15 +1125,12 @@ pub fn walk(port: &dyn Port) -> Result<Walk> {
                     }
                 }
                 EntryKind::File if markdown_like(&e.name) => {
+                    // A colliding member stays a listed row (Unsupported Collision), never silently
+                    // dropped; it is not read or edited through this walk.
                     if collides {
-                        w.complete = false;
-                        w.gaps.push(Gap {
-                            what: quote(&rel),
-                            reason: GapReason::Collision,
-                        });
-                    } else {
-                        pending.push(rel);
+                        collisions.insert(rel.clone());
                     }
+                    pending.push(rel);
                 }
                 EntryKind::Other if markdown_like(&e.name) => {
                     w.complete = false;
@@ -1154,7 +1169,11 @@ pub fn walk(port: &dyn Port) -> Result<Walk> {
             });
             continue;
         }
-        let body = read_body(port, &path)?;
+        let body = if collisions.contains(&rel) {
+            Body::Unsupported(Unsupported::Collision)
+        } else {
+            read_body(port, &path)?
+        };
         match &body {
             Body::Absent => continue,
             Body::Bytes(b) => {
@@ -1167,6 +1186,7 @@ pub fn walk(port: &dyn Port) -> Result<Walk> {
                     Unsupported::NotUtf8 => GapReason::NotUtf8,
                     Unsupported::TooLarge => GapReason::TooLarge,
                     Unsupported::Symlink => GapReason::Link,
+                    Unsupported::Collision => GapReason::Collision,
                     _ => GapReason::NotRegular,
                 };
                 w.gaps.push(Gap {
@@ -1586,9 +1606,64 @@ fn observe_after(port: &dyn Port, id: Option<&str>, path: &DocPath) -> Result<Ob
     }
 }
 
+/// Reserve the next DOC identifier. A refusal before the reservation is published passes through;
+/// a failure after it (for example `allocation_changed`) is a partial publication whose number stays
+/// a visible gap.
+fn reserve(scope: &Scope<'_>, n0: usize) -> Result<String> {
+    scope.port.reserve_id().map_err(|e| {
+        fail(
+            scope,
+            n0,
+            "reserve identifier",
+            false,
+            "repeat the same call with a fresh version; the reserved number stays a visible gap",
+            e,
+        )
+    })
+}
+
+/// Body bytes a record may describe: UTF-8, no NUL and within the cap. Shared by save and adopt so
+/// no operation records or publishes bytes the other refuses.
+fn check_body(bytes: &[u8]) -> Result<()> {
+    std::str::from_utf8(bytes).map_err(|_| Error::new("encoding", "body: must be valid UTF-8."))?;
+    if bytes.contains(&0) {
+        return Err(Error::new(
+            "invalid_arguments",
+            "body: must not contain NUL.",
+        ));
+    }
+    if bytes.len() > BODY_CAP {
+        return Err(Error::new(
+            "capacity",
+            "The body exceeds 524288 bytes; nothing was saved.",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse an observation a mutation never edits: an unsupported, conflicting or retired state, or
+/// any state while the record inventory is incomplete so that claims on the path are unknown. The
+/// one shared decision for save, adopt, remove and both sides of a relocation.
+fn refuse(obs: &Observation) -> Result<()> {
+    refuse_state(obs.state)?;
+    if !obs.records_complete {
+        return Err(partial_coverage());
+    }
+    Ok(())
+}
+
+/// The refusal for an undecidable claim set; nothing was saved.
+fn partial_coverage() -> Error {
+    Error::new(
+        "partial_coverage",
+        "A document record could not be read, so claims on this path are unknown; nothing was saved. Repair or remove the unreadable record under documents/ first.",
+    )
+}
+
 /// Refuse states a mutation never edits.
 fn refuse_state(state: State) -> Result<()> {
     match state {
+        State::Unsupported(Unsupported::PartialCoverage) => Err(partial_coverage()),
         State::Unsupported(Unsupported::Collision) => Err(Error::new(
             "collision",
             "A name that differs only by letter case already exists; nothing was saved.",
@@ -1619,7 +1694,7 @@ pub fn save(scope: &mut Scope<'_>, req: Save<'_>) -> Result<Receipt> {
     if obs.version != req.expected {
         return Err(stale(&obs.version));
     }
-    refuse_state(obs.state)?;
+    refuse(&obs)?;
     let creating = matches!(obs.state, State::Absent);
     let new_bytes: Vec<u8> = match &req.edit {
         Edit::Body(b) => b.to_vec(),
@@ -1642,20 +1717,7 @@ pub fn save(scope: &mut Scope<'_>, req: Save<'_>) -> Result<Receipt> {
             markdown::replace_body(bytes, outline, &target, body)?
         }
     };
-    std::str::from_utf8(&new_bytes)
-        .map_err(|_| Error::new("encoding", "body: must be valid UTF-8."))?;
-    if new_bytes.contains(&0) {
-        return Err(Error::new(
-            "invalid_arguments",
-            "body: must not contain NUL.",
-        ));
-    }
-    if new_bytes.len() > BODY_CAP {
-        return Err(Error::new(
-            "capacity",
-            "The body exceeds 524288 bytes; nothing was saved.",
-        ));
-    }
+    check_body(&new_bytes)?;
     if let Some(p) = req.purpose {
         purpose_ok(p)?;
     }
@@ -1721,10 +1783,8 @@ pub fn save(scope: &mut Scope<'_>, req: Save<'_>) -> Result<Receipt> {
     let required = scope.required();
     let mut id = existing.map(|r| r.record.id.clone());
     if id.is_none() {
-        id = Some(port.reserve_id()?);
-        if port.events().len() > n0 {
-            // The reservation is published; a later failure is partial.
-        }
+        // The reservation is published before the record; a later failure is partial.
+        id = Some(reserve(scope, n0)?);
     }
     let id = id.unwrap_or_default();
     let record_rel = record_rel(&id);
@@ -1829,7 +1889,7 @@ pub fn adopt(
     if obs.version != expected {
         return Err(stale(&obs.version));
     }
-    refuse_state(obs.state)?;
+    refuse(&obs)?;
     if !matches!(obs.state, State::Unmanaged | State::Drifted) {
         return Err(Error::new(
             "conflict",
@@ -1840,6 +1900,7 @@ pub fn adopt(
         purpose_ok(p)?;
     }
     let body = obs.body.clone().unwrap_or_default();
+    check_body(&body)?;
     let existing = obs.record.as_ref();
     let purpose = match (purpose, existing) {
         (Some(p), _) => p.to_owned(),
@@ -1853,7 +1914,7 @@ pub fn adopt(
     };
     let id = match existing {
         Some(r) => r.record.id.clone(),
-        None => port.reserve_id()?,
+        None => reserve(scope, n0)?,
     };
     let rel = record_rel(&id);
     let bytes = record_bytes(
@@ -1924,7 +1985,7 @@ pub fn remove(
     if obs.version != expected {
         return Err(stale(&obs.version));
     }
-    refuse_state(obs.state)?;
+    refuse(&obs)?;
     if obs.state == State::Absent {
         return Err(Error::new(
             "not_found",
@@ -2054,7 +2115,8 @@ pub fn relocate(
         && dst.version == absent_version(port, to);
     let hint = "see the relocation windows in the contract";
     if normal {
-        refuse_state(src.state)?;
+        refuse(&src)?;
+        refuse(&dst)?;
         let _ = src.move_basis()?;
         if src.path == *to {
             return Err(Error::new(
@@ -2146,6 +2208,10 @@ pub fn relocate(
     if !to_obs_ok {
         return Err(stale(&dst.version));
     }
+    if !removed_from && !src.records_complete {
+        // W1 and W2 write again; unknown claims are refused exactly like a normal start.
+        return Err(partial_coverage());
+    }
     match (record_row, removed_from) {
         (None, false) => {
             // W1: the source must still be exactly what was planned and the destination unclaimed.
@@ -2206,7 +2272,7 @@ pub fn relocate(
                     "the completed move does not match the current files",
                 ));
             }
-            let mut r = move_receipt(port, n0, &src, &dst, to, false)?;
+            let mut r = move_receipt(port, n0, &src, &dst, to, true)?;
             r.warnings.push(Warning::AlreadyApplied);
             Ok(r)
         }

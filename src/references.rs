@@ -15,6 +15,8 @@ use std::ops::Range;
 
 /// Name of the reference dialect reported in coverage.
 pub const REFS_DIALECT: &str = "md-refs-v1";
+/// Files one reference scan reads (documents plus structured records); more is a named gap.
+pub const REF_FILE_CAP: usize = 4096;
 /// Parser limits always reported with coverage.
 pub const LIMITS: &[&str] = &[
     "multi-line code spans",
@@ -736,6 +738,16 @@ pub fn load_home(store: &Store, home: &str) -> Result<RecordSet> {
                     reason: GapReason::Unreadable,
                 });
             }
+            for warning in scan
+                .warnings
+                .iter()
+                .filter(|w| !w.starts_with("Orphan publication temp"))
+            {
+                set.gaps.push(Gap {
+                    what: documents::quote(warning),
+                    reason: GapReason::UnrecognizedEntry,
+                });
+            }
         }
         "project" => match store.project() {
             Ok(Some(p)) => set.files.push(RecordFile {
@@ -952,6 +964,23 @@ fn graph(port: &dyn Port, overlay: &Overlay<'_>) -> Result<Graph> {
         }
         out.files.insert(path.clone(), Some(outline));
     }
+    // A heading-fragment link into a document with setext candidates that no ATX heading answers is
+    // unprovable (the fragment may name a setext heading): counted unparsed, never treated as proof.
+    let unprovable = out
+        .refs
+        .iter()
+        .filter(|(_, link)| match &link.target {
+            Target::Doc {
+                path,
+                fragment: Some(f),
+            } => matches!(
+                out.files.get(path),
+                Some(Some(o)) if o.setext_candidates > 0 && !o.headings.iter().any(|h| &h.slug == f)
+            ),
+            _ => false,
+        })
+        .count();
+    out.coverage.unparsed += unprovable;
     // DOC records: identifiers exist in any state; a path claimed by two active records is a source of
     // the conflicting claim.
     let mut claims: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -999,6 +1028,13 @@ fn graph(port: &dyn Port, overlay: &Overlay<'_>) -> Result<Graph> {
         out.coverage.complete &= set.complete;
         out.coverage.gaps.extend(set.gaps.iter().cloned());
         for f in set.files {
+            if out.coverage.files_read >= REF_FILE_CAP {
+                out.coverage.gaps.push(Gap {
+                    what: home.into(),
+                    reason: GapReason::Capped,
+                });
+                break;
+            }
             let Ok(text) = std::str::from_utf8(&f.bytes) else {
                 out.coverage.complete = false;
                 out.coverage.gaps.push(Gap {
@@ -1060,15 +1096,52 @@ fn matches(target: &Target, t: &Target) -> bool {
     }
 }
 
-/// Complete bounded incoming scan to `target`. Never writes.
+/// The other spelling of a managed document: its DOC identifier for a path target and its bound
+/// path for a DOC identifier target, from the one active record that claims it. A reference by
+/// identity and a reference by path denote the same document; a fragment query narrows the path
+/// spelling only, so it has no identity alias.
+fn document_alias(records: &documents::Records, target: &Target) -> Option<(String, DocPath)> {
+    let entry =
+        match target {
+            Target::Knowledge(id) if id.starts_with("DOC-") && !id.contains('/') => records
+                .by_id(id)
+                .filter(|e| e.record.state == documents::RecordState::Active)?,
+            Target::Doc {
+                path,
+                fragment: None,
+            } => {
+                let claims = records.claims(path);
+                (claims.len() == 1).then(|| claims[0])?
+            }
+            _ => return None,
+        };
+    let path = DocPath::parse(&entry.record.path).ok()?;
+    Some((entry.record.id.clone(), path))
+}
+
+/// Complete bounded incoming scan to `target`. A whole-document target (a path or its DOC
+/// identifier) counts every reference to that document, with or without a fragment, by path or by
+/// identity. Never writes.
 pub fn incoming(port: &dyn Port, target: &Target) -> Result<IncomingResult> {
     let g = graph(port, &Overlay::default())?;
+    let alias = document_alias(&documents::load_records(port)?, target);
+    let own_path: Option<&DocPath> = match (target, &alias) {
+        (Target::Doc { path, .. }, _) => Some(path),
+        (_, Some((_, path))) => Some(path),
+        _ => None,
+    };
     let mut rows: BTreeMap<(String, SourceKind, Via), Incoming> = BTreeMap::new();
     for (source, link) in &g.refs {
-        if !matches(target, &link.target) {
+        let aliased = alias.as_ref().is_some_and(|(id, path)| match target {
+            Target::Knowledge(_) => {
+                matches!(&link.target, Target::Doc { path: p, .. } if p == path)
+            }
+            _ => link.target == Target::Knowledge(id.clone()),
+        });
+        if !aliased && !matches(target, &link.target) {
             continue;
         }
-        if let Target::Doc { path, .. } = target
+        if let Some(path) = own_path
             && source.id_or_path == path.as_str()
             && matches!(source.kind, SourceKind::Markdown | SourceKind::Readme)
         {

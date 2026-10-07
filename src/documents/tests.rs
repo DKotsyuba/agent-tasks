@@ -29,6 +29,9 @@ pub(crate) struct Fake<'a> {
     baseline: usize,
     /// Pending faults.
     pub faults: RefCell<Vec<Fault>>,
+    /// Extra regular-file names listed below a directory, to model case-sensitive siblings on a
+    /// case-insensitive disk: `(directory, name)`.
+    pub listed: RefCell<Vec<(String, String)>>,
 }
 
 impl<'a> Fake<'a> {
@@ -45,6 +48,7 @@ impl<'a> Fake<'a> {
             baseline: store.publications().len(),
             inner: StorePort::locked(store, guard),
             faults: RefCell::new(Vec::new()),
+            listed: RefCell::new(Vec::new()),
         }
     }
 
@@ -89,7 +93,16 @@ impl Port for Fake<'_> {
         self.inner.read(rel, cap)
     }
     fn list(&self, dir: &str, cap: usize) -> Result<DirListing> {
-        self.inner.list(dir, cap)
+        let mut listing = self.inner.list(dir, cap)?;
+        for (d, name) in self.listed.borrow().iter().filter(|(d, _)| d == dir) {
+            let _ = d;
+            listing.entries.push(store::DirEntry {
+                name: name.clone(),
+                kind: EntryKind::File,
+            });
+        }
+        listing.entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(listing)
     }
     fn inventory(&self, dir: &str, prefix: &str) -> Result<store::Inventory> {
         self.inner.inventory(dir, prefix)
@@ -127,7 +140,15 @@ impl Port for Fake<'_> {
         self.inner.status(op, expected)
     }
     fn reserve_id(&self) -> Result<String> {
-        self.inner.reserve_id()
+        let fault = self.hit("reserve", "");
+        if let Some((code, false)) = fault {
+            return Err(Error::new(code, "scripted fault before any effect"));
+        }
+        let id = self.inner.reserve_id()?;
+        match fault {
+            Some((code, true)) => Err(Error::new(code, "scripted fault after the effect")),
+            _ => Ok(id),
+        }
     }
     fn records(&self, home: &str) -> Result<crate::references::RecordSet> {
         self.inner.records(home)
@@ -438,9 +459,16 @@ fn collisions_links_and_unsupported_files() {
         std::fs::read(dir.path().join("docs/a.md")).unwrap(),
         b"# a\n"
     );
+    // A case-insensitive disk answers the differently cased name with the same file, which is never
+    // editable as that name; a case-sensitive disk simply has no such file.
+    let aliased = dir.path().join("docs/A.md").exists();
     assert_eq!(
         obs(&f, "docs/A.md").state,
-        State::Unsupported(Unsupported::Collision)
+        if aliased {
+            State::Unsupported(Unsupported::Collision)
+        } else {
+            State::Absent
+        }
     );
     assert_eq!(obs(&f, "docs/a.md").state, State::Unmanaged);
     native(&dir, "docs/bad.md", &[0xff, 0xfe]);
@@ -813,7 +841,7 @@ fn relocate_identity_resume_windows() {
         )
         .unwrap();
         assert!(
-            !done.changed
+            done.changed
                 && done.warnings.contains(&Warning::AlreadyApplied)
                 && done.publications.is_empty()
         );
@@ -1244,4 +1272,277 @@ fn live_store_allocates_before_publishing_and_never_recycles() {
     // A port without the lock reads but cannot reserve.
     let reader = StorePort::new(&st);
     assert_eq!(reader.reserve_id().unwrap_err().code, "not_locked");
+}
+
+/// While any DOC record is unreadable the claims on a path are unknown: save, adopt, remove and a
+/// move (whose source and destination are both undecidable) refuse with `partial_coverage` before
+/// reserving an identifier or publishing, whether the path is unmanaged or absent.
+#[test]
+fn unreadable_record_refuses_every_mutation_before_effects() {
+    let (dir, st) = root();
+    let f = Fake::new(&st);
+    native(&dir, "docs/a.md", b"# a\n");
+    native(&dir, "documents/DOC-009.yaml", b"not: [valid");
+    let o = obs(&f, "docs/a.md");
+    assert!(!o.records_complete);
+    let before = tree(dir.path());
+    let r = Ref::Path(o.path.clone());
+    let mut scope = Scope {
+        port: &f,
+        operation: None,
+    };
+    let to = DocPath::parse("docs/new/b.md").unwrap();
+    let results = [
+        save(
+            &mut scope,
+            Save {
+                target: &r,
+                purpose: Some("Purpose"),
+                edit: Edit::Body(b"# b\n"),
+                expected: &o.version,
+                actor: None,
+            },
+        ),
+        adopt(&mut scope, &r, Some("Purpose"), &o.version, None),
+        remove(&mut scope, &r, &o.version, None),
+        relocate(
+            &mut scope,
+            &r,
+            &to,
+            &o.move_basis().unwrap(),
+            &absent_version(&f, &to),
+            None,
+        ),
+        save_at(&f, None, "docs/n.md", b"x", Some("Purpose")),
+    ];
+    for result in results {
+        assert_eq!(result.unwrap_err().code, "partial_coverage");
+    }
+    assert!(f.events().is_empty() && allocator_bytes(&dir).is_none());
+    assert_eq!(tree(dir.path()), before);
+}
+
+/// A `documents/` home that is a file is a named gap with unknown claims, not a hard error.
+#[test]
+fn documents_home_that_is_a_file_is_a_named_gap() {
+    let (dir, st) = root();
+    let f = Fake::new(&st);
+    native(&dir, "docs/a.md", b"# a\n");
+    native(&dir, "documents", b"not a directory");
+    let o = obs(&f, "docs/a.md");
+    assert!(!o.records_complete);
+    assert_eq!(o.state, State::Unmanaged);
+    let inv = inventory(&f).unwrap();
+    assert!(
+        !inv.complete
+            && inv
+                .gaps
+                .iter()
+                .any(|g| g.reason == GapReason::NotADirectory)
+    );
+    assert_eq!(
+        save_at(&f, None, "docs/a.md", b"# b\n", Some("P"))
+            .unwrap_err()
+            .code,
+        "partial_coverage"
+    );
+}
+
+/// Adoption refuses a NUL body exactly like a save, before any identifier is reserved.
+#[test]
+fn adopt_refuses_a_nul_body_before_reserving() {
+    let (dir, st) = root();
+    let f = Fake::new(&st);
+    native(&dir, "docs/zero.md", b"a\0b");
+    let o = obs(&f, "docs/zero.md");
+    let err = adopt(
+        &mut Scope {
+            port: &f,
+            operation: None,
+        },
+        &Ref::Path(o.path.clone()),
+        Some("Purpose"),
+        &o.version,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "invalid_arguments");
+    assert!(f.events().is_empty() && allocator_bytes(&dir).is_none());
+}
+
+/// Every member of a case collision is listed as `Unsupported(Collision)` and named as a gap.
+#[test]
+fn case_collision_members_are_listed_unsupported_rows() {
+    let (dir, st) = root();
+    let f = Fake::new(&st);
+    native(&dir, "docs/a.md", b"# a\n");
+    native(&dir, "docs/ok.md", b"# ok\n");
+    f.listed.borrow_mut().push(("docs".into(), "A.md".into()));
+    let inv = inventory(&f).unwrap();
+    let rows: Vec<_> = inv
+        .rows
+        .iter()
+        .map(|r| (r.path.as_str(), r.state))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("docs/A.md", State::Unsupported(Unsupported::Collision)),
+            ("docs/a.md", State::Unsupported(Unsupported::Collision)),
+            ("docs/ok.md", State::Unmanaged),
+        ]
+    );
+    assert!(!inv.complete);
+    assert_eq!(
+        inv.gaps
+            .iter()
+            .filter(|g| g.reason == GapReason::Collision)
+            .count(),
+        2
+    );
+}
+
+/// A fragment link into a document with setext headings that no ATX heading answers is unprovable:
+/// coverage is incomplete and the link is never reported dangling; an answered fragment stays proof.
+#[test]
+fn fragment_into_setext_document_is_unparsed_not_proof() {
+    let (dir, st) = root();
+    let f = Fake::new(&st);
+    native(&dir, "docs/s.md", b"Title\n=====\n\n# Atx\n");
+    native(&dir, "docs/ok.md", b"[atx](s.md#atx)\n");
+    let t = crate::references::Target::Doc {
+        path: DocPath::parse("docs/s.md").unwrap(),
+        fragment: None,
+    };
+    let r = crate::references::incoming(&f, &t).unwrap();
+    assert!(r.coverage.complete && r.coverage.unparsed == 0);
+    native(&dir, "docs/maybe.md", b"[t](s.md#title)\n");
+    let r = crate::references::incoming(&f, &t).unwrap();
+    assert!(!r.coverage.complete && r.coverage.unparsed == 1);
+    let i = crate::references::integrity(&f, &crate::references::Overlay::default()).unwrap();
+    assert!(i.dangling_after.is_empty() && !i.coverage.complete);
+}
+
+/// Unrecognized entries of the work home are named gaps, as they are for the knowledge home.
+#[test]
+fn work_home_warnings_become_named_gaps() {
+    let (dir, st) = root();
+    let f = Fake::new(&st);
+    native(&dir, "modules/stray.txt", b"x");
+    let set = crate::references::load_home(&st, "work").unwrap();
+    assert!(
+        set.gaps
+            .iter()
+            .any(|g| g.reason == GapReason::UnrecognizedEntry),
+        "{:?}",
+        set.gaps
+    );
+    drop(f);
+}
+
+/// A reservation refused before its first effect passes its code through; one that fails after the
+/// allocator was published (provider `allocation_changed`) is a partial publication that names the
+/// step and leaves no body or record.
+#[test]
+fn reservation_failure_is_classed_by_its_effects() {
+    let (dir, st) = root();
+    let f = Fake::new(&st);
+    f.fail("reserve", "", 0, "allocator", false);
+    let err = save_at(&f, None, "docs/a.md", b"# a\n", Some("Purpose")).unwrap_err();
+    assert_eq!(err.code, "allocator");
+    assert!(f.events().is_empty() && allocator_bytes(&dir).is_none());
+    f.fail("reserve", "", 0, "allocation_changed", true);
+    let err = save_at(&f, None, "docs/a.md", b"# a\n", Some("Purpose")).unwrap_err();
+    assert_eq!(err.code, "partial_publication");
+    assert!(
+        err.message.contains("reserve identifier") && err.message.contains("allocation_changed")
+    );
+    assert!(allocator_bytes(&dir).is_some());
+    assert!(!dir.path().join("docs/a.md").exists());
+    assert_eq!(obs(&f, "docs/a.md").state, State::Absent);
+    // Adoption classes the same failure identically.
+    native(&dir, "docs/b.md", b"# b\n");
+    let o = obs(&f, "docs/b.md");
+    f.fail("reserve", "", 0, "allocation_changed", true);
+    let err = adopt(
+        &mut Scope {
+            port: &f,
+            operation: None,
+        },
+        &Ref::Path(o.path.clone()),
+        Some("Purpose"),
+        &o.version,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "partial_publication");
+}
+
+/// A document is one target however it is spelled: incoming by its DOC identifier counts the path
+/// links (with or without a fragment) and incoming by its path counts the identifier mentions, while
+/// a fragment query narrows to that fragment only. A compaction asking by either spelling sees all.
+#[test]
+fn incoming_treats_identity_and_path_as_one_document() {
+    use crate::references::{Target, Via, incoming};
+    let (_dir, st) = root();
+    let f = Fake::new(&st);
+    save_at(
+        &f,
+        None,
+        "docs/target.md",
+        b"# Target\n\n## Keep\ntext\n",
+        Some("Target"),
+    )
+    .unwrap();
+    save_at(
+        &f,
+        None,
+        "docs/linker.md",
+        b"# Linker\n\nSee [keep](target.md#keep) and DOC-001.\n",
+        Some("Linker"),
+    )
+    .unwrap();
+    let path = DocPath::parse("docs/target.md").unwrap();
+    let by = |t: &Target| -> Vec<(String, Via)> {
+        incoming(&f, t)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| (r.source.id_or_path.clone(), r.via))
+            .collect()
+    };
+    let both = vec![
+        ("docs/linker.md".to_owned(), Via::MarkdownLink),
+        ("docs/linker.md".to_owned(), Via::BareId),
+    ];
+    let whole = Target::Doc {
+        path: path.clone(),
+        fragment: None,
+    };
+    assert_eq!(by(&whole), both);
+    assert_eq!(by(&Target::Knowledge("DOC-001".into())), both);
+    let narrowed = Target::Doc {
+        path: path.clone(),
+        fragment: Some("keep".into()),
+    };
+    assert_eq!(
+        by(&narrowed),
+        vec![("docs/linker.md".to_owned(), Via::MarkdownLink)]
+    );
+    // A retired identity no longer stands for the path: path links address whatever lives there.
+    let o = obs(&f, "docs/target.md");
+    remove(
+        &mut Scope {
+            port: &f,
+            operation: None,
+        },
+        &Ref::Path(path),
+        &o.version,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        by(&Target::Knowledge("DOC-001".into())),
+        vec![("docs/linker.md".to_owned(), Via::BareId)]
+    );
 }
