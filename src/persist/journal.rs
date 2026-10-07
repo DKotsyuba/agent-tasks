@@ -218,7 +218,10 @@ fn entry_count(journal: &Journal) -> usize {
 /// Serialize and atomically replace the journal.
 ///
 /// Refuses with [`UntrackedReason::JournalFull`] when the serialized bytes, the intent count or the
-/// entry count would exceed their bounds; the previous file is untouched on any failure.
+/// entry count would exceed their bounds; the previous file is untouched on those refusals. A
+/// replacement that became visible but whose directory sync is unconfirmed is
+/// [`UntrackedReason::JournalUnavailable`], so admission never treats it as retained and a required
+/// attestation refuses before any business byte is written.
 pub fn save(
     store: &Store,
     journal: &Journal,

@@ -392,6 +392,11 @@ impl Store {
     }
 
     /// Publish without events or journal; used for the journal file itself.
+    ///
+    /// # Errors
+    /// The placement errors of [`Store::place`], and `durability_unknown` when the file became visible
+    /// but its parent sync failed: the caller has no event to carry that state, so it must treat the
+    /// publication as not durably retained (the journal then refuses admission rather than trusting it).
     pub(crate) fn publish_raw(
         &self,
         relative: &str,
@@ -401,7 +406,13 @@ impl Store {
     ) -> Result<()> {
         let path = self.path(relative)?;
         let staged = self.stage(&path, bytes)?;
-        self.place(&staged, relative, observed, cap).map(|_| ())
+        match self.place(&staged, relative, observed, cap)? {
+            Durability::Durable => Ok(()),
+            Durability::SyncUnknown => Err(Error::new(
+                "durability_unknown",
+                "The file is visible but its directory sync is unconfirmed.",
+            )),
+        }
     }
 
     /// Create or replace one owned file with guarded, capped, journaled publication.
@@ -1220,6 +1231,35 @@ mod tests {
         let error = store.create_dir("docs", &mut Vec::new()).unwrap_err();
         assert_eq!(error.code, "durability_unknown");
         assert_eq!(store.publications()[1].durability, Durability::SyncUnknown);
+    }
+
+    /// An unconfirmed journal sync refuses required admission before any business byte is written,
+    /// while an optional write still saves and reports the journal as unavailable.
+    #[test]
+    fn unconfirmed_journal_sync_refuses_required_and_leaves_optional_untracked() {
+        let f = GitFixture::new();
+        let _guard = f.lock();
+        let mut fx = Vec::new();
+        let op = OperationId::new("op:1").unwrap();
+        let mut required = request("b.md", b"two", None);
+        required.operation = Some(&op);
+        required.attest = Attest::Required;
+        super::super::fail_next_directory_sync();
+        assert_eq!(
+            f.store.publish_with(required, &mut fx).unwrap_err().code,
+            "attestation_unavailable"
+        );
+        assert!(!f.store.root.join("b.md").exists());
+        super::super::fail_next_directory_sync();
+        let event = f
+            .store
+            .publish_with(request("a.md", b"one", None), &mut fx)
+            .unwrap();
+        assert_eq!(
+            event.tracking,
+            Tracking::Untracked(UntrackedReason::JournalUnavailable)
+        );
+        assert_eq!(std::fs::read(f.store.root.join("a.md")).unwrap(), b"one");
     }
 
     /// Parent creation is bounded to four levels and listing is sorted, bounded and link-aware.
