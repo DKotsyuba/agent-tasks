@@ -80,7 +80,10 @@ async fn changed_success_commits_only_its_own_files() {
     let files = git(&root, &["show", "--name-only", "--format=", "HEAD"]);
     assert!(files.contains("modules/M-001.yaml"), "{files}");
     assert!(!files.contains("foreign"), "{files}");
-    assert_eq!(git(&root, &["diff", "--cached", "--name-only"]), "foreign-staged.txt");
+    assert_eq!(
+        git(&root, &["diff", "--cached", "--name-only"]),
+        "foreign-staged.txt"
+    );
     assert!(git(&root, &["status", "--porcelain"]).contains("?? foreign-dirty.txt"));
 }
 
@@ -139,6 +142,9 @@ async fn non_repository_root_reports_saved() {
             false,
         )
         .await;
-    assert!(reply.contains("Git: saved on disk; nothing was committed for this call."), "{reply}");
+    assert!(
+        reply.contains("Git: saved on disk; nothing was committed for this call."),
+        "{reply}"
+    );
     assert!(!reply.contains("Git: committed"), "{reply}");
 }

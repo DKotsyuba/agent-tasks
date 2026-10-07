@@ -72,36 +72,28 @@ impl<'a> LiveEnv<'a> {
         }
     }
 
-    /// The document owner's storage seam with the knowledge owner's allocator and record loaders.
-    pub(super) fn port(&self) -> LivePort<'_> {
-        LivePort {
-            inner: StorePort::new(self.store),
-            guard: self.guard,
-            #[cfg(test)]
-            faults: &self.faults,
-        }
+    /// The document owner's own storage seam over the real store, holding the root write lock so the
+    /// single knowledge allocator can reserve `DOC-` identifiers.
+    pub(super) fn port(&self) -> StorePort<'_> {
+        StorePort::locked(self.store, self.guard)
     }
 }
 
-/// The document owner's [`Port`] over the real store, completed with the knowledge owner's real
-/// functions where the stock `StorePort` still reports its interim loaders as unavailable.
+/// Scripted faults around the document owner's real port, for composed tests only.
 ///
-/// Reservation is the single knowledge allocator under the held lock; typed record homes and typed
-/// identifier existence come from the knowledge loaders, so incoming coverage never degrades to an
-/// invented gap. Everything else is the stock port, unchanged.
-pub(super) struct LivePort<'a> {
-    /// The stock port over the request store.
-    pub(super) inner: StorePort<'a>,
-    /// The root write lock acquired through the same store.
-    pub(super) guard: &'a LockGuard,
-    /// The environment's scripted faults, composed tests only.
-    #[cfg(test)]
-    faults: &'a std::cell::RefCell<Vec<Fault>>,
+/// Every call is the stock port's; a matching fault fails the `put` or `del` either before the real
+/// effect or, when it models a lost reply, after it. It does not exist in a shipping build.
+#[cfg(test)]
+pub(super) struct FaultPort<'a> {
+    /// The real port.
+    pub(super) inner: &'a StorePort<'a>,
+    /// The environment's scripted faults.
+    pub(super) faults: &'a std::cell::RefCell<Vec<Fault>>,
 }
 
-impl LivePort<'_> {
+#[cfg(test)]
+impl FaultPort<'_> {
     /// The scripted fault matching this call, consuming it when it fires.
-    #[cfg(test)]
     fn injected(&self, on: &str, rel: &str) -> Option<(&'static str, bool)> {
         let mut faults = self.faults.borrow_mut();
         let i = faults
@@ -114,150 +106,73 @@ impl LivePort<'_> {
         let f = faults.remove(i);
         Some((f.code, f.after_effect))
     }
-
-    /// Move the human effect lines collected by the stock port into the caller's list.
-    pub(super) fn drain_into(&self, effects: &mut Vec<String>) {
-        effects.append(&mut self.inner.fx.borrow_mut());
-    }
 }
 
-/// Typed record kind of a structured home, when the home is a knowledge home.
-fn knowledge_kind(home: &str) -> Option<knowledge::Kind> {
-    [
-        knowledge::Kind::Decision,
-        knowledge::Kind::Runbook,
-        knowledge::Kind::Research,
-        knowledge::Kind::Checklist,
-    ]
-    .into_iter()
-    .find(|k| k.prefix().directory() == home)
-}
-
-impl Port for LivePort<'_> {
-    /// Root and path bound version of exact bytes or of absence, from the stock port.
+#[cfg(test)]
+impl Port for FaultPort<'_> {
+    /// Version of exact bytes or absence, from the real port.
     fn version(&self, rel: &str, bytes: Option<&[u8]>) -> String {
         self.inner.version(rel, bytes)
     }
-    /// Capped exact read of one owned file, from the stock port.
+    /// Capped exact read, from the real port.
     fn read(&self, rel: &str, cap: usize) -> Result<documents::Read> {
         self.inner.read(rel, cap)
     }
-    /// Sorted bounded directory listing, from the stock port.
+    /// Sorted bounded listing, from the real port.
     fn list(&self, dir: &str, cap: usize) -> Result<crate::store::DirListing> {
         self.inner.list(dir, cap)
     }
-    /// Bounded identifier inventory of one record directory, from the stock port.
+    /// Bounded identifier inventory, from the real port.
     fn inventory(&self, dir: &str, prefix: &str) -> Result<crate::store::Inventory> {
         self.inner.inventory(dir, prefix)
     }
-    /// Guarded create or replace through the stock port; a scripted fault may intervene in tests.
+    /// Guarded create or replace, subject to a scripted fault.
     fn put(&self, put: documents::Put<'_>) -> Result<()> {
-        #[cfg(test)]
         let fault = self.injected("put", put.rel);
-        #[cfg(test)]
         if let Some((code, false)) = fault {
             return Err(Error::new(code, "scripted fault before any effect"));
         }
         self.inner.put(put)?;
-        #[cfg(test)]
         if let Some((code, true)) = fault {
             return Err(Error::new(code, "scripted fault after the effect"));
         }
         Ok(())
     }
-    /// Guarded removal through the stock port; a scripted fault may intervene in tests.
+    /// Guarded removal, subject to a scripted fault.
     fn del(&self, del: documents::Del<'_>) -> Result<()> {
-        #[cfg(test)]
         let fault = self.injected("del", del.rel);
-        #[cfg(test)]
         if let Some((code, false)) = fault {
             return Err(Error::new(code, "scripted fault before any effect"));
         }
         self.inner.del(del)?;
-        #[cfg(test)]
         if let Some((code, true)) = fault {
             return Err(Error::new(code, "scripted fault after the effect"));
         }
         Ok(())
     }
-    /// Create missing owned parent directories through the stock port.
+    /// Create missing parents, from the real port.
     fn ensure_parents(&self, rel: &str) -> Result<()> {
         self.inner.ensure_parents(rel)
     }
-    /// Every typed publication event of this request, from the stock port.
+    /// Typed events of this request, from the real port.
     fn events(&self) -> Vec<crate::store::Publication> {
         self.inner.events()
     }
-    /// The persistence oracle's answer for one operation, from the stock port.
+    /// The persistence oracle, from the real port.
     fn status(&self, op: &OperationId, expected: &[ExpectedEffect]) -> EffectStatus {
         self.inner.status(op, expected)
     }
-
-    /// Reserve the next `DOC-` identifier at a freshly observed allocation version.
+    /// Allocator reservation, from the real port.
     fn reserve_id(&self) -> Result<String> {
-        let version = knowledge::allocation_version(self.inner.store)?;
-        knowledge::reserve(
-            self.inner.store,
-            self.guard,
-            Prefix::Document,
-            &version,
-            &mut self.inner.fx.borrow_mut(),
-        )
+        self.inner.reserve_id()
     }
-
-    /// Work and project records through their loaders, typed homes through the knowledge scan.
+    /// Record loaders, from the real port.
     fn records(&self, home: &str) -> Result<references::RecordSet> {
-        let Some(kind) = knowledge_kind(home) else {
-            return self.inner.records(home);
-        };
-        let scan = knowledge::scan(self.inner.store, Some(kind))?;
-        let mut set = references::RecordSet {
-            complete: scan.complete,
-            ..Default::default()
-        };
-        for snapshot in scan.records {
-            let id = snapshot.value.id().to_owned();
-            set.files.push(references::RecordFile {
-                rel: format!("{home}/{id}.yaml"),
-                source: references::Source {
-                    kind: references::SourceKind::Knowledge,
-                    id_or_path: id,
-                },
-                bytes: snapshot.bytes,
-            });
-        }
-        for name in scan.unreadable.into_iter().chain(scan.warnings) {
-            set.gaps.push(documents::Gap {
-                what: documents::quote(&name),
-                reason: documents::GapReason::Unreadable,
-            });
-        }
-        Ok(set)
+        self.inner.records(home)
     }
-
-    /// Typed identifiers (and checklist items) by the knowledge loaders; the rest by the stock port.
+    /// Identifier existence proofs, from the real port.
     fn resolve_id(&self, id: &str) -> Result<references::Resolution> {
-        let Ok(parsed) = knowledge::parse_id(id) else {
-            return self.inner.resolve_id(id);
-        };
-        if matches!(parsed.prefix, Prefix::Document | Prefix::Compaction) {
-            return self.inner.resolve_id(id);
-        }
-        let found = if parsed.item.is_some() {
-            match knowledge::resolve_child(self.inner.store, &parsed)? {
-                knowledge::Child::Found { .. } => references::Resolution::Found,
-                _ => references::Resolution::Missing,
-            }
-        } else {
-            match knowledge::load(self.inner.store, id) {
-                Ok(_) => references::Resolution::Found,
-                Err(e) if e.code == "not_found" => references::Resolution::Missing,
-                Err(e) => {
-                    references::Resolution::Unknown(format!("record unreadable ({})", e.code))
-                }
-            }
-        };
-        Ok(found)
+        self.inner.resolve_id(id)
     }
 }
 
@@ -604,8 +519,19 @@ impl Env for LiveEnv<'_> {
         effects: &mut Vec<String>,
     ) -> Result<()> {
         let port = self.port();
+        #[cfg(test)]
+        let result = run_doc_op(
+            &FaultPort {
+                inner: &port,
+                faults: &self.faults,
+            },
+            operation,
+            actor,
+            op,
+        );
+        #[cfg(not(test))]
         let result = run_doc_op(&port, operation, actor, op);
-        port.drain_into(effects);
+        effects.append(&mut port.fx.borrow_mut());
         result
     }
 

@@ -105,13 +105,15 @@ pub enum View {
     References,
 }
 
-/// Read one Project/Epic/Module/Task/Atomic scope with snapshot-bound pagination.
+/// Read one Project/Epic/Module/Task/Atomic scope, typed knowledge record, Markdown document or
+/// compaction proposal with snapshot-bound pagination.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ContextArgs {
     /// Configured project alias; not a path or a global current project.
     pub project: String,
-    /// Omit for Project; otherwise E-001, M-001, A-001, M-001/T-001 or M-001/A-001.
+    /// Omit for Project; otherwise E-001, M-001, A-001, M-001/T-001, M-001/A-001, D-001, RB-001,
+    /// RS-001, CL-001, CL-001/I-001, DOC-001, a managed path such as docs/x.md, or CP-001.
     #[serde(rename = "ref")]
     pub reference: Option<String>,
     /// Default summary; select one allowlisted detail view.
@@ -158,7 +160,8 @@ pub struct StatusArgs {
     pub module: Option<String>,
 }
 
-/// Bounded lexical work search over semantic fields, with exact continuation.
+/// Bounded lexical search over work, typed knowledge records and Markdown documents, with exact
+/// continuation.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchArgs {
@@ -166,7 +169,8 @@ pub struct SearchArgs {
     pub project: String,
     /// One to eight whitespace-separated terms, at most 256 UTF-8 bytes; all must match.
     pub query: String,
-    /// Optional E-001/M-001/A-001 record narrowing.
+    /// Optional E-001/M-001/A-001 record narrowing; it applies to the work source only and is
+    /// refused together with knowledge or document kinds.
     pub module: Option<String>,
     /// Zero-based match offset; default zero.
     #[serde(default)]
