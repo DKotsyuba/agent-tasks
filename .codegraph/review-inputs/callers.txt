@@ -1,0 +1,354 @@
+**Flow (call path among the symbols you queried)**
+
+1. transition (src/rules.rs:398)
+   ↓ calls
+2. adopt_description (src/rules.rs:381)
+   ↓ calls
+3. read_fields (src/records.rs:639)
+
+> Full source for these symbols is below — the call flow among them, followed by their bodies.
+**Exploration: patch_description read_fields transition review**
+
+Found 58 symbols across 4 files.
+
+**Blast radius — what depends on these (update/verify before editing)**
+
+- `read_fields` (src/records.rs:639) — 12 callers in `src/gateway.rs`, `src/records.rs`, `src/render.rs`, `src/rules.rs`; tests: `tests/field_sections.rs`, `tests/workflow.rs`
+- `patch_description` (src/records.rs:55) — 12 callers in `src/gateway.rs`, `src/records.rs`, `src/render.rs`; tests: `tests/field_sections.rs`, `tests/manual_recovery.rs`
+- `FIELDS` (src/records.rs:12) — 2 callers in `src/records.rs`; tested via callers: `tests/field_sections.rs`, `tests/manual_recovery.rs` +1
+- `transition` (src/rules.rs:398) — 6 callers in `src/gateway.rs`, `src/guidance.rs`; tested via callers: `tests/guidance.rs`
+- `review` (src/gateway.rs:1966) — 1 caller in `src/gateway.rs`; tested via callers: `tests/live.rs`, `tests/runtime_risks.rs` +1
+
+**Source Code**
+
+> The code below is the **verbatim, current on-disk source** of these files — re-read from disk on this call and line-numbered, byte-for-byte identical to what the Read tool returns. It is NOT a summary, outline, or stale cache. Treat each block as a Read you have already performed: do not Read a file shown here.
+
+**`src/records.rs`** — Result(references), level_two_sections(calls), FIELDS(variable), patch_description(function), read_fields(calls), +6 more
+
+```rust
+9	use std::collections::BTreeMap;
+10	
+11	/// Issue fields exposed to agents and rendered as understandable sections.
+12	pub const FIELDS: &[(&str, &str)] = &[
+13	    ("description", "Описание"),
+14	    ("business_requirements", "Бизнес-требования"),
+15	    ("expected_result", "Ожидаемый результат"),
+
+... (gap) ...
+
+52	/// Patch recognized level-two fields; preserve all unrelated prose and code bytes.
+53	/// Null removes a field. Reject duplicate real managed headings before producing a patch.
+54	/// String values are Markdown; other values are serialized as fenced JSON.
+55	pub fn patch_description(original: &str, patch: &Value) -> Result<String> {
+56	    read_fields(original)?;
+57	    let mut output = original.to_owned();
+58	    for (key, label) in FIELDS {
+59	        let Some(value) = patch.get(*key) else {
+60	            continue;
+61	        };
+62	        let rendered = if value.is_null() {
+63	            String::new()
+64	        } else {
+65	            let body = value
+66	                .as_str()
+67	                .map(str::to_owned)
+68	                .unwrap_or_else(|| format!("```json\n{value}\n```"));
+69	            format!("## {label}\n{body}\n\n")
+70	        };
+71	        if let Some(section) = crate::sections::level_two_sections(&output)
+72	            .into_iter()
+73	            .find(|s| s.heading == *label)
+74	        {
+75	            output.replace_range(section.start..section.end, &rendered);
+76	        } else if !rendered.is_empty() {
+77	            if !output.is_empty() && !output.ends_with("\n\n") {
+78	                output.push_str("\n\n");
+79	            }
+80	            output.push_str(&rendered);
+81	        }
+82	    }
+83	    Ok(output)
+84	}
+85	/// Native persistence with fresh reads; no local workflow database or signed receipts.
+86	#[derive(Clone)]
+87	pub struct Store {
+
+... (gap) ...
+
+121	
+122	impl Store {
+123	    /// Read a native object, distinguishing absence from authentication and partial errors.
+124	    pub async fn optional(&self, query: &str, field: &str, id: &str) -> Result<Option<Value>> {
+125	        match self.linear.object(query, field, id).await {
+126	            Ok(v) => Ok(Some(v)),
+127	            Err(e) if e.code == "RECORD_MISSING" => Ok(None),
+128	            Err(e) => Err(e),
+129	        }
+130	    }
+131	    /// Read the deterministic metadata attachment for one originating issue, including native duplicate transfers.
+132	    /// Foreign provenance is rejected; missing records remain unmanaged and reads never relocate attachments.
+133	    pub async fn meta(&self, id: &str) -> Result<Option<Meta>> {
+
+... (gap) ...
+
+636	
+637	/// Parse the recognized readable sections after manual edits; unknown sections stay unowned.
+638	/// Invalid structured integration lists fail rather than retaining stale hidden values.
+639	pub fn read_fields(description: &str) -> Result<Value> {
+640	    let mut fields = json!({});
+641	    let sections = crate::sections::level_two_sections(description);
+642	    for (key, label) in FIELDS {
+643	        let starts: Vec<_> = sections.iter().filter(|s| s.heading == *label).collect();
+644	        require(
+645	            starts.len() <= 1,
+646	            "INVALID_INPUT",
+647	            format!("Duplicate section: {label}"),
+648	        )?;
+649	        if let Some(section) = starts.first() {
+650	            let body = description[section.body_start..section.end].trim();
+651	            if !body.is_empty() {
+652	                fields[*key] = if *key == "integration_modules" {
+653	                    let body = body
+654	                        .strip_prefix("```json")
+655	                        .or_else(|| body.strip_prefix("```"))
+656	                        .and_then(|s| s.trim().strip_suffix("```"))
+657	                        .unwrap_or(body)
+658	                        .trim();
+659	                    // Linear escapes bare brackets on Markdown round trips.
+660	                    let body = body.replace("\\[", "[").replace("\\]", "]");
+661	                    serde_json::from_str(&body).map_err(|_| {
+662	                        Fault::new(
+663	                            "INVALID_INPUT",
+664	                            "Integration Modules section must contain a JSON array of UUIDs",
+665	                        )
+666	                    })?
+667	                } else if key.ends_with("_url") || *key == "duplicate_of" {
+668	                    let destination = body
+669	                        .strip_prefix('[')
+670	                        .and_then(|s| s.split_once("]("))
+671	                        .and_then(|(_, url)| url.strip_suffix(')'))
+672	                        .unwrap_or(body)
+673	                        .trim()
+674	                        .trim_start_matches('<')
+675	                        .trim_end_matches('>');
+676	                    json!(destination)
+677	                } else {
+678	                    json!(body)
+679	                };
+680	            }
+681	        }
+682	    }
+683	    Ok(fields)
+684	}
+685	
+```
+
+**`src/gateway.rs`** — require(calls), text(calls), new(calls), managed(calls), markdown_equivalent(calls), +19 more
+
+```rust
+1963	    /// Identical retries resume the captured predecessor; older reports return historical NOOP.
+1964	    /// Legacy comments recover only at the current clean stamp and with strictly newer native time.
+1965	    /// No review moves work status; competing mutations must finish this pending request first.
+1966	    async fn review(&self, a: &Value) -> Result<Value> {
+1967	        let (w, graph) = self
+1968	            .loaded(&self.resolve("issue", text(a, "id")?).await?)
+1969	            .await?;
+1970	        let m = w.managed()?;
+1971	        let request = Self::request("record_review", a);
+1972	        require(
+1973	            m.pending.is_none(),
+1974	            "PENDING_OPERATION",
+1975	            "Retry the pending native write first",
+1976	        )?;
+1977	        let id = text(a, "request_id")?;
+1978	        let content = format!(
+1979	            "{}\n\n### Findings\n{}",
+1980	            text(a, "summary")?,
+1981	            a["findings"]
+1982	                .as_str()
+1983	                .filter(|v| !v.trim().is_empty())
+1984	                .unwrap_or("None")
+1985	        );
+1986	        let body_at = |round, revision| {
+1987	            crate::activity::render(
+1988	                "review",
+1989	                "reviewer",
+1990	                text(a, "actor")?,
+1991	                &content,
+1992	                &json!({"reviewer":a["reviewer"],"session":a["session"],"verdict":a["verdict"],
+1993	                "round":round,"revision":revision,"source_links":a["artifacts"]}),
+1994	            )
+1995	        };
+1996	        let mut existing = self.store.optional("QComment", "comment", id).await?;
+1997	        let intent = if let Some(pending) = &m.pending_review {
+1998	            require(
+1999	                pending.request == request,
+2000	                "PENDING_OPERATION",
+2001	                "Retry the pending review with unchanged arguments",
+2002	            )?;
+2003	            require(
+2004	                m.review == pending.predecessor
+2005	                    && m.round == pending.review.round
+2006	                    && m.revision == pending.review.revision,
+2007	                "PENDING_CONFLICT",
+2008	                "Review predecessor or content stamp changed",
+2009	            )?;
+2010	            pending.clone()
+2011	        } else {
+2012	            if let Some(comment) = &existing {
+2013	                let activity = crate::activity::record(comment, None)?;
+2014	                let round = activity.round.ok_or_else(|| {
+2015	                    Fault::new("REQUEST_CONFLICT", "Review comment has no original round")
+2016	                })?;
+2017	                let revision = activity.revision.ok_or_else(|| {
+2018	                    Fault::new(
+2019	                        "REQUEST_CONFLICT",
+2020	                        "Review comment has no original revision",
+2021	                    )
+2022	                })?;
+2023	                require(
+2024	                    comment["issue"]["id"] == w.id()
+2025	                        && markdown_equivalent(
+2026	                            &body_at(round, revision)?,
+2027	                            comment["body"].as_str().unwrap_or(""),
+2028	                        ),
+2029	                    "REQUEST_CONFLICT",
+2030	                    "Review request_id already names another report",
+2031	                )?;
+2032	                let mut historical = round != m.round || revision != m.revision;
+2033	                if let Some(previous) = &m.review {
+2034	                    if previous.id == id {
+```
+
+**`src/model.rs`** — Status(enum), Review(struct)
+
+```rust
+99	}
+100	/// Standard workflow names. Configuration must resolve existing Linear states to these names.
+101	#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+102	pub enum Status {
+103	    /// Draft work.
+104	    Backlog,
+105	    /// Planned work, possibly incomplete.
+106	    Todo,
+107	    /// Active implementation.
+108	    #[serde(rename = "In Progress")]
+109	    InProgress,
+110	    /// Whole-work review (never used by tasks).
+111	    #[serde(rename = "In Review")]
+112	    InReview,
+113	    /// Accepted result, or locally completed task.
+114	    Done,
+115	    /// Retired with a reason.
+116	    Canceled,
+117	    /// Retired in favor of an identified original.
+118	    Duplicate,
+119	}
+120	impl Status {
+121	    /// Native display name used for lookup and diagnostics.
+
+... (gap) ...
+
+137	}
+138	/// Latest review decision; full reports are preserved in native comments.
+139	#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+140	pub struct Review {
+141	    /// Native comment UUID, also the caller's stable review request ID.
+142	    pub id: String,
+143	    /// Work round reviewed.
+144	    pub round: u64,
+145	    /// Content revision submitted to review.
+146	    pub revision: u64,
+147	    /// True for acceptance, false for changes requested.
+148	    pub accepted: bool,
+149	}
+150	/// Immutable local commit snapshot associated explicitly with one work round.
+151	/// Its enclosing native work record supplies work identity; repeated repository/SHA pairs within
+152	/// that round are not appended. Flattening preserves the public GitCommit fields in JSON.
+```
+
+**`src/rules.rs`** — needs(calls), find(calls), parent(calls), status(calls), discrepancies(calls), +26 more
+
+```rust
+271	fn start(e: &mut Vec<String>, w: &Work, graph: &[Work]) {
+272	    let m = w.meta.as_ref().unwrap();
+273	    let f = &w.fields;
+274	    needs(e, f, &["expected_result", "acceptance_criteria"]);
+275	    if let Some(id) = parent(w) {
+
+... (gap) ...
+
+356	                    }
+357	                }
+358	            }
+359	        }
+360	    }
+361	}
+362	/// Check current results before submission/closure. Code accepts current-round imported snapshots
+363	/// or the legacy commit URL; non-code still requires its artifact URL. No Git read is needed here.
+364	fn result(e: &mut Vec<String>, w: &Work) {
+365	    needs(e, &w.fields, &["result", "check_result"]);
+366	    if w.fields["work_type"] == "code" {
+367	        if w.meta
+368	            .as_ref()
+369	            .is_none_or(|m| m.current_git_reports().next().is_none())
+370	        {
+371	            needs(e, &w.fields, &["commit_url"]);
+372	        }
+373	    } else {
+374	        needs(e, &w.fields, &["artifact_url"]);
+375	    }
+376	}
+377	
+378	/// Validate a native description-only change and return an adopted in-memory candidate.
+379	/// Unknown prose remains exact; full field schema and cross-field references must be valid.
+380	/// No round/revision or native state changes occur here; transition execution owns invalidation.
+381	pub fn adopt_description(w: &Work, graph: &[Work]) -> Result<Work> {
+382	    let m = w.managed()?;
+383	    let description = w.native["description"].as_str().unwrap_or("");
+384	    let fields = crate::records::read_fields(description)?;
+385	    crate::catalog::Catalog::new()?.validate_fields(m.kind, &fields)?;
+386	    crate::gateway::Gateway::check_fields(m.kind, &fields, m.parent_id.as_deref(), graph)?;
+387	    let mut candidate = w.clone();
+388	    candidate.fields = fields.clone();
+389	    if let Some(meta) = &mut candidate.meta {
+390	        meta.fields = fields;
+391	        meta.description = description.to_owned();
+392	    }
+393	    Ok(candidate)
+394	}
+395	
+396	/// Evaluate an explicit transition; context uses this same function for check-only output.
+397	/// `role` is trusted caller attribution, not an authentication permission system.
+398	pub fn transition(w: &Work, graph: &[Work], target: Status, role: &str) -> Vec<String> {
+399	    let adopted;
+400	    let w = if target == Status::InProgress
+401	        && w.meta.as_ref().is_some_and(|m| {
+402	            matches!(m.status, Status::InReview | Status::Done)
+403	                && w.native["description"] != m.description
+404	        }) {
+405	        match adopt_description(w, graph) {
+406	            Ok(candidate) => {
+407	                adopted = candidate;
+408	                &adopted
+409	            }
+410	            Err(error) => return vec![error.to_string()],
+411	        }
+412	    } else {
+```
+
+**Not shown above — explore these names for their source**
+
+- src/guidance.rs: reviewing:248, guidance:89, working:191, restart:327, preview_effects:357, action:51, +1 more
+- src/activity.rs: target:71, render:91, render_project_update:272, record:153, activity.rs:1
+- src/sections.rs: level_two_sections:119, headings:70, FieldSection:106
+- src/render.rs: context_projection:343, render.rs:1
+- tests/manual_recovery.rs: done_task_reopens_current_description_once:10, reviewed_module_adoption_validates_before_writing:67
+- src/context.rs: agent_context:264, project_overview:409, compact_snapshot:618
+- src/reports.rs: module_report:68
+- src/linear.rs: object:252
+- src/catalog.rs: validate_fields:13
+- src/config.rs: load:21, validate:47
+- ... and 5 more files
+
+> Some file sections were trimmed for size. For a specific symbol you still need, run another `codegraph_explore` (or `codegraph_node`) with its exact name — line-numbered source, cheaper and more complete than Read.

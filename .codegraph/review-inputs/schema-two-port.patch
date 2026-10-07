@@ -1,0 +1,310 @@
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 129e079..d5abac9 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -91,6 +91,8 @@ Every overview includes an observation time and opaque cursor. A later call with
+ 
+ Machine data lives on one small native attachment per managed issue: kind, expected parent/project/status, known children, frozen membership, implementation/review round, current review, integration completion snapshot and any prepared write. The attachment is selected by its deterministic UUID, never by title or current placement. Native Duplicate merges transfer attachments to the original issue; `Attachment.originalIssue` preserves their originating issue and takes precedence over current `issue` when validating reads and writes. Each original issue retains its own distinct canonical record. Recorded children remain visible to guards if moved to a different native Project. No signatures or proof certificates are used. The attachment links back to the issue. Native dates/history remain available in Linear; MCP does not maintain a second time-in-status system.
+ 
++When a transferred historical Duplicate record has `originalIssue` explicitly null, single and bulk readers require its canonical attachment UUID, completed Duplicate metadata, native Duplicate state, matching Project, stored target permalink and exactly one active directed native duplicate relation to its physical owner. All relation pages are read within existing bounds; missing, foreign or ambiguous provenance refuses. This read-only corroboration never repairs, relocates or grants write ownership: `save` still requires native attachment provenance. The schema-two reader and writer remain unchanged in format.
++
+ ## Epic composition
+ 
+ At the first `In Progress` transition, the Epic fixes its Module IDs, including an empty list. The list is never unlocked by reopening. Modules cannot subsequently be attached, created under it or detached through MCP. Canceling a Module preserves membership and history.
+diff --git a/src/records.rs b/src/records.rs
+index 5f0f987..dd394da 100644
+--- a/src/records.rs
++++ b/src/records.rs
+@@ -1,7 +1,7 @@
+ //! Minimal native attachment state and lossless editing of readable Markdown sections.
+ use crate::{
+     linear::Linear,
+-    model::{Fault, Meta, Result, Work, require},
++    model::{Fault, Meta, Result, Work, require, text},
+ };
+ use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+ use serde_json::{Value, json};
+@@ -109,11 +109,9 @@ fn validate_state_owner(attachment: &Value, id: &str) -> Result<()> {
+         "State attachment belongs to another issue",
+     )
+ }
+-/// Validate and parse one already-fetched state attachment for its known originating issue.
+-/// Shared by the single `meta` lookup and the bulk `graph` read so both apply identical
+-/// provenance/schema checks regardless of which query fetched the record.
+-fn parse_state_attachment(attachment: &Value, id: &str) -> Result<Meta> {
+-    validate_state_owner(attachment, id)?;
++/// Decode schema-two workflow metadata after the caller corroborates attachment ownership.
++/// This reader compatibility fix never changes the metadata format or writer behavior.
++fn parse_state_metadata(attachment: &Value) -> Result<Meta> {
+     let m: Meta = serde_json::from_value(attachment["metadata"]["workflow"].clone())
+         .map_err(|_| Fault::new("STATE_INVALID", "Invalid workflow metadata"))?;
+     require(
+@@ -125,6 +123,77 @@ fn parse_state_attachment(attachment: &Value, id: &str) -> Result<Meta> {
+ }
+ 
+ impl Store {
++    /// Read one canonical attachment for `id`, preserving its deterministic originating identity.
++    /// Explicit native provenance is authoritative. With originalIssue explicitly null, a transferred
++    /// retired record is readable only when native Duplicate state, stored retirement fields and one
++    /// complete active directed duplicate relation agree with its current physical owner.
++    /// Missing, foreign or ambiguous facts refuse; this read-only fallback never enables `save`.
++    async fn read_state_attachment(&self, attachment: &Value, id: &str) -> Result<Meta> {
++        require(
++            attachment["id"] == child_id(id, "state"),
++            "STATE_INVALID",
++            "State attachment identity differs from its canonical owner",
++        )?;
++        if validate_state_owner(attachment, id).is_ok() {
++            return parse_state_metadata(attachment);
++        }
++        require(
++            attachment.get("originalIssue") == Some(&Value::Null)
++                && attachment["issue"]["id"].is_string(),
++            "STATE_INVALID",
++            "State attachment belongs to another issue",
++        )?;
++        let meta = parse_state_metadata(attachment)?;
++        require(
++            meta.status == crate::model::Status::Duplicate && meta.pending.is_none(),
++            "STATE_INVALID",
++            "Transferred state lacks a completed duplicate retirement",
++        )?;
++        let source = self.linear.object("QIssue", "issue", id).await?;
++        require(
++            source["id"] == id
++                && source["state"]["type"] == "duplicate"
++                && source["project"]["id"] == meta.project_id,
++            "STATE_INVALID",
++            "Native issue does not corroborate duplicate provenance",
++        )?;
++        let owner = text(&attachment["issue"], "id")?;
++        let target = self.linear.object("QIssue", "issue", owner).await?;
++        let target_matches = meta.fields["duplicate_of"].as_str().and_then(|url| crate::context::parse_reference(url).ok())
++            .is_some_and(|reference| matches!(reference, crate::context::Reference::Issue { identifier, comment: None }
++                if target["id"] == owner && (target["id"] == identifier || target["identifier"] == identifier)));
++        require(
++            target_matches,
++            "STATE_INVALID",
++            "Stored duplicate target differs from the attachment owner",
++        )?;
++        let relations = self
++            .pages("QIssueRelations", "/issue/relations", json!({"id":id}))
++            .await?;
++        let duplicates: Vec<_> = relations
++            .iter()
++            .filter(|r| r["type"] == "duplicate")
++            .collect();
++        require(
++            duplicates.iter().all(|r| {
++                r.get("archivedAt").is_some()
++                    && r["issue"]["id"] == id
++                    && r["relatedIssue"]["id"].is_string()
++            }),
++            "STATE_INVALID",
++            "Duplicate relation provenance is incomplete",
++        )?;
++        let active: Vec<_> = duplicates
++            .into_iter()
++            .filter(|r| r["archivedAt"].is_null())
++            .collect();
++        require(
++            active.len() == 1 && active[0]["relatedIssue"]["id"] == owner,
++            "STATE_INVALID",
++            "Native duplicate relation does not uniquely corroborate the attachment owner",
++        )?;
++        Ok(meta)
++    }
+     /// Read a native object, distinguishing absence from authentication and partial errors.
+     pub async fn optional(&self, query: &str, field: &str, id: &str) -> Result<Option<Value>> {
+         match self.linear.object(query, field, id).await {
+@@ -142,7 +211,7 @@ impl Store {
+         else {
+             return Ok(None);
+         };
+-        parse_state_attachment(&a, id).map(Some)
++        self.read_state_attachment(&a, id).await.map(Some)
+     }
+     /// Read many deterministic state attachments in bounded chunks by native attachment ID,
+     /// instead of one request per issue. A requested ID absent from the native page is simply
+@@ -229,8 +298,9 @@ impl Store {
+         ))
+     }
+     /// Read the whole project hierarchy, including archived children needed for frozen membership.
+-    /// Reads one bulk page of state attachments (bounded chunks by deterministic ID) instead of
+-    /// one request per issue; a project's request count no longer scales with its issue count.
++    /// Ordinary records use bounded bulk attachment reads instead of one lookup per issue.
++    /// Each null-provenance duplicate transfer adds bounded source/target and full relation-page
++    /// corroboration reads; request count can therefore grow with those exceptions and pagination.
+     pub async fn graph(&self, project: &str) -> Result<Vec<Work>> {
+         let nodes = self
+             .pages(
+@@ -254,7 +324,7 @@ impl Store {
+         for (native, state_id) in nodes.into_iter().zip(state_ids.iter()) {
+             let id = native["id"].as_str().unwrap().to_owned();
+             let meta = match by_id.get(state_id) {
+-                Some(a) => Some(parse_state_attachment(a, &id)?),
++                Some(a) => Some(self.read_state_attachment(a, &id).await?),
+                 None => None,
+             };
+             let fields = meta.as_ref().map(|m| m.fields.clone()).unwrap_or(json!({}));
+diff --git a/tests/state_provenance.rs b/tests/state_provenance.rs
+new file mode 100644
+index 0000000..25da2a2
+--- /dev/null
++++ b/tests/state_provenance.rs
+@@ -0,0 +1,155 @@
++//! Canonical historical duplicate records remain readable only with authoritative native facts.
++#[allow(dead_code)]
++mod support;
++use agent_tasks::records::child_id;
++use serde_json::{Value, json};
++use support::{Fixture, id};
++
++/// Retire a source through the public duplicate transition, then model native null originalIssue.
++async fn transferred_duplicate() -> (Fixture, String, String, String) {
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let source = f.work("atomic", &project, None).await;
++    let target = f.work("atomic", &project, None).await;
++    let target_url = f.db.lock().await.issues[&target]["url"].clone();
++    f.ok(
++        "edit_atomic",
++        json!({"id":source,"fields":{"reason":"Replaced","duplicate_of":target_url}}),
++    )
++    .await;
++    f.mv(&source, "Duplicate").await;
++    f.db.lock()
++        .await
++        .attachments
++        .get_mut(&child_id(&source, "state"))
++        .unwrap()["originalIssue"] = Value::Null;
++    (f, project, source, target)
++}
++
++/// Exact directed native duplicate facts allow both readers without changing or enabling writes to the record.
++#[tokio::test]
++async fn null_original_duplicate_is_corroborated_on_meta_and_graph_reads() {
++    let (f, project, source, target) = transferred_duplicate().await;
++    let aid = child_id(&source, "state");
++    {
++        let mut db = f.db.lock().await;
++        for _ in 0..100 {
++            let id = id();
++            db.relations.insert(id.clone(), json!({"id":id,"type":"related","archivedAt":null,"issue":{"id":source},"relatedIssue":{"id":target}}));
++        }
++    }
++    let before = f.db.lock().await.attachments.clone();
++    let meta = f.gateway.store.meta(&source).await.unwrap().unwrap();
++    assert_eq!(meta.status, agent_tasks::model::Status::Duplicate);
++    let graph = f.gateway.store.graph(&project).await.unwrap();
++    let historical = graph.iter().find(|w| w.id() == source).unwrap();
++    assert_eq!(historical.managed().unwrap().fields, meta.fields);
++    assert!(
++        graph
++            .iter()
++            .find(|w| w.id() == target)
++            .unwrap()
++            .meta
++            .is_some()
++    );
++    assert!(f.db.lock().await.operation_counts["QIssueRelations"] >= 4);
++    assert!(
++        f.gateway
++            .store
++            .save(&historical.native, &meta)
++            .await
++            .is_err()
++    );
++    assert_eq!(f.db.lock().await.attachments, before);
++    assert_eq!(before[&aid]["id"], aid);
++}
++
++/// Missing provenance, nonduplicate state/metadata, mismatched target and ambiguous relations all refuse.
++#[tokio::test]
++async fn uncorroborated_transfers_are_refused_without_mutation() {
++    for case in [
++        "missing_original",
++        "foreign_original",
++        "native_open",
++        "metadata_open",
++        "wrong_target",
++        "missing_relation",
++        "nonduplicate_relation",
++        "archived_relation",
++        "unknown_archive",
++        "ambiguous_relation",
++        "missing_target",
++    ] {
++        let (f, project, source, target) = transferred_duplicate().await;
++        let aid = child_id(&source, "state");
++        {
++            let mut db = f.db.lock().await;
++            match case {
++                "missing_original" => {
++                    db.attachments
++                        .get_mut(&aid)
++                        .unwrap()
++                        .as_object_mut()
++                        .unwrap()
++                        .remove("originalIssue");
++                }
++                "foreign_original" => {
++                    db.attachments.get_mut(&aid).unwrap()["originalIssue"] = json!({"id":target})
++                }
++                "native_open" => {
++                    db.issues.get_mut(&source).unwrap()["state"] =
++                        json!({"name":"In Progress","type":"started"})
++                }
++                "metadata_open" => {
++                    db.attachments.get_mut(&aid).unwrap()["metadata"]["workflow"]["status"] =
++                        json!("In Progress")
++                }
++                "wrong_target" => {
++                    db.attachments.get_mut(&aid).unwrap()["metadata"]["workflow"]["fields"]["duplicate_of"] =
++                        json!("https://linear.app/example/issue/OTHER-1")
++                }
++                "missing_relation" => db.relations.clear(),
++                "nonduplicate_relation" => {
++                    db.relations.values_mut().next().unwrap()["type"] = json!("related")
++                }
++                "archived_relation" => {
++                    db.relations.values_mut().next().unwrap()["archivedAt"] =
++                        json!("2026-01-01T00:00:00Z")
++                }
++                "unknown_archive" => {
++                    db.relations
++                        .values_mut()
++                        .next()
++                        .unwrap()
++                        .as_object_mut()
++                        .unwrap()
++                        .remove("archivedAt");
++                }
++                "ambiguous_relation" => {
++                    let mut second = db.relations.values().next().unwrap().clone();
++                    let id = id();
++                    second["id"] = json!(id);
++                    db.relations.insert(id, second);
++                }
++                "missing_target" => {
++                    db.issues.remove(&target);
++                }
++                _ => unreachable!(),
++            }
++        }
++        let before = f.db.lock().await.attachments.clone();
++        assert!(f.gateway.store.meta(&source).await.is_err(), "{case}");
++        assert!(f.gateway.store.graph(&project).await.is_err(), "{case}");
++        assert_eq!(f.db.lock().await.attachments, before, "{case}");
++    }
++}
++
++/// An incomplete provider response never grants read ownership from hidden metadata alone.
++#[tokio::test]
++async fn relation_read_failure_keeps_ownership_unverified() {
++    let (f, _, source, _) = transferred_duplicate().await;
++    let before = f.db.lock().await.attachments.clone();
++    f.db.lock().await.lose = Some("QIssueRelations".into());
++    assert!(f.gateway.store.meta(&source).await.is_err());
++    assert_eq!(f.db.lock().await.attachments, before);
++}

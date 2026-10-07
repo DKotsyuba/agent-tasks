@@ -1,0 +1,416 @@
+diff --git a/docs/architecture.md b/docs/architecture.md
+index fd6d8ca..4006e36 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -39,6 +39,8 @@ Project creation also creates native `Runbook` and `Решения` documents. R
+ 
+ Managed fields own recognized level-two CommonMark sections only. Fenced and indented code headings stay literal; unknown sections and prose retain their source bytes. `sections::level_two_sections` exposes exact heading/body/end spans; `records::read_fields` rejects duplicate real fields, and `patch_description` returns a validation error before changing ambiguous content. Nested prose headings should use level three or deeper.
+ 
++Both real level-one and level-two headings end field bodies. Producers reject those headings inside values and verify the complete generated field map before any native write; a code fence that swallows generated siblings fails validation. Imported Git reports normalize actual ATX/setext H1/H2 headings to H3 while preserving code literals and inline Markdown; original commit messages remain immutable history.
++
+ Create calls require `request_id`, `actor`, `title`, `project_id` and `team_id`; Task also requires `parent_id`. Issue titles are stored with exactly one leading kind marker (`[EPIC]`, `[MODULE]`, `[TASK]`, `[ATOMIC]`); repeated or wrong recognized markers are normalized, unrelated markers such as `[UI]` are preserved, and a marker without a title is rejected. Project titles remain unchanged. Issue `priority` is native Linear priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. Omitted create priority is 0; omitted edit priority preserves the native value and 0 clears it. Issue fields may be prepared in Backlog/Todo. Project creation instead requires `team_id`, `title` and `description`; both `repository_path` and `repository_url` are optional for planning. A supplied path must be an absolute existing local Git checkout; the optional external URL accepts HTTP(S), including non-GitHub hosts. Legacy URL-only calls remain valid.
+ 
+ Issue create/edit calls accept a `fields` object. Omitted values are preserved; null removes a nullable value. `work_type` defaults to `code` for Module/Task/Atomic and `non_code` for Epic. Use `non_code` explicitly for document/administrative work and `integration` for an integration Atomic. Reference fields accept UUIDs or the native Linear permalinks of the agreed input matrix; permalinks are resolved and stored as normalized UUIDs. Permalink resolution rolls out with the coordinated runtime release — earlier v2 runtimes accept every UUID input unchanged.
+diff --git a/schemas/tools.json b/schemas/tools.json
+index 86b410e..f8c2058 100644
+--- a/schemas/tools.json
++++ b/schemas/tools.json
+@@ -488,7 +488,7 @@
+           },
+           "required": [],
+           "additionalProperties": false,
+-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
++          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
+         }
+       },
+       "required": [
+@@ -824,7 +824,7 @@
+           },
+           "required": [],
+           "additionalProperties": false,
+-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
++          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
+         }
+       },
+       "required": [
+@@ -1238,7 +1238,7 @@
+           },
+           "required": [],
+           "additionalProperties": false,
+-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
++          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
+         }
+       },
+       "required": [
+@@ -1649,7 +1649,7 @@
+           },
+           "required": [],
+           "additionalProperties": false,
+-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
++          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
+         }
+       },
+       "required": [
+@@ -1975,7 +1975,7 @@
+           },
+           "required": [],
+           "additionalProperties": false,
+-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
++          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
+         }
+       },
+       "required": [
+@@ -2299,7 +2299,7 @@
+           },
+           "required": [],
+           "additionalProperties": false,
+-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
++          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
+         }
+       },
+       "required": [
+@@ -2681,7 +2681,7 @@
+           },
+           "required": [],
+           "additionalProperties": false,
+-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
++          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
+         }
+       },
+       "required": [
+@@ -3060,7 +3060,7 @@
+           },
+           "required": [],
+           "additionalProperties": false,
+-          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-two (##) headings delimit workflow fields."
++          "description": "Workflow fields stored as native description sections. Omitted values are preserved on edit; null removes a nullable field. Use level-three (###) or deeper headings inside values: native level-one (#) and level-two (##) headings delimit workflow fields; generated boundaries must round-trip."
+         }
+       },
+       "required": [
+diff --git a/src/gateway.rs b/src/gateway.rs
+index e6ff547..4ce9502 100644
+--- a/src/gateway.rs
++++ b/src/gateway.rs
+@@ -949,7 +949,7 @@ impl Gateway {
+         for value in f.as_object().into_iter().flat_map(|o| o.values()) {
+             if let Some(s) = value.as_str() {
+                 require(
+-                    crate::sections::level_two_sections(s).is_empty(),
++                    !crate::sections::has_field_boundary(s),
+                     "INVALID_INPUT",
+                     "Use level-three or deeper headings inside field values",
+                 )?;
+@@ -1493,20 +1493,8 @@ impl Gateway {
+             .unwrap()
+             .iter()
+             .map(|(key, value)| {
+-                // Native level-two headings delimit workflow fields, so source headings render deeper.
+-                let body = value
+-                    .as_str()
+-                    .unwrap()
+-                    .lines()
+-                    .map(|line| {
+-                        if line.starts_with("## ") {
+-                            format!("#{line}")
+-                        } else {
+-                            line.to_owned()
+-                        }
+-                    })
+-                    .collect::<Vec<_>>()
+-                    .join("\n");
++                // Actual H1/H2 headings delimit fields; normalize ATX/setext while retaining code.
++                let body = crate::sections::nest_field_headings(value.as_str().unwrap());
+                 (key.clone(), json!(body))
+             })
+             .collect::<serde_json::Map<_, _>>();
+diff --git a/src/records.rs b/src/records.rs
+index 2611f9b..1689352 100644
+--- a/src/records.rs
++++ b/src/records.rs
+@@ -52,21 +52,39 @@ pub fn child_id(parent: &str, purpose: &str) -> String {
+ /// Patch recognized level-two fields; preserve all unrelated prose and code bytes.
+ /// Null removes a field. Reject duplicate real managed headings before producing a patch.
+ /// String values are Markdown; other values are serialized as fenced JSON.
++/// The generated description must round-trip every intended field; escaping headings or code
++/// fences that swallow generated boundaries are refused before a caller may persist metadata.
+ pub fn patch_description(original: &str, patch: &Value) -> Result<String> {
+-    read_fields(original)?;
++    let mut expected = read_fields(original)?;
+     let mut output = original.to_owned();
+     for (key, label) in FIELDS {
+         let Some(value) = patch.get(*key) else {
+             continue;
+         };
+         let rendered = if value.is_null() {
++            expected.as_object_mut().unwrap().remove(*key);
+             String::new()
+         } else {
+             let body = value
+                 .as_str()
+                 .map(str::to_owned)
+                 .unwrap_or_else(|| format!("```json\n{value}\n```"));
+-            format!("## {label}\n{body}\n\n")
++            require(
++                !crate::sections::has_field_boundary(&body),
++                "INVALID_INPUT",
++                "Use level-three or deeper headings inside field values",
++            )?;
++            let rendered = format!("## {label}\n{body}\n\n");
++            let field = read_fields(&rendered)?;
++            require(
++                field
++                    .as_object()
++                    .is_some_and(|fields| fields.len() == 1 && fields.contains_key(*key)),
++                "INVALID_INPUT",
++                "Field content escapes its managed section",
++            )?;
++            expected[*key] = field[*key].clone();
++            rendered
+         };
+         if let Some(section) = crate::sections::level_two_sections(&output)
+             .into_iter()
+@@ -80,6 +98,11 @@ pub fn patch_description(original: &str, patch: &Value) -> Result<String> {
+             output.push_str(&rendered);
+         }
+     }
++    require(
++        read_fields(&output)? == expected,
++        "INVALID_INPUT",
++        "Field content changes generated section boundaries",
++    )?;
+     Ok(output)
+ }
+ /// Native persistence with fresh reads; no local workflow database or signed receipts.
+@@ -300,8 +323,9 @@ impl Store {
+         ))
+     }
+     /// Read the whole project hierarchy, including archived children needed for frozen membership.
+-    /// Reads one bulk page of state attachments (bounded chunks by deterministic ID) instead of
+-    /// one request per issue; a project's request count no longer scales with its issue count.
++    /// Ordinary records use bounded bulk attachment reads instead of one lookup per issue.
++    /// Each null-provenance duplicate transfer adds bounded source/target and full relation-page
++    /// corroboration reads; request count can therefore grow with those exceptions and pagination.
+     pub async fn graph(&self, project: &str) -> Result<Vec<Work>> {
+         let nodes = self
+             .pages(
+diff --git a/src/sections.rs b/src/sections.rs
+index 161e586..c765022 100644
+--- a/src/sections.rs
++++ b/src/sections.rs
+@@ -101,6 +101,42 @@ fn headings(content: &str) -> Vec<Heading> {
+     out
+ }
+ 
++/// Whether actual level-one/two headings can escape a managed field's section body.
++/// CommonMark code headings remain literal; ATX indentation and setext syntax are recognized.
++pub fn has_field_boundary(content: &str) -> bool {
++    headings(content).iter().any(|heading| heading.level <= 2)
++}
++
++/// Nest real level-one/two report headings as level three before placing reports inside fields.
++/// ATX marker changes retain inline Markdown; setext titles become ATX with folded soft breaks.
++/// Fenced and indented code bytes and every non-heading byte remain unchanged.
++pub fn nest_field_headings(content: &str) -> String {
++    let mut output = content.to_owned();
++    for heading in headings(content).into_iter().rev().filter(|h| h.level <= 2) {
++        let source = &content[heading.start..heading.body_start];
++        let trimmed = source.trim_start();
++        let markers = trimmed.bytes().take_while(|byte| *byte == b'#').count();
++        if markers == usize::from(heading.level)
++            && trimmed
++                .as_bytes()
++                .get(markers)
++                .is_none_or(u8::is_ascii_whitespace)
++        {
++            let start = heading.start + source.len() - trimmed.len();
++            output.replace_range(start..start + markers, "###");
++        } else {
++            let title = source
++                .trim_end_matches(['\r', '\n'])
++                .rsplit_once('\n')
++                .map(|(title, _)| title)
++                .unwrap_or(source);
++            let title = title.lines().map(str::trim).collect::<Vec<_>>().join(" ");
++            output.replace_range(heading.start..heading.body_start, &format!("### {title}\n"));
++        }
++    }
++    output
++}
++
+ /// Exact level-two section boundaries in the original Markdown; code headings are excluded.
+ /// The body ends at the next heading of level one or two, or at the document end.
+ pub struct FieldSection {
+diff --git a/tests/field_sections.rs b/tests/field_sections.rs
+index d399e4b..23076c2 100644
+--- a/tests/field_sections.rs
++++ b/tests/field_sections.rs
+@@ -30,3 +30,43 @@ fn duplicate_real_fields_are_rejected() {
+     assert!(read_fields(duplicate).is_err());
+     assert!(patch_description(duplicate, &json!({"result":"replace"})).is_err());
+ }
++
++/// Producers reject H1 escapes and fences that swallow a generated sibling before metadata can diverge.
++#[test]
++fn generated_fields_must_keep_their_boundaries() {
++    for body in [
++        "# Heading\noutput",
++        "intro\n# Heading\noutput",
++        "Heading\n=======\noutput",
++    ] {
++        assert!(patch_description("", &json!({"result":body})).is_err());
++    }
++    assert!(
++        patch_description(
++            "",
++            &json!({"description":"```text\nexample","work_type":"code"})
++        )
++        .is_err()
++    );
++    let original = "## Описание\nSafe\n\n## Вид работы\ncode\n";
++    assert!(patch_description(original, &json!({"description":"```text\nexample"})).is_err());
++    let valid = patch_description(
++        "",
++        &json!({"description":"```text\n# Heading\nexample\n```","work_type":"code"}),
++    )
++    .unwrap();
++    assert_eq!(read_fields(&valid).unwrap()["work_type"], "code");
++}
++
++/// Real indented ATX/setext headings nest while code and inline destinations remain exact.
++#[test]
++fn report_heading_normalization_uses_commonmark() {
++    let source = "# One\n\n  ## [Link](https://example.test/report)\n\nРезультат\n----------\nbody\n\n```md\n## Результат\nCode\n----------\n```\n\n    ## literal\n";
++    let nested = agent_tasks::sections::nest_field_headings(source);
++    assert!(!agent_tasks::sections::has_field_boundary(&nested));
++    assert!(nested.contains("### One"));
++    assert!(nested.contains("### [Link](https://example.test/report)"));
++    assert!(nested.contains("### Результат\nbody"));
++    assert!(nested.contains("```md\n## Результат\nCode\n----------\n```"));
++    assert!(nested.contains("    ## literal"));
++}
+diff --git a/tests/workflow.rs b/tests/workflow.rs
+index 17dc374..1bc6a91 100644
+--- a/tests/workflow.rs
++++ b/tests/workflow.rs
+@@ -538,6 +538,121 @@ fn init_repo(name: &str) -> std::path::PathBuf {
+     path
+ }
+ 
++/// Public create/edit producers refuse field escapes without leaving issue or attachment writes.
++#[tokio::test]
++async fn generated_description_boundaries_are_checked_before_writes() {
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let atom = f.work("atomic", &project, None).await;
++    for fields in [
++        json!({"result":"# Heading\noutput"}),
++        json!({"result":"intro\nHeading\n=======\noutput"}),
++        json!({"description":"```text\nexample"}),
++    ] {
++        let before = f.db.lock().await.issues.clone();
++        let state = f.db.lock().await.attachments.clone();
++        assert_eq!(
++            f.call("edit_atomic", json!({"id":atom,"fields":fields}))
++                .await
++                .status,
++            "blocked"
++        );
++        assert_eq!(f.db.lock().await.issues, before);
++        assert_eq!(f.db.lock().await.attachments, state);
++    }
++    let count = f.db.lock().await.issues.len();
++    assert_eq!(f.call("create_atomic",json!({"project_id":project,"team_id":f.team,"title":"Unsafe","fields":{"description":"```text\nexample"}})).await.status,"blocked");
++    assert_eq!(f.db.lock().await.issues.len(), count);
++}
++
++/// Imported report headings normalize by actual Markdown syntax; reopen clears outputs without duplicate fields.
++#[tokio::test]
++async fn commit_report_commonmark_headings_import_and_reopen_safely() {
++    let repo = init_repo("report heading fixture");
++    let reports = [
++        "# Результат\nfirst",
++        "Результат\n----------\nsecond",
++        "  ## Результат\nthird",
++    ];
++    let mut hashes = vec![];
++    for (n, result) in reports.iter().enumerate() {
++        let message = format!(
++            "fix(report): case {n}\n\nResult:\n{result}\n\n```md\n## Результат\nliteral\n```\n\nChecks:\n  ## Проверка\npassed\n"
++        );
++        git_at(
++            &repo,
++            &[
++                "-c",
++                "user.name=Fixture",
++                "-c",
++                "user.email=fixture@example.test",
++                "commit",
++                "-q",
++                "--allow-empty",
++                "-m",
++                &message,
++            ],
++        );
++        hashes.push(
++            String::from_utf8(git_at(&repo, &["rev-parse", "HEAD"]))
++                .unwrap()
++                .trim()
++                .to_owned(),
++        );
++    }
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let module = f.work("module", &project, None).await;
++    f.ok(
++        "edit_module",
++        json!({"id":module,"fields":{"repository_path":repo,"worktree":repo}}),
++    )
++    .await;
++    f.mv(&module, "In Progress").await;
++    let task = f.work("task", &project, Some(&module)).await;
++    f.ok(
++        "edit_task",
++        json!({"id":task,"fields":{"work_type":"code"}}),
++    )
++    .await;
++    f.mv(&task, "In Progress").await;
++    f.ok("record_commits", json!({"work_id":task,"commits":hashes}))
++        .await;
++    let context = f.ok("get_context", json!({"type":"issue","id":task})).await;
++    let fields =
++        agent_tasks::records::read_fields(context["issue"]["description"].as_str().unwrap())
++            .unwrap();
++    assert_eq!(fields["result"], context["fields"]["result"]);
++    assert_eq!(fields["check_result"], context["fields"]["check_result"]);
++    assert!(
++        fields["result"]
++            .as_str()
++            .unwrap()
++            .contains("### Результат\nsecond")
++    );
++    assert!(
++        fields["result"]
++            .as_str()
++            .unwrap()
++            .contains("```md\n## Результат\nliteral\n```")
++    );
++    assert!(
++        context["git_reports"][1]["original_message"]
++            .as_str()
++            .unwrap()
++            .contains(reports[1])
++    );
++    f.mv(&task, "Done").await;
++    f.mv(&task, "In Progress").await;
++    let reopened = f.ok("get_context", json!({"type":"issue","id":task})).await;
++    let parsed =
++        agent_tasks::records::read_fields(reopened["issue"]["description"].as_str().unwrap())
++            .unwrap();
++    assert!(parsed.get("result").is_none());
++    assert!(parsed.get("check_result").is_none());
++    std::fs::remove_dir_all(repo).unwrap();
++}
++
+ /// list_items(type: team) discovers native teams without a Project/Issue filter.
+ #[tokio::test]
+ async fn list_items_discovers_teams() {

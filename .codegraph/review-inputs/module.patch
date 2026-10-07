@@ -1,0 +1,2402 @@
+diff --git a/assets/mcp/overview.txt.j2 b/assets/mcp/overview.txt.j2
+index fc5267e..8b97989 100644
+--- a/assets/mcp/overview.txt.j2
++++ b/assets/mcp/overview.txt.j2
+@@ -1,6 +1,7 @@
+ {% from "common" import line, body, heading, change, module_card %}
+ Project overview{{ "\n" }}{{ line("Project", project_title) }}{{ line("Project ID", project_id) }}{{ line("Project URL", project_url) }}{{ line("Cursor", cursor) }}
+ {% if baseline_expired %}Previous cursor expired; this is a full overview.{{ "\n" }}{% endif %}
++{% if baseline_unavailable %}{{ line("Comparison unavailable", baseline_unavailable) }}Full overview; no comparison cursor was retained.{{ "\n" }}{% endif %}
+ {% if is_delta %}
+ {% if not changes %}No changes since the supplied cursor.{{ "\n" }}{% endif %}
+ {% for item in changes %}{{ heading("Change") }}{{ line("Item", item.label) }}{% if item.removed %}Removed{{ "\n" }}{% elif item.added %}Added{{ "\n" }}{% endif %}{{ line("URL", item.url) }}
+diff --git a/crates/family-delivery/src/lib.rs b/crates/family-delivery/src/lib.rs
+index ac16ed6..ccb07df 100644
+--- a/crates/family-delivery/src/lib.rs
++++ b/crates/family-delivery/src/lib.rs
+@@ -221,8 +221,22 @@ fn managed_launcher(launcher: &Path, product: &str) -> Result<bool> {
+         }
+     }
+ }
++/// Activate an already verified release through its managed launcher and current symlink.
++/// Errors clean only temporary paths created here; existing PID-named foreign paths remain.
+ #[cfg(unix)]
+ fn activate(base: &Path, manifest: &Manifest, bin_dir: &Path) -> Result<()> {
++    activate_with(base, manifest, bin_dir, |from, to| fs::rename(from, to))
++}
++
++/// Execute activation with a rename callback for deterministic native rename faults in tests.
++/// The callback must preserve rename semantics on success; no service is restarted.
++#[cfg(unix)]
++fn activate_with(
++    base: &Path,
++    manifest: &Manifest,
++    bin_dir: &Path,
++    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
++) -> Result<()> {
+     use std::os::unix::{fs::PermissionsExt, fs::symlink};
+     if !bin_dir.is_absolute() {
+         return Err("bin directory must be absolute".into());
+@@ -285,16 +299,29 @@ fn activate(base: &Path, manifest: &Manifest, bin_dir: &Path) -> Result<()> {
+         .write(true)
+         .create_new(true)
+         .open(&temp_launcher)?;
+-    file.write_all(body.as_bytes())?;
+-    file.sync_all()?;
+-    fs::set_permissions(&temp_launcher, fs::Permissions::from_mode(0o755))?;
+     let next = base.join(format!(".current-{}", std::process::id()));
+-    symlink(Path::new("releases").join(&manifest.version), &next)?;
+-    // Both versions use the same target-specific asset name. Existing services are not restarted.
+-    fs::rename(&temp_launcher, &launcher)?;
+-    fs::rename(&next, current)?;
+-    Ok(())
++    let mut own_next = false;
++    let result = (|| -> Result<()> {
++        file.write_all(body.as_bytes())?;
++        file.sync_all()?;
++        fs::set_permissions(&temp_launcher, fs::Permissions::from_mode(0o755))?;
++        symlink(Path::new("releases").join(&manifest.version), &next)?;
++        own_next = true;
++        // Both versions use the same target-specific asset name. Existing services are not restarted.
++        rename(&temp_launcher, &launcher)?;
++        rename(&next, &current)?;
++        Ok(())
++    })();
++    drop(file);
++    if result.is_err() {
++        let _ = fs::remove_file(&temp_launcher);
++        if own_next {
++            let _ = fs::remove_file(&next);
++        }
++    }
++    result
+ }
++/// Refuse activation on unsupported platforms without creating any temporary paths.
+ #[cfg(not(unix))]
+ fn activate(_: &Path, _: &Manifest, _: &Path) -> Result<()> {
+     Err("installer supports Unix only".into())
+@@ -302,7 +329,8 @@ fn activate(_: &Path, _: &Manifest, _: &Path) -> Result<()> {
+ /// Stage the release payload into the immutable versions tree under an
+ /// already-held installation lock. Every install-side refusal (conflicting
+ /// immutable version, damaged bundle) happens here, before anything at the
+-/// launcher path is touched.
++/// launcher path is touched. Errors remove only the newly created staging directory;
++/// a pre-existing staging path is refused and never removed.
+ fn stage_release(base: &Path, bundle: &Path, manifest: &Manifest) -> Result<()> {
+     let destination = base.join("releases").join(&manifest.version);
+     if fs::symlink_metadata(&destination).is_ok() {
+@@ -312,21 +340,28 @@ fn stage_release(base: &Path, bundle: &Path, manifest: &Manifest) -> Result<()>
+     } else {
+         let stage = base.join(format!(".install-{}", std::process::id()));
+         fs::create_dir(&stage)?;
+-        fs::copy(bundle.join(&manifest.binary), stage.join(&manifest.binary))?;
+-        fs::copy(
+-            bundle.join("release-manifest.json"),
+-            stage.join("release-manifest.json"),
+-        )?;
+-        #[cfg(unix)]
+-        {
+-            use std::os::unix::fs::PermissionsExt;
+-            fs::set_permissions(
+-                stage.join(&manifest.binary),
+-                fs::Permissions::from_mode(0o755),
++        let result = (|| -> Result<()> {
++            fs::copy(bundle.join(&manifest.binary), stage.join(&manifest.binary))?;
++            fs::copy(
++                bundle.join("release-manifest.json"),
++                stage.join("release-manifest.json"),
+             )?;
++            #[cfg(unix)]
++            {
++                use std::os::unix::fs::PermissionsExt;
++                fs::set_permissions(
++                    stage.join(&manifest.binary),
++                    fs::Permissions::from_mode(0o755),
++                )?;
++            }
++            verify(&stage)?;
++            fs::rename(&stage, &destination)?;
++            Ok(())
++        })();
++        if result.is_err() {
++            let _ = fs::remove_dir_all(&stage);
+         }
+-        verify(&stage)?;
+-        fs::rename(stage, &destination)?;
++        result?;
+     }
+     Ok(())
+ }
+@@ -484,6 +519,75 @@ mod tests {
+         .unwrap();
+         bundle
+     }
++
++    /// Rename failures at either activation boundary leave no owned temporary paths and remain retryable.
++    #[cfg(unix)]
++    #[test]
++    fn activation_faults_clean_only_owned_temps() {
++        for fail_at in [1, 2] {
++            let t = tempfile::tempdir().unwrap();
++            let bundle = fixture(t.path(), "0.1.0", 0);
++            let manifest = verify(&bundle).unwrap();
++            let (base, _lock) = layout(&t.path().join("home")).unwrap();
++            let bin = t.path().join("bin");
++            fs::create_dir(&bin).unwrap();
++            stage_release(&base, &bundle, &manifest).unwrap();
++            let mut step = 0;
++            assert!(
++                activate_with(&base, &manifest, &bin, |from, to| {
++                    step += 1;
++                    if step == fail_at {
++                        Err(std::io::Error::other("injected rename fault"))
++                    } else {
++                        fs::rename(from, to)
++                    }
++                })
++                .is_err()
++            );
++            assert!(
++                !bin.join(format!(".agent-test.install-{}", std::process::id()))
++                    .exists()
++            );
++            assert!(
++                fs::symlink_metadata(base.join(format!(".current-{}", std::process::id())))
++                    .is_err()
++            );
++            activate(&base, &manifest, &bin).unwrap();
++        }
++        let t = tempfile::tempdir().unwrap();
++        let bundle = fixture(t.path(), "0.1.0", 0);
++        let manifest = verify(&bundle).unwrap();
++        let (base, _lock) = layout(&t.path().join("home")).unwrap();
++        let bin = t.path().join("bin");
++        fs::create_dir(&bin).unwrap();
++        stage_release(&base, &bundle, &manifest).unwrap();
++        let foreign = base.join(format!(".current-{}", std::process::id()));
++        fs::write(&foreign, b"foreign").unwrap();
++        assert!(activate(&base, &manifest, &bin).is_err());
++        assert_eq!(fs::read(foreign).unwrap(), b"foreign");
++        assert!(
++            !bin.join(format!(".agent-test.install-{}", std::process::id()))
++                .exists()
++        );
++    }
++
++    /// Copy faults clean a newly created staging directory but never a foreign pre-existing stage.
++    #[test]
++    fn staging_faults_preserve_foreign_paths() {
++        let t = tempfile::tempdir().unwrap();
++        let bundle = fixture(t.path(), "0.1.0", 0);
++        let manifest = verify(&bundle).unwrap();
++        let (base, _lock) = layout(&t.path().join("home")).unwrap();
++        fs::remove_file(bundle.join("release-manifest.json")).unwrap();
++        let stage = base.join(format!(".install-{}", std::process::id()));
++        assert!(stage_release(&base, &bundle, &manifest).is_err());
++        assert!(!stage.exists());
++        fs::create_dir(&stage).unwrap();
++        fs::write(stage.join("foreign"), b"keep").unwrap();
++        assert!(stage_release(&base, &bundle, &manifest).is_err());
++        assert_eq!(fs::read(stage.join("foreign")).unwrap(), b"keep");
++    }
++
+     #[test]
+     fn verified_bundle() {
+         let t = tempfile::tempdir().unwrap();
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 129e079..b213e5b 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -37,6 +37,8 @@ Project creation also creates native `Runbook` and `Решения` documents. R
+ 
+ ## Public data fields
+ 
++Managed fields own recognized level-two CommonMark sections only. Fenced and indented code headings stay literal; unknown sections and prose retain their source bytes. `sections::level_two_sections` exposes exact heading/body/end spans; `records::read_fields` rejects duplicate real fields, and `patch_description` returns a validation error before changing ambiguous content. Nested prose headings should use level three or deeper.
++
+ Create calls require `request_id`, `actor`, `title`, `project_id` and `team_id`; Task also requires `parent_id`. Issue titles are stored with exactly one leading kind marker (`[EPIC]`, `[MODULE]`, `[TASK]`, `[ATOMIC]`); repeated or wrong recognized markers are normalized, unrelated markers such as `[UI]` are preserved, and a marker without a title is rejected. Project titles remain unchanged. Issue `priority` is native Linear priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. Omitted create priority is 0; omitted edit priority preserves the native value and 0 clears it. Issue fields may be prepared in Backlog/Todo. Project creation instead requires `team_id`, `title` and `description`; both `repository_path` and `repository_url` are optional for planning. A supplied path must be an absolute existing local Git checkout; the optional external URL accepts HTTP(S), including non-GitHub hosts. Legacy URL-only calls remain valid.
+ 
+ Issue create/edit calls accept a `fields` object. Omitted values are preserved; null removes a nullable value. `work_type` defaults to `code` for Module/Task/Atomic and `non_code` for Epic. Use `non_code` explicitly for document/administrative work and `integration` for an integration Atomic. Reference fields accept UUIDs or the native Linear permalinks of the agreed input matrix; permalinks are resolved and stored as normalized UUIDs. Permalink resolution rolls out with the coordinated runtime release — earlier v2 runtimes accept every UUID input unchanged.
+@@ -87,7 +89,7 @@ Module review readiness uses that same composer and still requires every child f
+ 
+ `get_overview(project_id)` loads one complete Project work graph, then bounded native activity (up to 300 work items and 100 updates). It reports active Epics with every frozen Module, active standalone Modules, Atomics, retired work, open questions and items awaiting review. Task progress comes only from `ModuleReport`; a missing frozen Module, recorded child or other native drift fails explicitly. The assigned lead is a reference to a session, not a claim that its process is running. The response contains an unpublished Markdown ProjectUpdate draft. `save_project_update` may omit `body` on creation and compose this draft during its explicit write; the caller must still select `health` and `reason`. Retries of that creation read the native update by request ID before regenerating a draft. Edits require an explicit body for exact retry behavior. Neither overview reads nor draft generation publish an update.
+ 
+-Every overview includes an observation time and opaque cursor. A later call with that cursor returns status, assignment, result, review and discussion changes plus a new cursor; an unchanged result has an empty `changes` array only after a valid comparison. The gateway retains at most 32 compact snapshots of up to 256 KiB each for 30 minutes. A restart, expiry, eviction, unknown cursor or cursor from another Project returns the full overview with `baseline_expired: true`; a first request without a cursor returns the full overview without an expiry flag. This process memory is only a comparison aid, never workflow storage. Reading an overview never writes to Linear or runs a watcher.
++Every overview includes an observation time. A compact snapshot over 256 KiB returns a full overview with a null cursor and explicit `baseline_unavailable`, without inventing an empty delta. Snapshot construction happens only in the overview read; generated ProjectUpdates do not require one. Otherwise the overview includes an opaque cursor. A later call with that cursor returns status, assignment, result, review and discussion changes plus a new cursor; an unchanged result has an empty `changes` array only after a valid comparison. The gateway retains at most 32 compact snapshots of up to 256 KiB each for 30 minutes. A restart, expiry, eviction, unknown cursor or cursor from another Project returns the full overview with `baseline_expired: true`; a first request without a cursor returns the full overview without an expiry flag. This process memory is only a comparison aid, never workflow storage. Reading an overview never writes to Linear or runs a watcher.
+ 
+ Machine data lives on one small native attachment per managed issue: kind, expected parent/project/status, known children, frozen membership, implementation/review round, current review, integration completion snapshot and any prepared write. The attachment is selected by its deterministic UUID, never by title or current placement. Native Duplicate merges transfer attachments to the original issue; `Attachment.originalIssue` preserves their originating issue and takes precedence over current `issue` when validating reads and writes. Each original issue retains its own distinct canonical record. Recorded children remain visible to guards if moved to a different native Project. No signatures or proof certificates are used. The attachment links back to the issue. Native dates/history remain available in Linear; MCP does not maintain a second time-in-status system.
+ 
+@@ -124,8 +126,12 @@ Activity comments show Kind, Role and Actor on separate lines, with optional Ses
+ 
+ `record_review` requires In Review and a Module, Atomic or Epic. It records a native comment with reviewer, summary, findings, artifact links and `accepted`/`changes_requested`. It never changes status. A Task is reviewed only within its Module.
+ 
++Before creating a review comment, `Meta.pending_review` stores its normalized request, exact body, intended stamp and captured predecessor. Only that request may resume; completion checks the predecessor again. Historical repeats return the current decision without repointing it. A legacy comment whose save was interrupted is adopted only for a clean current In Review stamp; with a predecessor, its native creation time must be strictly newer. Equal or unavailable times conflict. Readers accept attachment schemas 2 and 3; new ordinary work remains schema 2, storing a review intent upgrades to 3, and later writes never downgrade 3. Older schema-two runtimes reject schema 3. Project creation replay reads every native team page and requires exactly the requested single team.
++
+ The orchestrator returns work to In Progress after changes are requested. A new work round clears its current results/checks/artifacts and current review. Earlier native reports and history remain. New outputs and a new review are required. Editing reviewed content requires reopening; a Module's `merge_report` can be added after positive review without invalidating it.
+ 
++Reopening In Review/Done work validates and adopts the current native description before start guards. Unknown sections and literal code stay exact; new-round outputs are cleared from that adopted source, and the round/revision changes once. Structural drift and invalid fields still block. Explicit active description adoption through `fields: {}` invalidates content identity; title/priority or unchanged-parent presentation edits keep their existing identity. Changing a child's status to Canceled/Duplicate requires an In Progress parent without drift, just as closure does.
++
+ PR links and merge facts remain trusted agent reports. MCP reads local commits but does not contact a remote host to verify a PR or merge. A local repository does not replace the Module's real PR, review or merge requirements. Shared bearer clients are trusted; reported roles are workflow attribution, not separate authorization principals.
+ 
+ ## Integration Atomic
+@@ -198,8 +204,8 @@ Search uses Linear's native ranking and indexing; it does not guarantee
+ exhaustive substring retrieval or immediate discovery of a newly written
+ opaque token. Use a known Document URL with `get_context` for exact retrieval.
+ 
+-File operations are three focused tools: `upload_file` reads one local file
+-(host-side absolute path, bounded to 10,000,000 bytes), reserves a
++File operations are three focused tools: `upload_file` reads one opened local file
++(host-side absolute path, at most 10,000,001 captured bytes before rejecting an oversize stream), computes size/digest from those bytes, and reserves a
+ deterministic native attachment ID per issue/request, and compares replay
+ intent (filename, content type, size, digest, title, note) before treating a
+ retry as identical; changed intent is `REQUEST_CONFLICT`. `list_files` returns
+@@ -207,7 +213,7 @@ only user artifacts for one work item, excluding internal workflow
+ attachments. `get_file` resolves and validates artifact ownership/type,
+ downloads through the canonical authenticated asset URL while verifying the
+ bytes against the digest recorded at upload time, writes through a sibling
+-temporary file, and never silently overwrites a different existing file at
++temporary file, removes only its own temporary sibling on write/publication error, and never silently overwrites a different existing file at
+ the same destination (`FILE_EXISTS` on conflict, `replayed: true` only for
+ byte-identical content). None of these three tools returns binary content, a
+ signed URL or a secret in its text response; artifact attachments live in
+diff --git a/docs/recovery.md b/docs/recovery.md
+index 0026b3f..b192e66 100644
+--- a/docs/recovery.md
++++ b/docs/recovery.md
+@@ -5,15 +5,24 @@ Keep the `request_id` and the complete original arguments until the outcome is k
+ 1. Keep one gateway writer. Restart it on the same fixed loopback port if it stopped.
+ 2. For an existing issue, use `get_context` with `type: issue`. A prepared update includes its original tool request and intended native update.
+ 3. Retry that same tool with the same `request_id` and arguments. A different request cannot replace a pending operation.
++
+    An already applied target is finalized without reapplying the mutation. If native fields differ from both the saved source and intended target, MCP reports a conflict and preserves the manual content. Resolve that conflict explicitly in Linear before retrying; reads never restore old content.
+    Linear's `-` to `*` list serialization is presentation-equivalent, while changed text or link destinations still conflict. An older pending Duplicate transition containing only `stateId` is replayed through the native duplicate relation operation using its saved `duplicate_of` field. Preserve all original arguments and metadata; recovery does not need a replacement request or a direct metadata edit.
+ 4. For interrupted creates, retry the original create call. The same UUID addresses the same Project/Issue/Document. Default project documents have repeatable subordinate IDs. Existing objects are checked before reuse.
+ 5. Review creation uses its request UUID as the native comment UUID. A retry reuses the matching report instead of posting another comment.
+ 
++Review publication also persists its request and predecessor before comment creation. If its response is lost, retry the displayed `record_review` arguments: a cold restart resumes that intent, confirms the comment and finalizes only the captured predecessor. An earlier report retry is historical and never replaces a newer decision. Legacy comment-only recovery requires a matching current stamp and, when a predecessor exists, strictly newer native creation time; ambiguous order is a conflict.
++
+ Edits to Projects/Documents are native partial updates. Repeat the same field assignment after checking context if their result was uncertain. Do not replay an old edit after newer intentional edits; use a fresh request for a new intention.
+ 
+-Manual state violations are not automatically rolled back. Restore changed parent/project/type label in Linear. An explicit return to In Progress can recover an externally changed workflow status and starts a fresh result/review round. A description-only change is adopted through an explicit edit, preserving unrelated sections.
++Manual state violations are not automatically rolled back. Restore changed parent/project/type label in Linear. Returning In Review/Done work to In Progress validates and adopts a description-only change, preserving unrelated prose and code while clearing new-round outputs and invalidating the round/revision once. Invalid fields and structural drift block reopening. An active edit with explicit fields (including `{}`) adopts native description drift as a content edit; title/priority-only calls preserve it without adoption. Retiring a child under a reviewed/Done parent requires reopening that parent first. A rejected review directs the orchestrator to `move_status(In Progress)` before implementation continues.
+ 
+ If the object or its state attachment was deleted, do not silently recreate a different work item. Inspect the preserved native history and the original request. API authentication, rate limits, malformed/partial responses and missing objects remain distinct failures.
+ 
+ Only the transport configuration contains a secret bearer credential. Workflow state is in Linear; no signing key or local workflow database needs recovery.
++
++## Queued calls and gateway interruption
++
++One writer lock serializes entire calls, including provider collection. Each provider HTTP request has a 30-second timeout; there is no total tool-call timeout, so a caller's deadline can expire while queued. A timed-out write remains uncertain: read its native context and retry its exact saved request. Keep destructive batches bounded by measured request time and the caller's deadline; collection time also consumes that budget.
++
++The default stdio Bridge can resume discovery after a gateway is terminated with SIGTERM and restarted on the same endpoint. An in-flight request can return `Gateway request failed; inspect any pending mutation before retrying`; this does not prove whether its provider effect occurred. Restart/reconnect if discovery cannot resume, then reconcile the persisted intent. `cargo test --test runtime_risks -- --nocapture` measures queue/client deadlines and actual product stdio with a separate production-writer test process and loopback provider. Its timing is synthetic evidence, not a live Linear performance or host timeout guarantee.
+diff --git a/docs/releasing.md b/docs/releasing.md
+index c5e0f56..0905533 100644
+--- a/docs/releasing.md
++++ b/docs/releasing.md
+@@ -154,6 +154,8 @@ same bytes is a no-op; different bytes are refused. Rollback:
+ `agent-tasks releases use <version> --home <home> --bin-dir <bin>`.
+ Rolling back code never undoes Linear-side changes.
+ 
++Activation and staging errors remove only the temporary launcher, current symlink or staging directory successfully created by that operation. Pre-existing PID-named paths are refused and preserved. Failed activation remains retryable; no service restart or host configuration change is part of cleanup.
++
+ The rename to `agent-tasks` does not touch the existing `agent-tasks-linear`
+ 0.5 installation: it is a separately named launcher and home, left running
+ until the owner has verified the new install and chooses to retire it.
+diff --git a/schemas/tools.json b/schemas/tools.json
+index d81ad28..86b410e 100644
+--- a/schemas/tools.json
++++ b/schemas/tools.json
+@@ -3148,7 +3148,7 @@
+   },
+   {
+     "name": "get_overview",
+-    "description": "Read one complete Project overview — active Epics with frozen Modules, standalone Modules, Atomics, retired work, open questions and work awaiting review — plus an unpublished ProjectUpdate draft and a fresh opaque cursor. A later call with that cursor returns only the changes and a new cursor; a lost, expired or foreign cursor returns the full overview with baseline_expired=true instead of guessing. Incomplete membership or native drift fails explicitly. Read-only; never publishes an update or starts work. Example: {\"project_id\":\"https://linear.app/team/project/passport\"}",
++    "description": "Read one complete Project overview — active Epics with frozen Modules, standalone Modules, Atomics, retired work, open questions and work awaiting review — plus an unpublished ProjectUpdate draft. Comparison snapshots over 256 KiB return the full overview with cursor=null and baseline_unavailable; no empty delta is invented. Otherwise a fresh opaque cursor is retained. A later call with that cursor returns only the changes and a new cursor; a lost, expired or foreign cursor returns the full overview with baseline_expired=true instead of guessing. Incomplete membership or native drift fails explicitly. Read-only; never publishes an update or starts work. Example: {\"project_id\":\"https://linear.app/team/project/passport\"}",
+     "inputSchema": {
+       "type": "object",
+       "properties": {
+@@ -3670,7 +3670,7 @@
+   },
+   {
+     "name": "move_status",
+-    "description": "Check or perform one guarded status transition. check_only=true is a read-only preview returning allowed/conditions and writes nothing. Start parents before children and close children before parents; no transition ever cascades to children, and blocking conditions are reported explicitly from fresh native state. Retry an uncertain transition with identical request_id and arguments. Example: {\"request_id\":\"00000000-0000-4000-8000-000000000009\",\"actor\":\"codex:session\",\"actor_role\":\"worker\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"status\":\"In Progress\",\"check_only\":true}",
++    "description": "Check or perform one guarded status transition. check_only=true is a read-only preview returning allowed/conditions and writes nothing. Returning In Review/Done work to In Progress validates and adopts manual description-only changes while preserving unknown prose; structural drift blocks. Retirement requires an active clean parent. Start parents before children and close children before parents; no transition ever cascades to children, and blocking conditions are reported explicitly from fresh native state. Retry an uncertain transition with identical request_id and arguments. Example: {\"request_id\":\"00000000-0000-4000-8000-000000000009\",\"actor\":\"codex:session\",\"actor_role\":\"worker\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"status\":\"In Progress\",\"check_only\":true}",
+     "inputSchema": {
+       "type": "object",
+       "properties": {
+@@ -3744,7 +3744,7 @@
+   },
+   {
+     "name": "record_review",
+-    "description": "Record an independent reviewer report for the current round of one In Review Module, Atomic or Epic as a native review comment: reviewer, verdict accepted/changes_requested, summary, findings and artifact links. Returns the comment permalink and never changes status — the orchestrator decides closure. Tasks have no separate review; a Task is reviewed within its Module. Example: {\"request_id\":\"00000000-0000-4000-8000-00000000000a\",\"actor\":\"codex:reviewer\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"reviewer\":\"codex:reviewer\",\"verdict\":\"accepted\",\"summary\":\"Matches the contract.\",\"findings\":\"No blockers.\",\"artifacts\":[\"https://example.com/report.txt\"]}",
++    "description": "Record an independent reviewer report for the current round of one In Review Module, Atomic or Epic as a native review comment: reviewer, verdict accepted/changes_requested, summary, findings and artifact links. Persists review intent before publication; identical retries resume it, historical reports never replace newer decisions, and legacy ordering ambiguity conflicts. Returns the comment permalink and never changes status — the orchestrator decides closure. Tasks have no separate review; a Task is reviewed within its Module. Example: {\"request_id\":\"00000000-0000-4000-8000-00000000000a\",\"actor\":\"codex:reviewer\",\"id\":\"https://linear.app/team/issue/TEAM-7/module-title\",\"reviewer\":\"codex:reviewer\",\"verdict\":\"accepted\",\"summary\":\"Matches the contract.\",\"findings\":\"No blockers.\",\"artifacts\":[\"https://example.com/report.txt\"]}",
+     "inputSchema": {
+       "type": "object",
+       "properties": {
+diff --git a/src/context.rs b/src/context.rs
+index fc9ceb4..f2374f2 100644
+--- a/src/context.rs
++++ b/src/context.rs
+@@ -614,11 +614,12 @@ fn preview(value: Option<&str>) -> Option<String> {
+ /// `project` contributes displayed identity; work includes completion, assignments, field digests
+ /// and current-round source/review references. Activity includes questions, replies, resolution and formal review state. The
+ /// returned map is deterministic and never serves as authoritative workflow state.
++/// Returns None over 256 KiB so full overview/draft generation remains usable; invalid work fails.
+ pub fn compact_snapshot(
+     project: &Value,
+     graph: &[Work],
+     activity: &BTreeMap<String, Vec<ActivityRecord>>,
+-) -> Result<BTreeMap<String, Value>> {
++) -> Result<Option<BTreeMap<String, Value>>> {
+     let mut snapshot = BTreeMap::new();
+     snapshot.insert(
+         "project".into(),
+@@ -654,15 +655,10 @@ pub fn compact_snapshot(
+             }));
+         }
+     }
+-    require(
+-        serde_json::to_vec(&snapshot)
+-            .map(|bytes| bytes.len())
+-            .unwrap_or(usize::MAX)
+-            <= MAX_SNAPSHOT_BYTES,
+-        "INCOMPLETE_DATA",
+-        "Comparison snapshot exceeds 256 KiB",
+-    )?;
+-    Ok(snapshot)
++    let fits = serde_json::to_vec(&snapshot)
++        .map(|bytes| bytes.len() <= MAX_SNAPSHOT_BYTES)
++        .unwrap_or(false);
++    Ok(fits.then_some(snapshot))
+ }
+ 
+ /// One opaque previous observation bound to its Project and process lifetime.
+diff --git a/src/gateway.rs b/src/gateway.rs
+index fdbad7a..e6ff547 100644
+--- a/src/gateway.rs
++++ b/src/gateway.rs
+@@ -463,8 +463,17 @@ impl Gateway {
+         let content = patch_description(
+             "",
+             &json!({"description":description,"repository_path":a["repository_path"],"repository_url":a["repository_url"]}),
+-        );
++        )?;
+         let project = if let Some(p) = self.store.optional("QProject", "project", id).await? {
++            let teams = self
++                .store
++                .pages("QProjectTeams", "/project/teams", json!({"id":id}))
++                .await?;
++            require(
++                teams.len() == 1 && teams[0]["id"] == a["team_id"],
++                "REQUEST_CONFLICT",
++                "Existing Project team membership differs from this request",
++            )?;
+             require(
+                 p["name"] == title
+                     && markdown_equivalent(&content, p["content"].as_str().unwrap_or("")),
+@@ -570,7 +579,7 @@ impl Gateway {
+             input["content"] = json!(patch_description(
+                 p["content"].as_str().unwrap_or(""),
+                 &fields
+-            ));
++            )?);
+         }
+         require(
+             !input.as_object().unwrap().is_empty(),
+@@ -835,7 +844,7 @@ impl Gateway {
+             crate::git::validate_repository(path)?;
+         }
+         Self::check_fields(kind, &fields, parent, &graph)?;
+-        let description = patch_description("", &fields);
++        let description = patch_description("", &fields)?;
+         let native = if let Some(existing) = self.store.optional("QIssue", "issue", id).await? {
+             require(
+                 existing["project"]["id"] == project
+@@ -884,6 +893,7 @@ impl Gateway {
+             creation: a.clone(),
+             last_request: None,
+             pending: None,
++            pending_review: None,
+         };
+         self.store
+             .save(&native, &meta)
+@@ -922,8 +932,15 @@ impl Gateway {
+         }
+         self.store.save(&w.native, &m).await
+     }
+-    /// Validate cross-field references before any write, without requiring readiness in Backlog/Todo.
+-    fn check_fields(kind: Kind, f: &Value, parent: Option<&str>, graph: &[Work]) -> Result<()> {
++    /// Validate cross-field references and true nested headings before any write.
++    /// Code headings remain literal; field readiness is checked separately when starting.
++    /// Shared by edits/creates and description adoption; invalid ownership/type references fail.
++    pub(crate) fn check_fields(
++        kind: Kind,
++        f: &Value,
++        parent: Option<&str>,
++        graph: &[Work],
++    ) -> Result<()> {
+         require(
+             f["work_type"].is_string(),
+             "INVALID_INPUT",
+@@ -932,7 +949,7 @@ impl Gateway {
+         for value in f.as_object().into_iter().flat_map(|o| o.values()) {
+             if let Some(s) = value.as_str() {
+                 require(
+-                    !s.lines().any(|line| line.starts_with("## ")),
++                    crate::sections::level_two_sections(s).is_empty(),
+                     "INVALID_INPUT",
+                     "Use level-three or deeper headings inside field values",
+                 )?;
+@@ -1026,6 +1043,11 @@ impl Gateway {
+     /// Continue only the identical prepared write; another request must resolve the uncertainty first.
+     async fn resume(&self, w: &Work, request: &Value) -> Result<Option<Value>> {
+         let m = w.managed()?;
++        require(
++            m.pending_review.is_none(),
++            "PENDING_OPERATION",
++            "Retry the pending review request with unchanged arguments first",
++        )?;
+         if let Some(p) = &m.pending {
+             require(
+                 p.request == *request,
+@@ -1225,7 +1247,10 @@ impl Gateway {
+             .map_err(Fault::uncertain)
+     }
+     /// Apply one managed issue edit for `kind`; missing title normalizes the existing title, missing priority preserves it, and priority zero clears it.
+-    /// Empty or title/priority-only edits preserve native descriptions, stored fields and review identity in any status, without validating or adopting legacy content; requirement/parent edits validate content, invalidate review and require reopening reviewed work, except the existing Module merge-report allowance. Returns the confirmed issue outcome or a safe conflict/write fault.
++    /// Empty calls and title/priority-only edits preserve descriptions and review identity without adopting legacy content.
++    /// Explicit fields (including an empty object) adopt changed native descriptions as content edits;
++    /// requirement/parent changes invalidate review and require reopening reviewed work, except Module merge reports.
++    /// Returns the confirmed outcome or a safe validation/conflict/write fault.
+     /// Explicit repository_path edits validate the local Git checkout before preparing a write.
+     async fn edit_work(&self, kind: Kind, a: &Value) -> Result<Value> {
+         let (w, graph) = self
+@@ -1256,7 +1281,12 @@ impl Gateway {
+         };
+         let parent_changed =
+             parent_supplied && resolved_parent.as_deref() != m.parent_id.as_deref();
+-        let presentation_only = patch.as_object().is_some_and(|o| o.is_empty()) && !parent_changed;
++        let presentation_only = patch.as_object().is_some_and(|o| o.is_empty())
++            && !parent_changed
++            && (a.get("fields").is_none()
++                || a.get("title").is_some()
++                || a.get("priority").is_some()
++                || parent_supplied);
+         let mut fields = if w.native["description"] == m.description || presentation_only {
+             m.fields.clone()
+         } else {
+@@ -1270,7 +1300,9 @@ impl Gateway {
+             && a.get("priority").is_none()
+             && !parent_supplied
+             && w.native["description"] == m.description;
+-        let content_edit = !patch.as_object().unwrap().is_empty() || parent_changed;
++        let content_edit = !patch.as_object().unwrap().is_empty()
++            || parent_changed
++            || (!presentation_only && w.native["description"] != m.description);
+         require(
+             !matches!(m.status, Status::InReview | Status::Done) || merge_only || !content_edit,
+             "REOPEN_REQUIRED",
+@@ -1324,7 +1356,7 @@ impl Gateway {
+         next.fields = fields;
+         if !presentation_only {
+             next.description =
+-                patch_description(w.native["description"].as_str().unwrap_or(""), &patch);
++                patch_description(w.native["description"].as_str().unwrap_or(""), &patch)?;
+         }
+         if content_edit && !merge_only {
+             next.revision += 1;
+@@ -1490,7 +1522,7 @@ impl Gateway {
+             next.fields[key] = value.clone();
+         }
+         next.description =
+-            patch_description(w.native["description"].as_str().unwrap_or(""), &patch);
++            patch_description(w.native["description"].as_str().unwrap_or(""), &patch)?;
+         if changed {
+             next.revision += 1;
+             next.review = None;
+@@ -1504,6 +1536,8 @@ impl Gateway {
+     }
+ 
+     /// Guard and explicitly move work; check_only never persists intent, labels or changes.
++    /// Reopening reviewed/Done work validates and adopts the current native description,
++    /// preserves unknown prose and invalidates the round once; structural drift still refuses.
+     /// Module submission stores the same derived current-child result used by context/readiness,
+     /// preserving a real PR requirement and binding review to the resulting content revision.
+     async fn move_status(&self, a: &Value) -> Result<Value> {
+@@ -1519,18 +1553,39 @@ impl Gateway {
+                 .with_guidance(v, w.id(), &graph, text(a, "actor_role")?)
+                 .await);
+         }
+-        let errors = rules::transition(&w, &graph, target, text(a, "actor_role")?);
++        let adopted;
++        let w = if target == Status::InProgress
++            && matches!(w.managed()?.status, Status::InReview | Status::Done)
++            && w.native["description"] != w.managed()?.description
++        {
++            adopted = match rules::adopt_description(&w, &graph) {
++                Ok(candidate) => candidate,
++                Err(_) if a["check_only"] == true => {
++                    return Ok(crate::guidance::preview_effects(
++                        &w,
++                        &graph,
++                        target,
++                        text(a, "actor_role")?,
++                    ));
++                }
++                Err(error) => return Err(error),
++            };
++            &adopted
++        } else {
++            &w
++        };
++        let errors = rules::transition(w, &graph, target, text(a, "actor_role")?);
+         if a["check_only"] == true {
+             // The preview shares the exact guards and, when allowed, the exact effect plan
+             // the executing transition follows; it performs no write.
+             let mut preview =
+-                crate::guidance::preview_effects(&w, &graph, target, text(a, "actor_role")?);
++                crate::guidance::preview_effects(w, &graph, target, text(a, "actor_role")?);
+             preview["status"] = json!(target);
+             return Ok(preview);
+         }
+         rules::enforce(errors)?;
+         let m = w.managed()?;
+-        if w.status()? == target && m.status == target && !rules::restart_integration(&w, &graph) {
++        if w.status()? == target && m.status == target && !rules::restart_integration(w, &graph) {
+             return Ok(self
+                 .with_guidance(
+                     json!({"issue":w.native,"unchanged":true}),
+@@ -1541,7 +1596,7 @@ impl Gateway {
+                 .await);
+         }
+         if target == Status::Duplicate {
+-            self.duplicate_target(&w, &m.fields).await?;
++            self.duplicate_target(w, &m.fields).await?;
+         }
+         let states = self
+             .states(w.native["team"]["id"].as_str().unwrap())
+@@ -1551,7 +1606,7 @@ impl Gateway {
+         next.status = target;
+         let mut input = json!({"stateId":state});
+         if target == Status::InReview && m.kind == Kind::Module {
+-            let report = crate::reports::module_report(&w, &graph)?;
++            let report = crate::reports::module_report(w, &graph)?;
+             let patch = json!({"result":report.summary,"check_result":report.reported_checks});
+             self.catalog.validate_fields(Kind::Module, &patch)?;
+             if next.fields["result"] != patch["result"]
+@@ -1560,7 +1615,7 @@ impl Gateway {
+                 next.fields["result"] = patch["result"].clone();
+                 next.fields["check_result"] = patch["check_result"].clone();
+                 next.description =
+-                    patch_description(w.native["description"].as_str().unwrap_or(""), &patch);
++                    patch_description(w.native["description"].as_str().unwrap_or(""), &patch)?;
+                 next.revision += 1;
+                 next.review = None;
+                 input["description"] = json!(next.description);
+@@ -1570,6 +1625,7 @@ impl Gateway {
+             next.round += 1;
+             next.review = None;
+             next.completed_at = None;
++            next.integration.clear();
+             if next.kind == Kind::Epic && next.frozen_modules.is_none() {
+                 next.frozen_modules = Some(
+                     rules::children(&graph, w.id())
+@@ -1587,7 +1643,7 @@ impl Gateway {
+                 for k in remove.as_object().unwrap().keys() {
+                     next.fields.as_object_mut().unwrap().remove(k);
+                 }
+-                next.description = patch_description(&m.description, &remove);
++                next.description = patch_description(&m.description, &remove)?;
+                 input["description"] = json!(next.description);
+                 next.revision += 1;
+             }
+@@ -1600,7 +1656,7 @@ impl Gateway {
+                     .collect();
+             }
+         }
+-        let confirmed = self.update(&w, next, input, request).await?;
++        let confirmed = self.update(w, next, input, request).await?;
+         Ok(self
+             .with_guidance(confirmed, w.id(), &graph, text(a, "actor_role")?)
+             .await)
+@@ -1903,41 +1959,20 @@ impl Gateway {
+         Ok(json!({"comment":changed,"replayed":false}))
+     }
+ 
+-    /// Persist a native review activity comment and current-round decision, returning its
+-    /// permalink without implicitly transitioning work or adding Task review.
++    /// Publish a review through a schema-three intent before its native comment side effect.
++    /// Identical retries resume the captured predecessor; older reports return historical NOOP.
++    /// Legacy comments recover only at the current clean stamp and with strictly newer native time.
++    /// No review moves work status; competing mutations must finish this pending request first.
+     async fn review(&self, a: &Value) -> Result<Value> {
+         let (w, graph) = self
+             .loaded(&self.resolve("issue", text(a, "id")?).await?)
+             .await?;
+         let m = w.managed()?;
+         let request = Self::request("record_review", a);
+-        if self.resume(&w, &request).await?.is_some() {
+-            let restored = self.store.work(w.id()).await.map_err(Fault::uncertain)?;
+-            let comment = self
+-                .store
+-                .linear
+-                .object("QComment", "comment", text(a, "request_id")?)
+-                .await
+-                .map_err(Fault::uncertain)?;
+-            return Ok(self
+-                .with_guidance(
+-                    json!({"review":restored.managed()?.review,"issue_id":w.id(),"comment":comment,"url":comment["url"],"replayed":true}),
+-                    w.id(),
+-                    &graph,
+-                    "reviewer",
+-                )
+-                .await);
+-        }
+-        rules::enforce(rules::discrepancies(&w, &graph))?;
+-        require(
+-            m.kind != Kind::Task,
+-            "NO_TASK_REVIEW",
+-            "Review the entire Module instead",
+-        )?;
+         require(
+-            w.status()? == Status::InReview,
+-            "NOT_IN_REVIEW",
+-            "Move this work to In Review first",
++            m.pending.is_none(),
++            "PENDING_OPERATION",
++            "Retry the pending native write first",
+         )?;
+         let id = text(a, "request_id")?;
+         let content = format!(
+@@ -1948,51 +1983,183 @@ impl Gateway {
+                 .filter(|v| !v.trim().is_empty())
+                 .unwrap_or("None")
+         );
+-        let body = crate::activity::render(
+-            "review",
+-            "reviewer",
+-            text(a, "actor")?,
+-            &content,
+-            &json!({"reviewer":a["reviewer"],"session":a["session"],"verdict":a["verdict"],
+-                "round":m.round,"revision":m.revision,"source_links":a["artifacts"]}),
+-        )?;
+-        if let Some(comment) = self.store.optional("QComment", "comment", id).await? {
++        let body_at = |round, revision| {
++            crate::activity::render(
++                "review",
++                "reviewer",
++                text(a, "actor")?,
++                &content,
++                &json!({"reviewer":a["reviewer"],"session":a["session"],"verdict":a["verdict"],
++                "round":round,"revision":revision,"source_links":a["artifacts"]}),
++            )
++        };
++        let mut existing = self.store.optional("QComment", "comment", id).await?;
++        let intent = if let Some(pending) = &m.pending_review {
+             require(
+-                comment["issue"]["id"] == w.id()
+-                    && markdown_equivalent(&body, comment["body"].as_str().unwrap_or("")),
+-                "REQUEST_CONFLICT",
+-                "Review request_id already names another report",
++                pending.request == request,
++                "PENDING_OPERATION",
++                "Retry the pending review with unchanged arguments",
++            )?;
++            require(
++                m.review == pending.predecessor
++                    && m.round == pending.review.round
++                    && m.revision == pending.review.revision,
++                "PENDING_CONFLICT",
++                "Review predecessor or content stamp changed",
+             )?;
++            pending.clone()
+         } else {
++            if let Some(comment) = &existing {
++                let activity = crate::activity::record(comment, None)?;
++                let round = activity.round.ok_or_else(|| {
++                    Fault::new("REQUEST_CONFLICT", "Review comment has no original round")
++                })?;
++                let revision = activity.revision.ok_or_else(|| {
++                    Fault::new(
++                        "REQUEST_CONFLICT",
++                        "Review comment has no original revision",
++                    )
++                })?;
++                require(
++                    comment["issue"]["id"] == w.id()
++                        && markdown_equivalent(
++                            &body_at(round, revision)?,
++                            comment["body"].as_str().unwrap_or(""),
++                        ),
++                    "REQUEST_CONFLICT",
++                    "Review request_id already names another report",
++                )?;
++                let mut historical = round != m.round || revision != m.revision;
++                if let Some(previous) = &m.review {
++                    if previous.id == id {
++                        historical = true;
++                    } else if !historical {
++                        let predecessor = self
++                            .store
++                            .linear
++                            .object("QComment", "comment", &previous.id)
++                            .await?;
++                        let created = comment["createdAt"]
++                            .as_str()
++                            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
++                        let before = predecessor["createdAt"]
++                            .as_str()
++                            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
++                        require(
++                            created.is_some() && before.is_some(),
++                            "REQUEST_CONFLICT",
++                            "Review order is unknown",
++                        )?;
++                        if created < before {
++                            historical = true;
++                        } else {
++                            require(
++                                created > before,
++                                "REQUEST_CONFLICT",
++                                "Review timestamps do not establish order",
++                            )?;
++                        }
++                    }
++                }
++                if historical {
++                    return Ok(self
++                        .with_guidance(
++                            json!({"review":m.review,"issue_id":w.id(),"comment":comment,
++                        "url":comment["url"],"replayed":true,"historical":true}),
++                            w.id(),
++                            &graph,
++                            "reviewer",
++                        )
++                        .await);
++                }
++            }
++            crate::model::PendingReview {
++                request: request.clone(),
++                predecessor: m.review.clone(),
++                review: Review {
++                    id: id.into(),
++                    round: m.round,
++                    revision: m.revision,
++                    accepted: a["verdict"] == "accepted",
++                },
++                body: body_at(m.round, m.revision)?,
++            }
++        };
++        let mut guarded = w.clone();
++        if let Some(meta) = &mut guarded.meta {
++            meta.pending_review = None;
++        }
++        rules::enforce(rules::discrepancies(&guarded, &graph))?;
++        require(
++            m.kind != Kind::Task,
++            "NO_TASK_REVIEW",
++            "Review the entire Module instead",
++        )?;
++        require(
++            w.status()? == Status::InReview,
++            "NOT_IN_REVIEW",
++            "Move this work to In Review first",
++        )?;
++        if m.pending_review.is_none() && existing.is_none() {
++            let mut prepared = m.clone();
++            prepared.schema = 3;
++            prepared.pending_review = Some(intent.clone());
++            self.store
++                .save(&w.native, &prepared)
++                .await
++                .map_err(Fault::uncertain)?;
++        }
++        if existing.is_none() {
+             self.store
+                 .linear
+                 .call(
+                     "MCreateComment",
+-                    json!({"input":{"id":id,"issueId":w.id(),"body":body}}),
++                    json!({"input":{"id":id,"issueId":w.id(),"body":intent.body}}),
+                 )
+                 .await?;
++            existing = Some(
++                self.store
++                    .linear
++                    .object("QComment", "comment", id)
++                    .await
++                    .map_err(Fault::uncertain)?,
++            );
+         }
+-        let comment = self
+-            .store
+-            .linear
+-            .object("QComment", "comment", id)
+-            .await
+-            .map_err(Fault::uncertain)?;
+-        let mut next = m.clone();
+-        next.review = Some(Review {
+-            id: id.into(),
+-            round: m.round,
+-            revision: m.revision,
+-            accepted: a["verdict"] == "accepted",
+-        });
++        let comment =
++            existing.ok_or_else(|| Fault::new("RECORD_MISSING", "Review comment disappeared"))?;
++        require(
++            comment["issue"]["id"] == w.id()
++                && markdown_equivalent(&intent.body, comment["body"].as_str().unwrap_or("")),
++            "NATIVE_STATE_MISMATCH",
++            "Linear did not confirm the review body",
++        )
++        .map_err(Fault::uncertain)?;
++        let fresh = self.store.work(w.id()).await.map_err(Fault::uncertain)?;
++        let fresh_meta = fresh.managed()?;
++        require(
++            fresh_meta.review == intent.predecessor
++                && fresh_meta.round == intent.review.round
++                && fresh_meta.revision == intent.review.revision,
++            "PENDING_CONFLICT",
++            "Review predecessor changed before finalization",
++        )?;
++        let mut clean = fresh.clone();
++        if let Some(meta) = &mut clean.meta {
++            meta.pending_review = None;
++        }
++        rules::enforce(rules::discrepancies(&clean, &graph))?;
++        let mut next = fresh_meta.clone();
++        next.review = Some(intent.review);
++        next.pending_review = None;
+         next.last_request = Some(request);
+         self.store
+-            .save(&w.native, &next)
++            .save(&fresh.native, &next)
+             .await
+             .map_err(Fault::uncertain)?;
+         Ok(self
+             .with_guidance(
+-                json!({"review":next.review,"issue_id":w.id(),"comment":comment,"url":comment["url"],"replayed":false}),
++                json!({"review":next.review,"issue_id":w.id(),"comment":comment,
++            "url":comment["url"],"replayed":false}),
+                 w.id(),
+                 &graph,
+                 "reviewer",
+@@ -2000,8 +2167,17 @@ impl Gateway {
+             .await)
+     }
+     /// Load one complete Project graph and bounded native activity, then compose a read-only view.
+-    /// The limit prevents a large Project from turning a single overview into unbounded API reads.
+-    async fn overview_data(&self, project_id: &str) -> Result<(Value, BTreeMap<String, Value>)> {
++    /// Returns the full view, native Project, complete graph and bounded activity for optional comparison.
++    /// The limit prevents unbounded API reads; generated updates use only the view, never a snapshot.
++    async fn overview_data(
++        &self,
++        project_id: &str,
++    ) -> Result<(
++        Value,
++        Value,
++        Vec<Work>,
++        BTreeMap<String, Vec<crate::activity::ActivityRecord>>,
++    )> {
+         let project = self.project(project_id).await?;
+         let graph = self.store.graph(project_id).await?;
+         require(
+@@ -2046,16 +2222,23 @@ impl Gateway {
+             activity.insert(id.to_owned(), records);
+         }
+         let overview = crate::context::project_overview(&project, &graph, &activity)?;
+-        let snapshot = crate::context::compact_snapshot(&project, &graph, &activity)?;
+-        Ok((overview, snapshot))
++        Ok((overview, project, graph, activity))
+     }
+ 
+     /// Return a full overview or a same-Project delta and a fresh opaque comparison point.
+     /// Missing process-local baselines fall back to a full response with baseline_expired=true;
+-    /// neither branch writes to Linear or launches background activity.
++    /// Oversized snapshots return the full view with null cursor and baseline_unavailable.
++    /// Neither branch writes to Linear or launches background activity.
+     async fn overview(&self, a: &Value) -> Result<Value> {
+         let project_id = self.resolve("project", text(a, "project_id")?).await?;
+-        let (mut full, snapshot) = self.overview_data(&project_id).await?;
++        let (mut full, project, graph, activity) = self.overview_data(&project_id).await?;
++        let Some(snapshot) = crate::context::compact_snapshot(&project, &graph, &activity)? else {
++            full["observed_at"] = json!(chrono::Utc::now().to_rfc3339());
++            full["cursor"] = Value::Null;
++            full["baseline_expired"] = json!(false);
++            full["baseline_unavailable"] = json!("Comparison snapshot exceeds 256 KiB");
++            return Ok(full);
++        };
+         let comparison = self
+             .baselines
+             .lock()
+diff --git a/src/gateway/artifacts.rs b/src/gateway/artifacts.rs
+index 70662d0..ad238d3 100644
+--- a/src/gateway/artifacts.rs
++++ b/src/gateway/artifacts.rs
+@@ -9,7 +9,10 @@ use crate::{
+ };
+ use serde_json::{Value, json};
+ use sha2::{Digest, Sha256};
+-use std::path::Path;
++use std::{
++    io::{Read, Write},
++    path::Path,
++};
+ 
+ /// Map a filename extension to a content type; unknown or missing extensions are opaque bytes.
+ /// Extend this list when a genuinely new artifact type is needed.
+@@ -42,11 +45,39 @@ fn intent(filename: &str, content_type: &str, size: u64, digest: &str, a: &Value
+         "title":a.get("title"),"note":a.get("note"),
+     })
+ }
++
++/// Capture at most cap+1 bytes from one opened source, refusing empty/oversized streams.
++/// Size and digest must be derived from these captured bytes, never separate path metadata.
++fn read_upload(reader: impl std::io::Read) -> Result<Vec<u8>> {
++    let mut bytes = Vec::new();
++    reader
++        .take(FILE_SIZE_CAP + 1)
++        .read_to_end(&mut bytes)
++        .map_err(|_| Fault::new("FILE_UNREADABLE", "Local file is not readable"))?;
++    require(
++        !bytes.is_empty() && bytes.len() as u64 <= FILE_SIZE_CAP,
++        "INVALID_INPUT",
++        format!("File size must be 1..={FILE_SIZE_CAP} bytes"),
++    )?;
++    Ok(bytes)
++}
++
+ /// Publish `bytes` at `destination` without ever overwriting different existing content.
+ /// Writes a sibling temporary file, then links it into place: `link(2)`/`CreateHardLink`
+ /// fail closed when the destination already exists, so no exists-check-then-rename race
+ /// can replace another file. Returns whether an identical file already occupied the spot.
++/// Errors remove only this operation's successfully created temporary file.
+ fn publish(destination: &str, bytes: &[u8]) -> Result<bool> {
++    publish_with(destination, bytes, |file, bytes| file.write_all(bytes))
++}
++
++/// Publish with one bounded writer callback, allowing deterministic partial-write faults in tests.
++/// The callback owns no path; only the newly reserved temporary file is removed on failure.
++fn publish_with(
++    destination: &str,
++    bytes: &[u8],
++    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
++) -> Result<bool> {
+     let destination = Path::new(destination);
+     require(
+         destination.is_absolute(),
+@@ -62,8 +93,20 @@ fn publish(destination: &str, bytes: &[u8]) -> Result<bool> {
+         .and_then(|n| n.to_str())
+         .ok_or_else(|| Fault::new("INVALID_INPUT", "destination needs a file name"))?;
+     let tmp = parent.join(format!(".{name}.part-{}", uuid::Uuid::new_v4()));
+-    std::fs::write(&tmp, bytes)
+-        .map_err(|_| Fault::new("FILE_UNREADABLE", "Could not write the temporary download"))?;
++    let mut file = std::fs::OpenOptions::new()
++        .write(true)
++        .create_new(true)
++        .open(&tmp)
++        .map_err(|_| Fault::new("FILE_UNREADABLE", "Could not create the temporary download"))?;
++    let written = write(&mut file, bytes);
++    drop(file);
++    if written.is_err() {
++        let _ = std::fs::remove_file(&tmp);
++        return Err(Fault::new(
++            "FILE_UNREADABLE",
++            "Could not write the temporary download",
++        ));
++    }
+     let linked = std::fs::hard_link(&tmp, destination);
+     let _ = std::fs::remove_file(&tmp);
+     match linked {
+@@ -91,6 +134,7 @@ impl Gateway {
+     /// Attach one local file to a work item as a durable native artifact. A retry with the
+     /// deterministic per-request attachment ID and identical intent (filename, content type,
+     /// size, digest, title, note) replays the existing record; changed intent conflicts.
++    /// A single opened file is read with a cap+1 bound; captured bytes own the size and digest.
+     pub(super) async fn upload_file(&self, a: &Value) -> Result<Value> {
+         let work_id = self.resolve("issue", text(a, "work_id")?).await?;
+         let work = self.store.work(&work_id).await?;
+@@ -101,16 +145,10 @@ impl Gateway {
+             "INVALID_INPUT",
+             "path must be an absolute path",
+         )?;
+-        let size = std::fs::metadata(source)
+-            .map_err(|_| Fault::new("FILE_UNREADABLE", "Local file is not readable"))?
+-            .len();
+-        require(
+-            size > 0 && size <= FILE_SIZE_CAP,
+-            "INVALID_INPUT",
+-            format!("File size must be 1..={FILE_SIZE_CAP} bytes"),
+-        )?;
+-        let bytes = std::fs::read(source)
++        let file = std::fs::File::open(source)
+             .map_err(|_| Fault::new("FILE_UNREADABLE", "Local file is not readable"))?;
++        let bytes = read_upload(file)?;
++        let size = bytes.len() as u64;
+         let digest = format!("{:x}", Sha256::digest(&bytes));
+         let filename = source
+             .file_name()
+@@ -231,3 +269,54 @@ impl Gateway {
+         }))
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::io::{Seek, Write};
++
++    /// Growth after opening cannot bypass the cap, and path replacement cannot change the opened bytes.
++    #[test]
++    fn capture_bounds_growth_and_keeps_opened_source_identity() {
++        let root = tempfile::tempdir().unwrap();
++        let source = root.path().join("source");
++        std::fs::write(&source, b"x").unwrap();
++        let mut opened = std::fs::File::open(&source).unwrap();
++        assert_eq!(opened.metadata().unwrap().len(), 1);
++        std::fs::OpenOptions::new()
++            .write(true)
++            .open(&source)
++            .unwrap()
++            .set_len(FILE_SIZE_CAP + 20)
++            .unwrap();
++        assert!(read_upload(&mut opened).is_err());
++        assert_eq!(opened.stream_position().unwrap(), FILE_SIZE_CAP + 1);
++        std::fs::write(&source, b"original").unwrap();
++        let opened = std::fs::File::open(&source).unwrap();
++        std::fs::rename(&source, root.path().join("old")).unwrap();
++        std::fs::write(&source, b"replacement").unwrap();
++        assert_eq!(read_upload(opened).unwrap(), b"original");
++    }
++
++    /// Partial write and failed publication remove only this operation's temporary sibling.
++    #[test]
++    fn failed_publish_removes_own_temp_and_keeps_foreign_files() {
++        let root = tempfile::tempdir().unwrap();
++        let destination = root.path().join("destination");
++        let foreign = root.path().join(".destination.part-foreign");
++        std::fs::write(&foreign, b"retain").unwrap();
++        assert!(
++            publish_with(destination.to_str().unwrap(), b"content", |file, bytes| {
++                file.write_all(&bytes[..2])?;
++                Err(std::io::Error::other("injected write fault"))
++            })
++            .is_err()
++        );
++        assert!(!destination.exists());
++        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
++        std::fs::create_dir(&destination).unwrap();
++        assert!(publish(destination.to_str().unwrap(), b"content").is_err());
++        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
++        assert_eq!(std::fs::read(foreign).unwrap(), b"retain");
++    }
++}
+diff --git a/src/graphql/operations.graphql b/src/graphql/operations.graphql
+index dc669b3..596a030 100644
+--- a/src/graphql/operations.graphql
++++ b/src/graphql/operations.graphql
+@@ -12,6 +12,8 @@ query QIssueLabel($id:String!) { issueLabel(id:$id) {id name} }
+ 
+ query QProject($id:String!) {project(id:$id) {id name description content url updatedAt archivedAt teams {nodes {id name} pageInfo {hasNextPage endCursor}}}}
+ 
++query QProjectTeams($id:String!,$first:Int!,$after:String) {project(id:$id) {teams(first:$first,after:$after) {nodes {id name} pageInfo {hasNextPage endCursor}}}}
++
+ query QProjects($filter:ProjectFilter,$first:Int!,$after:String,$includeArchived:Boolean!) { projects(filter:$filter,first:$first,after:$after,includeArchived:$includeArchived) {nodes {id name description content url updatedAt} pageInfo { hasNextPage endCursor }} }
+ 
+ query QIssue($id:String!) { issue(id:$id) {id identifier title description url updatedAt archivedAt startedAt completedAt priority priorityLabel prioritySortOrder team { id } project { id name url } parent { id } state { id name type } labels(first:100) { nodes { id name } pageInfo {hasNextPage endCursor} }} }
+diff --git a/src/guidance.rs b/src/guidance.rs
+index 107517e..bb4df08 100644
+--- a/src/guidance.rs
++++ b/src/guidance.rs
+@@ -62,10 +62,12 @@ fn needs_fields(conditions: &[String]) -> bool {
+     conditions.iter().any(|c| c.starts_with("Required field:"))
+ }
+ 
+-/// Whether one discrepancy message is forgiven by the explicit reopen path, mirroring the two
+-/// native-state mismatches the transition guards retain when moving back to In Progress.
++/// Identify native status, completion or description drift that may be recovered by reopening.
++/// The caller also validates the exact transition before advising a reopen.
+ fn cleared_by_reopen(message: &str) -> bool {
+-    message.starts_with("Native status differs") || message.starts_with("Completion changed")
++    message.starts_with("Native status differs")
++        || message.starts_with("Completion changed")
++        || message.starts_with("Description changed")
+ }
+ 
+ /// Guidance tuple: advisory stage, optional next action, and the guard conditions that still
+@@ -95,8 +97,12 @@ pub fn guidance(w: &Work, graph: &[Work]) -> Value {
+     };
+     let status = w.status().unwrap_or(m.status);
+     let drift = rules::discrepancies(w, graph);
+-    let (stage, next, conditions) = if let Some(pending) = &m.pending {
+-        let request = &pending.request;
++    let (stage, next, conditions) = if let Some(request) = m
++        .pending
++        .as_ref()
++        .map(|p| &p.request)
++        .or_else(|| m.pending_review.as_ref().map(|p| &p.request))
++    {
+         let role = request["arguments"]["actor_role"]
+             .as_str()
+             .map(str::to_owned)
+@@ -118,9 +124,11 @@ pub fn guidance(w: &Work, graph: &[Work]) -> Value {
+             drift,
+         )
+     } else if !drift.is_empty() {
+-        // Only the two reopen-forgiven mismatches recover through an explicit reopen; any
+-        // structural drift keeps recovery without naming a single resolving call.
+-        if drift.iter().all(|d| cleared_by_reopen(d)) {
++        // Validate adoption before advising reopening; structural or invalid-content drift has no resolving call.
++        if drift.iter().all(|d| cleared_by_reopen(d))
++            && (!drift.iter().any(|d| d.starts_with("Description changed"))
++                || rules::transition(w, graph, Status::InProgress, mover(m.kind)).is_empty())
++        {
+             (
+                 "recovery",
+                 Some(action(
+@@ -272,7 +280,15 @@ fn reviewing(w: &Work, m: &Meta, graph: &[Work]) -> Advised {
+                 None,
+             )),
+         ),
+-        Some(false) => ("fixes", Some(action("apply_fixes", "worker", None, None))),
++        Some(false) => (
++            "fixes",
++            Some(action(
++                "reopen_work",
++                "orchestrator",
++                Some("move_status"),
++                Some(Status::InProgress),
++            )),
++        ),
+         Some(true) if !current => (
+             "review",
+             Some(action(
+diff --git a/src/model.rs b/src/model.rs
+index 7297c32..2a359ae 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -136,7 +136,7 @@ impl Status {
+     }
+ }
+ /// Latest review decision; full reports are preserved in native comments.
+-#[derive(Debug, Clone, Serialize, Deserialize)]
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+ pub struct Review {
+     /// Native comment UUID, also the caller's stable review request ID.
+     pub id: String,
+@@ -201,6 +201,9 @@ pub struct Meta {
+     pub last_request: Option<Value>,
+     /// A prepared write survives crashes and can only be resumed by its original request.
+     pub pending: Option<Box<Pending>>,
++    /// Schema-three review intent persisted before creating its native comment; absent in schema two.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub pending_review: Option<PendingReview>,
+ }
+ impl Meta {
+     /// Read imported reports for the current round in attachment order, without touching Git.
+@@ -209,6 +212,20 @@ impl Meta {
+         self.git_reports.iter().filter(|r| r.round == self.round)
+     }
+ }
++
++/// Recoverable review publication intent; only its identical request may finalize it.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct PendingReview {
++    /// Original normalized tool request, including actor and immutable review arguments.
++    pub request: Value,
++    /// Decision observed before publication; finalization refuses a changed predecessor.
++    pub predecessor: Option<Review>,
++    /// Intended review identity and content stamp.
++    pub review: Review,
++    /// Exact rendered native activity body retained across restarts.
++    pub body: String,
++}
++
+ /// Two-phase issue update stored before changing native fields; no background recovery runs.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct Pending {
+diff --git a/src/records.rs b/src/records.rs
+index 5f0f987..88050a6 100644
+--- a/src/records.rs
++++ b/src/records.rs
+@@ -49,35 +49,30 @@ pub fn child_id(parent: &str, purpose: &str) -> String {
+     bytes[8] = (bytes[8] & 0x3f) | 0x80;
+     uuid::Uuid::from_bytes(bytes).to_string()
+ }
+-/// Patch only named level-two sections; all other prose and sections remain byte-for-byte.
+-/// Null removes that field. Nested content should use level-three headings or deeper.
+-pub fn patch_description(original: &str, patch: &Value) -> String {
++/// Patch recognized level-two fields; preserve all unrelated prose and code bytes.
++/// Null removes a field. Reject duplicate real managed headings before producing a patch.
++/// String values are Markdown; other values are serialized as fenced JSON.
++pub fn patch_description(original: &str, patch: &Value) -> Result<String> {
++    read_fields(original)?;
+     let mut output = original.to_owned();
+     for (key, label) in FIELDS {
+         let Some(value) = patch.get(*key) else {
+             continue;
+         };
+-        let heading = format!("## {label}\n");
+-        let positions: Vec<usize> = output
+-            .match_indices(&heading)
+-            .filter(|(i, _)| *i == 0 || output.as_bytes()[i - 1] == b'\n')
+-            .map(|(i, _)| i)
+-            .collect();
+         let rendered = if value.is_null() {
+             String::new()
+         } else {
+-            let body = value.as_str().map(str::to_owned).unwrap_or_else(|| {
+-                format!("```json\n{}\n```", serde_json::to_string(value).unwrap())
+-            });
+-            format!("{heading}{body}\n\n")
++            let body = value
++                .as_str()
++                .map(str::to_owned)
++                .unwrap_or_else(|| format!("```json\n{value}\n```"));
++            format!("## {label}\n{body}\n\n")
+         };
+-        if let Some(&start) = positions.first() {
+-            let body = start + heading.len();
+-            let end = output[body..]
+-                .find("\n## ")
+-                .map(|i| body + i + 1)
+-                .unwrap_or(output.len());
+-            output.replace_range(start..end, &rendered);
++        if let Some(section) = crate::sections::level_two_sections(&output)
++            .into_iter()
++            .find(|s| s.heading == *label)
++        {
++            output.replace_range(section.start..section.end, &rendered);
+         } else if !rendered.is_empty() {
+             if !output.is_empty() && !output.ends_with("\n\n") {
+                 output.push_str("\n\n");
+@@ -85,7 +80,7 @@ pub fn patch_description(original: &str, patch: &Value) -> String {
+             output.push_str(&rendered);
+         }
+     }
+-    output
++    Ok(output)
+ }
+ /// Native persistence with fresh reads; no local workflow database or signed receipts.
+ #[derive(Clone)]
+@@ -117,7 +112,7 @@ fn parse_state_attachment(attachment: &Value, id: &str) -> Result<Meta> {
+     let m: Meta = serde_json::from_value(attachment["metadata"]["workflow"].clone())
+         .map_err(|_| Fault::new("STATE_INVALID", "Invalid workflow metadata"))?;
+     require(
+-        m.schema == 2,
++        matches!(m.schema, 2 | 3) && (m.schema == 3 || m.pending_review.is_none()),
+         "STATE_INVALID",
+         "Unsupported workflow data version",
+     )?;
+@@ -183,6 +178,11 @@ impl Store {
+         let metadata = json!({"workflow":meta});
+         if let Some(attachment) = self.optional("QAttachmentById", "attachment", &aid).await? {
+             validate_state_owner(&attachment, id)?;
++            require(
++                attachment["metadata"]["workflow"]["schema"] != 3 || meta.schema == 3,
++                "STATE_INVALID",
++                "Workflow schema three must never be downgraded",
++            )?;
+             self.linear
+                 .call(
+                     "MUpdateAttachment",
+@@ -329,7 +329,7 @@ pub fn markdown_key(value: &str) -> String {
+         )
+     });
+     let source = url_fields
+-        .map(|fields| patch_description(value, &fields))
++        .and_then(|fields| patch_description(value, &fields).ok())
+         .unwrap_or_else(|| value.to_owned());
+     let events: Vec<_> = Parser::new(&source).into_offset_iter().collect();
+     let ambiguous = events
+@@ -638,24 +638,16 @@ fn link_end(text: &str, start: usize) -> Option<usize> {
+ /// Invalid structured integration lists fail rather than retaining stale hidden values.
+ pub fn read_fields(description: &str) -> Result<Value> {
+     let mut fields = json!({});
++    let sections = crate::sections::level_two_sections(description);
+     for (key, label) in FIELDS {
+-        let heading = format!("## {label}\n");
+-        let starts: Vec<_> = description
+-            .match_indices(&heading)
+-            .filter(|(i, _)| *i == 0 || description.as_bytes()[i - 1] == b'\n')
+-            .collect();
++        let starts: Vec<_> = sections.iter().filter(|s| s.heading == *label).collect();
+         require(
+             starts.len() <= 1,
+             "INVALID_INPUT",
+             format!("Duplicate section: {label}"),
+         )?;
+-        if let Some((i, _)) = starts.first() {
+-            let start = i + heading.len();
+-            let end = description[start..]
+-                .find("\n## ")
+-                .map(|n| start + n)
+-                .unwrap_or(description.len());
+-            let body = description[start..end].trim();
++        if let Some(section) = starts.first() {
++            let body = description[section.body_start..section.end].trim();
+             if !body.is_empty() {
+                 fields[*key] = if *key == "integration_modules" {
+                     let body = body
+diff --git a/src/render.rs b/src/render.rs
+index 7e32f10..0677398 100644
+--- a/src/render.rs
++++ b/src/render.rs
+@@ -134,7 +134,14 @@ fn valid_success_shape(tool: &str, request: &Value, data: &Value) -> bool {
+                     || (data["id"].is_string() && data["content"].is_string())
+             }
+         },
+-        "get_overview" => data["project_id"].is_string() && data["cursor"].is_string(),
++        "get_overview" => {
++            data["project_id"].is_string()
++                && (data["cursor"].is_string()
++                    || (data["cursor"].is_null()
++                        && data["baseline_unavailable"].is_string()
++                        && data["active_epics"].is_array()
++                        && !data["changes"].is_array()))
++        }
+         "list_items" | "search" | "list_files" => {
+             data["nodes"].is_array() && data["pageInfo"].is_object()
+         }
+@@ -422,6 +429,7 @@ fn context_projection(request: &Value, data: &Value) -> Value {
+         .collect();
+     let pending_call = data["workflow"]["pending"]["request"]
+         .as_object()
++        .or_else(|| data["workflow"]["pending_review"]["request"].as_object())
+         .map(|pending| {
+             serde_json::to_string_pretty(
+                 &json!({"tool":pending.get("tool"),"arguments":pending.get("arguments")}),
+@@ -444,6 +452,7 @@ fn context_projection(request: &Value, data: &Value) -> Value {
+                 && native["check_result"] == report["reported_checks"]
+         }) {
+         patch_description(description, &json!({"result":null,"check_result":null}))
++            .unwrap_or_else(|_| description.to_owned())
+     } else {
+         description.to_owned()
+     };
+@@ -486,7 +495,7 @@ fn overview_projection(data: &Value) -> Value {
+             "removed":change["after"].is_null(),"added":change["before"].is_null()})
+     }).collect();
+     json!({"project_id":data["project_id"],"project_title":data["project_title"],"project_url":data["project_url"],
+-        "cursor":data["cursor"],"baseline_expired":data["baseline_expired"],
++        "cursor":data["cursor"],"baseline_expired":data["baseline_expired"],"baseline_unavailable":data["baseline_unavailable"],
+         "attention":data["attention"].as_array().cloned().unwrap_or_default(),
+         "is_delta":data["changes"].is_array(),"changes":changes,
+         "epics":data["active_epics"].as_array().cloned().unwrap_or_default(),
+diff --git a/src/rules.rs b/src/rules.rs
+index 577fab6..142c896 100644
+--- a/src/rules.rs
++++ b/src/rules.rs
+@@ -142,7 +142,7 @@ pub fn discrepancies(w: &Work, graph: &[Work]) -> Vec<String> {
+         return vec!["Issue has no MCP workflow data".into()];
+     };
+     let mut e = vec![];
+-    if m.pending.is_some() {
++    if m.pending.is_some() || m.pending_review.is_some() {
+         e.push("A write is pending; retry the same request_id and arguments".into());
+     }
+     if w.status().ok() != Some(m.status) {
+@@ -374,9 +374,44 @@ fn result(e: &mut Vec<String>, w: &Work) {
+         needs(e, &w.fields, &["artifact_url"]);
+     }
+ }
++
++/// Validate a native description-only change and return an adopted in-memory candidate.
++/// Unknown prose remains exact; full field schema and cross-field references must be valid.
++/// No round/revision or native state changes occur here; transition execution owns invalidation.
++pub fn adopt_description(w: &Work, graph: &[Work]) -> Result<Work> {
++    let m = w.managed()?;
++    let description = w.native["description"].as_str().unwrap_or("");
++    let fields = crate::records::read_fields(description)?;
++    crate::catalog::Catalog::new()?.validate_fields(m.kind, &fields)?;
++    crate::gateway::Gateway::check_fields(m.kind, &fields, m.parent_id.as_deref(), graph)?;
++    let mut candidate = w.clone();
++    candidate.fields = fields.clone();
++    if let Some(meta) = &mut candidate.meta {
++        meta.fields = fields;
++        meta.description = description.to_owned();
++    }
++    Ok(candidate)
++}
++
+ /// Evaluate an explicit transition; context uses this same function for check-only output.
+ /// `role` is trusted caller attribution, not an authentication permission system.
+ pub fn transition(w: &Work, graph: &[Work], target: Status, role: &str) -> Vec<String> {
++    let adopted;
++    let w = if target == Status::InProgress
++        && w.meta.as_ref().is_some_and(|m| {
++            matches!(m.status, Status::InReview | Status::Done)
++                && w.native["description"] != m.description
++        }) {
++        match adopt_description(w, graph) {
++            Ok(candidate) => {
++                adopted = candidate;
++                &adopted
++            }
++            Err(error) => return vec![error.to_string()],
++        }
++    } else {
++        w
++    };
+     let Some(m) = &w.meta else {
+         return vec!["Unmanaged work cannot be moved".into()];
+     };
+@@ -394,8 +429,10 @@ pub fn transition(w: &Work, graph: &[Work], target: Status, role: &str) -> Vec<S
+     if target == Status::InProgress && m.kind != Kind::Task && role != "orchestrator" {
+         e.push("Only the orchestrator starts Epic, Module or Atomic work".into());
+     }
+-    if matches!(target, Status::InReview | Status::Done)
+-        && let Some(p) = parent(w).and_then(|id| find(graph, id))
++    if matches!(
++        target,
++        Status::InReview | Status::Done | Status::Canceled | Status::Duplicate
++    ) && let Some(p) = parent(w).and_then(|id| find(graph, id))
+     {
+         if p.status().ok() != Some(Status::InProgress) {
+             e.push("Keep the parent In Progress until its children finish".into());
+diff --git a/src/sections.rs b/src/sections.rs
+index c420406..161e586 100644
+--- a/src/sections.rs
++++ b/src/sections.rs
+@@ -101,6 +101,40 @@ fn headings(content: &str) -> Vec<Heading> {
+     out
+ }
+ 
++/// Exact level-two section boundaries in the original Markdown; code headings are excluded.
++/// The body ends at the next heading of level one or two, or at the document end.
++pub struct FieldSection {
++    /// Plain heading text used to identify a managed field.
++    pub heading: String,
++    /// First byte of the heading, inclusive.
++    pub start: usize,
++    /// First byte following the heading itself.
++    pub body_start: usize,
++    /// First byte of the next same-or-higher heading, exclusive.
++    pub end: usize,
++}
++
++/// Return level-two sections in source order without changing any Markdown bytes.
++/// Fenced and indented code is excluded by CommonMark; unknown headings remain visible.
++pub fn level_two_sections(content: &str) -> Vec<FieldSection> {
++    let items = headings(content);
++    items
++        .iter()
++        .enumerate()
++        .filter(|(_, h)| h.level == 2)
++        .map(|(i, h)| FieldSection {
++            heading: h.text.clone(),
++            start: h.start,
++            body_start: h.body_start,
++            end: items[i + 1..]
++                .iter()
++                .find(|next| next.level <= 2)
++                .map(|next| next.start)
++                .unwrap_or(content.len()),
++        })
++        .collect()
++}
++
+ /// Find the single heading matching `heading_text` (trimmed, exact) and the byte offset where
+ /// its section ends: the start of the next heading at the same or a higher (numerically lower)
+ /// level, or the end of the document. Fails before any write on a missing or ambiguous heading.
+diff --git a/tests/context.rs b/tests/context.rs
+index b26b344..e34f591 100644
+--- a/tests/context.rs
++++ b/tests/context.rs
+@@ -1017,3 +1017,59 @@ async fn overview_delta_tracks_work_and_discussion_with_safe_fallbacks() {
+     assert!(cold["changes"].is_null());
+     assert!(cold["standalone_modules"].is_array());
+ }
++
++/// Oversized comparison activity keeps full overview and generated update usable, never an empty delta.
++#[tokio::test]
++async fn oversized_snapshot_returns_full_overview_and_generated_update() {
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let first = f.ok("get_overview", json!({"project_id":project})).await;
++    let native = f
++        .ok(
++            "add_comment",
++            json!({"target_type":"project","target_id":project,"body":"Ordinary discussion"}),
++        )
++        .await["comment"]
++        .clone();
++    {
++        let mut db = f.db.lock().await;
++        for _ in 0..500 {
++            let id = id();
++            let mut row = native.clone();
++            row["id"] = json!(id);
++            row["url"] = json!(format!(
++                "https://linear.app/example/project/{project}#comment-{}",
++                &id[..8]
++            ));
++            row["body"] = json!("Discussion ".repeat(40));
++            db.comments.insert(id, row);
++        }
++    }
++    let args = json!({"project_id":project,"cursor":first["cursor"]});
++    let full = f.ok("get_overview", args.clone()).await;
++    assert!(full["cursor"].is_null());
++    assert!(
++        full["baseline_unavailable"]
++            .as_str()
++            .unwrap()
++            .contains("256 KiB")
++    );
++    assert!(full["changes"].is_null());
++    assert!(full["active_epics"].is_array());
++    let text = agent_tasks::render::render_outcome(
++        "get_overview",
++        &args,
++        &agent_tasks::model::Outcome::ok(full.clone()),
++    );
++    assert!(text.contains("Comparison unavailable"));
++    assert!(text.contains("Full overview"));
++    assert!(!text.contains("No changes since"));
++    assert!(!text.contains("Presentation: degraded"));
++    let update = f.ok("save_project_update",json!({"project_id":project,"health":"onTrack","reason":"Generated draft remains available"})).await;
++    assert!(
++        update["project_update"]["body"]
++            .as_str()
++            .unwrap()
++            .contains(full["project_update_draft"].as_str().unwrap().trim())
++    );
++}
+diff --git a/tests/field_sections.rs b/tests/field_sections.rs
+new file mode 100644
+index 0000000..d399e4b
+--- /dev/null
++++ b/tests/field_sections.rs
+@@ -0,0 +1,32 @@
++//! Managed description fields retain literal headings inside CommonMark code.
++use agent_tasks::records::{patch_description, read_fields};
++use serde_json::json;
++
++/// Fenced and indented examples remain literal while genuine sections are patched.
++#[test]
++fn fields_preserve_code_and_unknown_prose() {
++    let original = "Intro\n\n## Описание\nText\n\n```md\n## Результат\ncode\n```\n\n    ## Результат\n    indented\n\n## Unknown\nKeep exact\n\n## Результат\nold\n";
++    let fields = read_fields(original).unwrap();
++    assert!(
++        fields["description"]
++            .as_str()
++            .unwrap()
++            .contains("## Результат\ncode")
++    );
++    assert_eq!(fields["result"], "old");
++    let patched = patch_description(original, &json!({"result":"new"})).unwrap();
++    assert!(patched.starts_with(original.split("## Результат\nold").next().unwrap()));
++    assert_eq!(read_fields(&patched).unwrap()["result"], "new");
++    let removed = patch_description(&patched, &json!({"result":null})).unwrap();
++    assert!(removed.contains("## Результат\ncode"));
++    assert!(removed.contains("    ## Результат\n    indented"));
++    assert!(read_fields(&removed).unwrap().get("result").is_none());
++}
++
++/// Duplicate real headings, including alternate ATX/setext syntax, fail before mutation.
++#[test]
++fn duplicate_real_fields_are_rejected() {
++    let duplicate = "## Результат\nfirst\n\nРезультат\n----------\nsecond\n";
++    assert!(read_fields(duplicate).is_err());
++    assert!(patch_description(duplicate, &json!({"result":"replace"})).is_err());
++}
+diff --git a/tests/guidance.rs b/tests/guidance.rs
+index ce2486e..34a73c0 100644
+--- a/tests/guidance.rs
++++ b/tests/guidance.rs
+@@ -62,6 +62,7 @@ impl Fixture {
+             creation: json!({"tool": "fixture"}),
+             last_request: None,
+             pending: None,
++            pending_review: None,
+         };
+         self.works.push(Work {
+             native,
+@@ -280,13 +281,13 @@ fn guidance_cases_across_preparation_working_review_and_closure() {
+     assert_eq!(g["next_action"]["kind"], "record_review");
+     assert_eq!(g["next_action"]["actor_role"], "reviewer");
+     assert_eq!(g["next_action"]["tool"], "record_review");
+-    // Requested changes are applied by the lead; no single call performs fixing.
++    // The orchestrator reopens before the lead may change reviewed content.
+     f.meta_mut(module).review = Some(review(1, 0, false));
+     let g = guidance(&f.works[module], f.graph());
+     assert_eq!(g["stage"], "fixes");
+     assert_eq!(
+         g["next_action"],
+-        json!({"kind":"apply_fixes","actor_role":"worker","tool":null,"target_status":null})
++        json!({"kind":"reopen_work","actor_role":"orchestrator","tool":"move_status","target_status":"In Progress"})
+     );
+     // An accepted current review without a merge report keeps an explicit reporting action.
+     f.meta_mut(module).review = Some(review(1, 0, true));
+diff --git a/tests/manual_recovery.rs b/tests/manual_recovery.rs
+new file mode 100644
+index 0000000..03862ce
+--- /dev/null
++++ b/tests/manual_recovery.rs
+@@ -0,0 +1,206 @@
++//! Explicit adoption/reopening and retirement guards against native manual description drift.
++#[allow(dead_code)]
++mod support;
++use agent_tasks::records::{child_id, patch_description};
++use serde_json::json;
++use support::{Fixture, id};
++
++/// Done Task reopening adopts native fields/prose, invalidates once, and preserves code examples.
++#[tokio::test]
++async fn done_task_reopens_current_description_once() {
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let module = f.work("module", &project, None).await;
++    f.mv(&module, "In Progress").await;
++    let task = f.work("task", &project, Some(&module)).await;
++    f.mv(&task, "In Progress").await;
++    f.result("task", &task).await;
++    f.mv(&task, "Done").await;
++    let aid = child_id(&task, "state");
++    let before = f.db.lock().await.attachments[&aid]["metadata"]["workflow"].clone();
++    let body = patch_description(
++        before["description"].as_str().unwrap(),
++        &json!({"expected_result":"Manually updated"}),
++    )
++    .unwrap()
++        + "\n## Human notes\nKeep me\n\n```md\n## Результат\nliteral\n```\n";
++    f.db.lock().await.issues.get_mut(&task).unwrap()["description"] = json!(body);
++    let preview = f
++        .ok(
++            "move_status",
++            json!({"id":task,"status":"In Progress","actor_role":"worker","check_only":true}),
++        )
++        .await;
++    assert_eq!(preview["allowed"], true);
++    let a = json!({"request_id":id(),"id":task,"status":"In Progress","actor_role":"worker"});
++    f.ok("move_status", a.clone()).await;
++    f.ok("move_status", a).await;
++    let after = f.ok("get_context", json!({"type":"issue","id":task})).await;
++    assert_eq!(after["fields"]["expected_result"], "Manually updated");
++    assert!(after["fields"]["result"].is_null());
++    assert!(
++        after["issue"]["description"]
++            .as_str()
++            .unwrap()
++            .contains("Keep me")
++    );
++    assert!(
++        after["issue"]["description"]
++            .as_str()
++            .unwrap()
++            .contains("## Результат\nliteral")
++    );
++    assert_eq!(
++        after["workflow"]["round"].as_u64().unwrap(),
++        before["round"].as_u64().unwrap() + 1
++    );
++    assert_eq!(
++        after["workflow"]["revision"].as_u64().unwrap(),
++        before["revision"].as_u64().unwrap() + 1
++    );
++    assert!(after["workflow"]["review"].is_null());
++    assert_eq!(after["workflow"]["integration"], json!({}));
++}
++
++/// Reviewed Module description adoption refuses invalid fields/structure and directs orchestrator reopening.
++#[tokio::test]
++async fn reviewed_module_adoption_validates_before_writing() {
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let module = f.work("module", &project, None).await;
++    f.mv(&module, "In Progress").await;
++    f.result("module", &module).await;
++    f.mv(&module, "In Review").await;
++    f.review(&module, "changes_requested").await;
++    let original = f.db.lock().await.issues[&module]["description"]
++        .as_str()
++        .unwrap()
++        .to_owned();
++    let modified = patch_description(
++        &original,
++        &json!({"description":"Changed\n\n```md\n## Scope\ncode\n```"}),
++    )
++    .unwrap()
++        + "\n## Human notes\nretain\n";
++    f.db.lock().await.issues.get_mut(&module).unwrap()["description"] = json!(modified.clone());
++    let context = f
++        .ok("get_context", json!({"type":"issue","id":module}))
++        .await;
++    assert_eq!(
++        context["guidance"]["next_action"]["actor_role"],
++        "orchestrator"
++    );
++    assert_eq!(context["guidance"]["next_action"]["tool"], "move_status");
++    f.db.lock().await.issues.get_mut(&module).unwrap()["description"] =
++        json!(patch_description(&modified, &json!({"work_type":"integration"})).unwrap());
++    assert_eq!(
++        f.call(
++            "move_status",
++            json!({"id":module,"status":"In Progress","actor_role":"orchestrator"})
++        )
++        .await
++        .status,
++        "blocked"
++    );
++    f.db.lock().await.issues.get_mut(&module).unwrap()["description"] = json!(modified.clone());
++    f.db.lock().await.issues.get_mut(&module).unwrap()["parent"] = json!({"id":id()});
++    assert_eq!(
++        f.call(
++            "move_status",
++            json!({"id":module,"status":"In Progress","actor_role":"orchestrator"})
++        )
++        .await
++        .status,
++        "blocked"
++    );
++    f.db.lock().await.issues.get_mut(&module).unwrap()["parent"] = serde_json::Value::Null;
++    f.mv(&module, "In Progress").await;
++    let after = f
++        .ok("get_context", json!({"type":"issue","id":module}))
++        .await;
++    assert!(
++        after["issue"]["description"]
++            .as_str()
++            .unwrap()
++            .contains("retain")
++    );
++    assert!(after["workflow"]["review"].is_null());
++}
++
++/// Active explicit adoption invalidates content identity while title/priority-only edits preserve it.
++#[tokio::test]
++async fn active_adoption_counts_as_content_change() {
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let module = f.work("module", &project, None).await;
++    f.mv(&module, "In Progress").await;
++    let aid = child_id(&module, "state");
++    let before = f.db.lock().await.attachments[&aid]["metadata"]["workflow"].clone();
++    f.db.lock().await.issues.get_mut(&module).unwrap()["description"] =
++        json!(before["description"].as_str().unwrap().to_owned() + "\n## Notes\nHuman prose\n");
++    f.ok(
++        "edit_module",
++        json!({"id":module,"title":"Presentation","priority":2}),
++    )
++    .await;
++    assert_eq!(
++        f.db.lock().await.attachments[&aid]["metadata"]["workflow"]["revision"],
++        before["revision"]
++    );
++    f.ok("edit_module", json!({"id":module,"fields":{}})).await;
++    assert_eq!(
++        f.db.lock().await.attachments[&aid]["metadata"]["workflow"]["revision"]
++            .as_u64()
++            .unwrap(),
++        before["revision"].as_u64().unwrap() + 1
++    );
++    assert!(
++        f.db.lock().await.attachments[&aid]["metadata"]["workflow"]["description"]
++            .as_str()
++            .unwrap()
++            .contains("Human prose")
++    );
++}
++
++/// Retiring completed children under a Done parent requires reopening that parent first.
++#[tokio::test]
++async fn retirement_requires_active_clean_parent() {
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let module = f.work("module", &project, None).await;
++    f.mv(&module, "In Progress").await;
++    let task = f.work("task", &project, Some(&module)).await;
++    f.mv(&task, "In Progress").await;
++    f.result("task", &task).await;
++    f.mv(&task, "Done").await;
++    f.ok("edit_task", json!({"id":task,"fields":{}})).await;
++    // Reason is part of the completed fixture before parent closure.
++    f.mv(&task, "In Progress").await;
++    f.ok(
++        "edit_task",
++        json!({"id":task,"fields":{"reason":"No longer needed"}}),
++    )
++    .await;
++    f.result("task", &task).await;
++    f.mv(&task, "Done").await;
++    f.result("module", &module).await;
++    f.mv(&module, "In Review").await;
++    f.review(&module, "accepted").await;
++    f.ok(
++        "edit_module",
++        json!({"id":module,"fields":{"merge_report":"Merged"}}),
++    )
++    .await;
++    f.mv(&module, "Done").await;
++    assert_eq!(
++        f.call(
++            "move_status",
++            json!({"id":task,"status":"Canceled","actor_role":"worker"})
++        )
++        .await
++        .status,
++        "blocked"
++    );
++    f.mv(&module, "In Progress").await;
++    f.mv(&task, "Canceled").await;
++}
+diff --git a/tests/review_recovery.rs b/tests/review_recovery.rs
+new file mode 100644
+index 0000000..60aadef
+--- /dev/null
++++ b/tests/review_recovery.rs
+@@ -0,0 +1,179 @@
++//! Review intent, legacy crash recovery and Project identity regressions.
++#[allow(dead_code)]
++mod support;
++use agent_tasks::records::child_id;
++use serde_json::{Value, json};
++use support::{Fixture, id};
++
++/// Prepare a reviewable Atomic with complete local output in a disposable Project.
++async fn reviewable() -> (Fixture, String) {
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let atom = f.work("atomic", &project, None).await;
++    f.mv(&atom, "In Progress").await;
++    f.result("atomic", &atom).await;
++    f.mv(&atom, "In Review").await;
++    (f, atom)
++}
++
++/// Build immutable review arguments; fixture attribution is added by its public caller.
++fn review(atom: &str, verdict: &str) -> Value {
++    json!({"request_id":id(),"id":atom,"reviewer":"independent","verdict":verdict,"summary":"Checked result","findings":"None","artifacts":["https://example.test/report"]})
++}
++
++/// An older accepted review never displaces a newer rejection, including after restart.
++#[tokio::test]
++async fn reviews_are_monotonic() {
++    let (mut f, atom) = reviewable().await;
++    let a = review(&atom, "accepted");
++    let b = review(&atom, "changes_requested");
++    f.ok("record_review", a.clone()).await;
++    f.ok("record_review", b.clone()).await;
++    f.restart();
++    let replay = f.ok("record_review", a.clone()).await;
++    assert_eq!(replay["historical"], true);
++    assert_eq!(replay["review"]["id"], b["request_id"]);
++    assert_eq!(replay["review"]["accepted"], false);
++    let mut conflict = a;
++    conflict["summary"] = json!("different");
++    assert_eq!(f.call("record_review", conflict).await.status, "blocked");
++}
++
++/// Lost intent, comment and finalization responses survive cold restart without duplicates.
++#[tokio::test]
++async fn review_crash_boundaries_resume_only_identical_intent() {
++    for (op, nth) in [
++        ("MUpdateAttachment", 1),
++        ("MCreateComment", 1),
++        ("MUpdateAttachment", 2),
++    ] {
++        let (mut f, atom) = reviewable().await;
++        let a = review(&atom, "accepted");
++        f.ok("record_review", a).await;
++        let b = review(&atom, "changes_requested");
++        f.db.lock().await.lose_nth = Some((op.into(), nth));
++        assert_eq!(
++            f.call("record_review", b.clone()).await.status,
++            "outcome_unknown"
++        );
++        f.restart();
++        let aid = child_id(&atom, "state");
++        let pending = f.db.lock().await.attachments[&aid]["metadata"]["workflow"]["pending_review"]
++            .is_object();
++        if pending {
++            assert_eq!(
++                f.call("edit_atomic", json!({"id":atom,"title":"competing"}))
++                    .await
++                    .status,
++                "blocked"
++            );
++            let context = f.ok("get_context", json!({"type":"issue","id":atom})).await;
++            assert_eq!(context["guidance"]["next_action"]["tool"], "record_review");
++        }
++        let outcome = f.ok("record_review", b.clone()).await;
++        assert_eq!(outcome["review"]["id"], b["request_id"]);
++        let db = f.db.lock().await;
++        let meta = &db.attachments[&aid]["metadata"]["workflow"];
++        assert_eq!(meta["schema"], 3);
++        assert!(meta.get("pending_review").is_none());
++        assert_eq!(db.comments.len(), 2);
++    }
++}
++
++/// A schema-two comment-save crash recovers first/newer decisions but rejects ambiguous order.
++#[tokio::test]
++async fn legacy_review_recovery_requires_ordered_current_stamp() {
++    for predecessor in [false, true] {
++        let (f, atom) = reviewable().await;
++        let aid = child_id(&atom, "state");
++        if predecessor {
++            f.ok("record_review", review(&atom, "accepted")).await;
++        }
++        let mut before = f.db.lock().await.attachments[&aid]["metadata"]["workflow"].clone();
++        before["schema"] = json!(2);
++        let b = review(&atom, "changes_requested");
++        f.ok("record_review", b.clone()).await;
++        f.db.lock().await.attachments.get_mut(&aid).unwrap()["metadata"]["workflow"] =
++            before.clone();
++        if predecessor {
++            let previous = before["review"]["id"].as_str().unwrap();
++            let original_time =
++                f.db.lock().await.comments[b["request_id"].as_str().unwrap()]["createdAt"].clone();
++            let previous_time = f.db.lock().await.comments[previous]["createdAt"].clone();
++            f.db.lock()
++                .await
++                .comments
++                .get_mut(b["request_id"].as_str().unwrap())
++                .unwrap()["createdAt"] = previous_time;
++            assert_eq!(f.call("record_review", b.clone()).await.status, "blocked");
++            f.db.lock()
++                .await
++                .comments
++                .get_mut(b["request_id"].as_str().unwrap())
++                .unwrap()["createdAt"] = json!("unknown");
++            assert_eq!(f.call("record_review", b.clone()).await.status, "blocked");
++            f.db.lock()
++                .await
++                .comments
++                .get_mut(b["request_id"].as_str().unwrap())
++                .unwrap()["createdAt"] = original_time;
++        }
++        f.ok("record_review", b.clone()).await;
++        assert_eq!(
++            f.db.lock().await.attachments[&aid]["metadata"]["workflow"]["schema"],
++            2
++        );
++        assert_eq!(
++            f.db.lock().await.attachments[&aid]["metadata"]["workflow"]["review"]["id"],
++            b["request_id"]
++        );
++    }
++}
++
++/// New features upgrade state once; subsequent ordinary writes retain schema three.
++#[tokio::test]
++async fn schemas_remain_compatible_without_downgrade() {
++    let (f, atom) = reviewable().await;
++    let aid = child_id(&atom, "state");
++    assert_eq!(
++        f.db.lock().await.attachments[&aid]["metadata"]["workflow"]["schema"],
++        2
++    );
++    f.ok("record_review", review(&atom, "accepted")).await;
++    f.ok("edit_atomic", json!({"id":atom,"title":"presentation"}))
++        .await;
++    assert_eq!(
++        f.db.lock().await.attachments[&aid]["metadata"]["workflow"]["schema"],
++        3
++    );
++    let work = f.gateway.store.work(&atom).await.unwrap();
++    let mut legacy = work.managed().unwrap().clone();
++    legacy.schema = 2;
++    assert!(f.gateway.store.save(&work.native, &legacy).await.is_err());
++    f.db.lock().await.attachments.get_mut(&aid).unwrap()["metadata"]["workflow"]["schema"] =
++        json!(4);
++    assert_eq!(
++        f.call("get_context", json!({"type":"issue","id":atom}))
++            .await
++            .status,
++        "blocked"
++    );
++}
++
++/// Project create retries compare the complete exact team set, including later pages.
++#[tokio::test]
++async fn project_replay_checks_exact_team_membership() {
++    let f = Fixture::new().await;
++    let a = json!({"request_id":id(),"team_id":f.team,"title":"Replay","description":"Exact"});
++    let p = f.ok("create_project", a.clone()).await;
++    let pid = p["project"]["id"].as_str().unwrap();
++    f.ok("create_project", a.clone()).await;
++    f.db.lock().await.projects.get_mut(pid).unwrap()["teams"]["nodes"] = json!([{"id":id()}]);
++    assert_eq!(f.call("create_project", a.clone()).await.status, "blocked");
++    let teams: Vec<_> = std::iter::once(json!({"id":f.team}))
++        .chain((0..100).map(|_| json!({"id":id()})))
++        .collect();
++    f.db.lock().await.projects.get_mut(pid).unwrap()["teams"]["nodes"] = json!(teams);
++    assert_eq!(f.call("create_project", a).await.status, "blocked");
++    assert!(f.db.lock().await.operation_counts["QProjectTeams"] >= 4);
++}
+diff --git a/tests/runtime_risks.rs b/tests/runtime_risks.rs
+new file mode 100644
+index 0000000..527bd2a
+--- /dev/null
++++ b/tests/runtime_risks.rs
+@@ -0,0 +1,270 @@
++//! Measured writer-lock latency and real stdio behavior across a disposable gateway restart.
++#[allow(dead_code)]
++mod support;
++use agent_tasks::{config::Config, gateway::Gateway, linear::Linear, server};
++use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
++use serde_json::{Value, json};
++use std::{
++    path::Path,
++    time::{Duration, Instant},
++};
++use support::{Fixture, id};
++
++/// Wait only for a bounded fixture condition; timeout identifies the fixture that failed.
++async fn wait_delay(f: &Fixture, active: bool) {
++    tokio::time::timeout(Duration::from_secs(3), async {
++        while f.db.lock().await.delay_active != active {
++            tokio::time::sleep(Duration::from_millis(5)).await;
++        }
++    })
++    .await
++    .unwrap();
++}
++
++/// Delay a collected read while two calls queue; one caller deadline expires and the other completes.
++#[tokio::test]
++async fn queued_reads_wait_for_writer_and_caller_timeout_is_explicit() {
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let template = f
++        .ok(
++            "add_comment",
++            json!({"target_type":"project","target_id":project,"body":"discussion"}),
++        )
++        .await["comment"]
++        .clone();
++    {
++        let mut db = f.db.lock().await;
++        for _ in 0..500 {
++            let mut row = template.clone();
++            let id = id();
++            row["id"] = json!(id);
++            db.comments.insert(id, row);
++        }
++        db.delay_next = Some(("QComments".into(), Duration::from_millis(400)));
++    }
++    let gateway = f.gateway.clone();
++    let p = project.clone();
++    let held =
++        tokio::spawn(async move { gateway.call("get_overview", json!({"project_id":p})).await });
++    wait_delay(&f, true).await;
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let config = Config {
++        listen: listener.local_addr().unwrap(),
++        token: "queue-fixture-token-01234567890123456789".into(),
++    };
++    let cancel = tokio_util::sync::CancellationToken::new();
++    let app = server::router(f.gateway.clone(), &config, cancel.clone());
++    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
++    let client = reqwest::Client::new();
++    let http_deadline=client.post(format!("http://{}/mcp",config.listen)).bearer_auth(&config.token)
++        .header("accept","application/json, text/event-stream").header("MCP-Protocol-Version","2026-07-28")
++        .header("Mcp-Method","tools/call").header("Mcp-Name","get_context").timeout(Duration::from_millis(75))
++        .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_context","arguments":{"type":"project","id":project},
++            "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})).send();
++    let started = Instant::now();
++    let plain = f
++        .gateway
++        .call("get_context", json!({"type":"project","id":project}));
++    let deadline = tokio::time::timeout(
++        Duration::from_millis(75),
++        f.gateway
++            .call("get_context", json!({"type":"project","id":project})),
++    );
++    let (plain, deadline, http_deadline) = tokio::join!(plain, deadline, http_deadline);
++    let queued = started.elapsed();
++    assert_eq!(plain.status, "ok");
++    assert!(deadline.is_err());
++    assert!(http_deadline.unwrap_err().is_timeout());
++    cancel.cancel();
++    server.abort();
++    assert!(queued >= Duration::from_millis(300));
++    assert_eq!(held.await.unwrap().status, "ok");
++    eprintln!(
++        "R1 queued_read_ms={} caller_deadline_ms=75 caller_deadline=expired HTTP_client_timeout=expired collection_comments=501; no gateway command timeout observed",
++        queued.as_millis()
++    );
++}
++
++/// Run the production writer in a separate test binary with an explicitly supplied loopback provider.
++/// This ignored entry is launched only by the restart test with disposable fixture configuration.
++#[tokio::test]
++#[ignore]
++async fn fixture_gateway_process() {
++    let path = std::env::var("RISK_GATEWAY_CONFIG").expect("fixture config required");
++    let endpoint =
++        std::env::var("RISK_LINEAR_ENDPOINT").expect("loopback fixture endpoint required");
++    assert!(endpoint.starts_with("http://127.0.0.1:"));
++    let config = Config::load(Path::new(&path)).unwrap();
++    server::serve(
++        Gateway::new(Linear::mock(&endpoint).unwrap()).unwrap(),
++        config,
++    )
++    .await
++    .unwrap();
++}
++
++/// Start only the ignored production-writer harness; kill-on-drop prevents leaked fixture processes.
++async fn writer(config: &Path, endpoint: &str) -> tokio::process::Child {
++    tokio::process::Command::new(std::env::current_exe().unwrap())
++        .args([
++            "--exact",
++            "fixture_gateway_process",
++            "--ignored",
++            "--nocapture",
++        ])
++        .env("RISK_GATEWAY_CONFIG", config)
++        .env("RISK_LINEAR_ENDPOINT", endpoint)
++        .kill_on_drop(true)
++        .stdout(std::process::Stdio::null())
++        .stderr(std::process::Stdio::null())
++        .spawn()
++        .unwrap()
++}
++
++/// Require the fresh listener, with a bounded wait and no real provider or credential access.
++async fn healthy(config: &Config) {
++    let client = reqwest::Client::new();
++    tokio::time::timeout(Duration::from_secs(3), async {
++        loop {
++            if client
++                .get(format!("http://{}/health", config.listen))
++                .send()
++                .await
++                .is_ok()
++            {
++                break;
++            }
++            tokio::time::sleep(Duration::from_millis(10)).await;
++        }
++    })
++    .await
++    .unwrap();
++}
++
++/// Send actual SIGTERM to the exact owned writer PID and verify process completion.
++async fn terminate(child: &mut tokio::process::Child) {
++    let pid = child.id().unwrap().to_string();
++    assert!(
++        tokio::process::Command::new("/bin/kill")
++            .args(["-TERM", &pid])
++            .status()
++            .await
++            .unwrap()
++            .success()
++    );
++    let status = tokio::time::timeout(Duration::from_secs(3), child.wait())
++        .await
++        .unwrap()
++        .unwrap();
++    assert!(!status.success());
++}
++
++/// Build one public MCP tool request with exact supplied arguments.
++fn request(name: &str, args: Value) -> CallToolRequestParams {
++    CallToolRequestParams::new(name.to_owned()).with_arguments(args.as_object().unwrap().clone())
++}
++
++/// Actual product stdio bridges expose post-SIGTERM connection behavior; pending native writes reconcile after restart.
++#[cfg(unix)]
++#[tokio::test]
++async fn stdio_restart_and_inflight_write_are_measured() {
++    let f = Fixture::new().await;
++    let project = f.project().await;
++    let module = f.work("module", &project, None).await;
++    f.mv(&module, "In Progress").await;
++    let task = f.work("task", &project, Some(&module)).await;
++    f.mv(&task, "In Progress").await;
++    let root = tempfile::tempdir().unwrap();
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let address = listener.local_addr().unwrap();
++    drop(listener);
++    let config = Config {
++        listen: address,
++        token: "fixture-gateway-token-01234567890123456789".into(),
++    };
++    let config_path = root.path().join("config.toml");
++    config.write_new(&config_path).unwrap();
++    let mut child = writer(&config_path, f.endpoint()).await;
++    healthy(&config).await;
++    let mut command = tokio::process::Command::new(support::product_binary());
++    command.arg("--config").arg(&config_path).arg("stdio");
++    let bridge = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
++    assert_eq!(
++        bridge.peer().list_tools(None).await.unwrap().tools.len(),
++        25
++    );
++    terminate(&mut child).await;
++    child = writer(&config_path, f.endpoint()).await;
++    healthy(&config).await;
++    let old = tokio::time::timeout(Duration::from_secs(2), bridge.peer().list_tools(None)).await;
++    eprintln!(
++        "R2 existing_stdio_after_SIGTERM_restart={:?}",
++        old.as_ref()
++            .map(|r| r.as_ref().map(|l| l.tools.len()).map_err(|e| e.to_string()))
++    );
++    let mut command = tokio::process::Command::new(support::product_binary());
++    command.arg("--config").arg(&config_path).arg("stdio");
++    let fresh = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
++    assert_eq!(fresh.peer().list_tools(None).await.unwrap().tools.len(), 25);
++    let args = json!({"request_id":id(),"actor":"codex:runtime-fixture","id":task,"fields":{"result":"Survives interruption"}});
++    f.db.lock().await.delay_next = Some(("MUpdateIssue".into(), Duration::from_millis(400)));
++    let peer = fresh.peer().clone();
++    let call = request("edit_task", args.clone());
++    let inflight = tokio::spawn(async move { peer.call_tool(call).await });
++    wait_delay(&f, true).await;
++    terminate(&mut child).await;
++    let result = tokio::time::timeout(Duration::from_secs(2), inflight).await;
++    eprintln!(
++        "R2 inflight_write_after_SIGTERM={:?}",
++        result.as_ref().map(|r| r
++            .as_ref()
++            .map(|o| o.as_ref().map(|v| v.is_error).map_err(|e| e.to_string()))
++            .map_err(|e| e.to_string()))
++    );
++    tokio::time::sleep(Duration::from_millis(450)).await;
++    let applied_before_retry = f.db.lock().await.issues[&task]["description"]
++        .as_str()
++        .unwrap()
++        .contains("Survives interruption");
++    f.db.lock().await.delay_active = false;
++    let writes_before = f.db.lock().await.operation_counts["MUpdateIssue"];
++    assert!(
++        f.gateway
++            .store
++            .work(&task)
++            .await
++            .unwrap()
++            .managed()
++            .unwrap()
++            .pending
++            .is_some()
++    );
++    child = writer(&config_path, f.endpoint()).await;
++    healthy(&config).await;
++    let mut command = tokio::process::Command::new(support::product_binary());
++    command.arg("--config").arg(&config_path).arg("stdio");
++    let recovery = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
++    let retried = recovery
++        .peer()
++        .call_tool(request("edit_task", args))
++        .await
++        .unwrap();
++    assert_eq!(retried.is_error, Some(false));
++    let current = f.gateway.store.work(&task).await.unwrap();
++    assert!(current.managed().unwrap().pending.is_none());
++    assert_eq!(current.fields["result"], "Survives interruption");
++    assert_eq!(
++        f.db.lock().await.operation_counts["MUpdateIssue"],
++        writes_before + u32::from(!applied_before_retry)
++    );
++    eprintln!(
++        "R2 interrupted native write reconciled through exact retry; applied_before_retry={} additional_MUpdateIssue={} fresh_stdio=25tools",
++        applied_before_retry,
++        u32::from(!applied_before_retry)
++    );
++    let _ = recovery.cancel().await;
++    let _ = fresh.cancel().await;
++    let _ = bridge.cancel().await;
++    terminate(&mut child).await;
++}
+diff --git a/tests/support/mod.rs b/tests/support/mod.rs
+index 7ae7878..157337c 100644
+--- a/tests/support/mod.rs
++++ b/tests/support/mod.rs
+@@ -62,6 +62,12 @@ pub struct Database {
+     pub tick: u64,
+     /// Mutation operation whose response should be lost after applying its write.
+     pub lose: Option<String>,
++    /// Lose the Nth matching response after its side effect, for multi-save crash boundaries.
++    pub lose_nth: Option<(String, u32)>,
++    /// Delay the next matching request before its mock side effect without holding the database lock.
++    pub delay_next: Option<(String, std::time::Duration)>,
++    /// True while that injected provider delay is active, for deterministic process interruption.
++    pub delay_active: bool,
+     /// Override only the next created Comment payload body, leaving native storage intact.
+     pub comment_response_body: Option<String>,
+     /// Override only the next returned ProjectUpdate payload body, leaving storage intact.
+@@ -119,8 +125,27 @@ async fn graphql(
+     State(db): State<Arc<Mutex<Database>>>,
+     Json(request): Json<Value>,
+ ) -> Json<Value> {
+-    let mut db = db.lock().await;
+     let op = request["operationName"].as_str().unwrap();
++    let delay = {
++        let mut state = db.lock().await;
++        if state
++            .delay_next
++            .as_ref()
++            .is_some_and(|(name, _)| name == op)
++        {
++            state.delay_active = true;
++            state.delay_next.take().map(|(_, duration)| duration)
++        } else {
++            None
++        }
++    };
++    if let Some(duration) = delay {
++        tokio::time::sleep(duration).await;
++    }
++    let mut db = db.lock().await;
++    if delay.is_some() {
++        db.delay_active = false;
++    }
+     *db.operation_counts.entry(op.to_owned()).or_insert(0) += 1;
+     let v = &request["variables"];
+     let id = v["id"].as_str().unwrap_or("");
+@@ -169,6 +194,10 @@ async fn graphql(
+             ),
+         )),
+         "QTeams" => Some(("teams", page(db.teams.values().cloned().collect()))),
++        "QProjectTeams" => Some((
++            "project",
++            json!({"teams":issue_page(db.projects[id]["teams"]["nodes"].as_array().unwrap().clone(),v)}),
++        )),
+         "QIssue" => db
+             .issues
+             .values()
+@@ -677,6 +706,15 @@ async fn graphql(
+         }
+         _ => panic!("Unimplemented fixture operation: {op}"),
+     };
++    if let Some((name, left)) = &mut db.lose_nth
++        && name == op
++    {
++        *left -= 1;
++        if *left == 0 {
++            db.lose = Some(op.into());
++            db.lose_nth = None;
++        }
++    }
+     if db.lose.as_deref() == Some(op) {
+         db.lose = None;
+         return Json(json!({"errors":[{"message":"simulated response loss"}]}));
+@@ -761,6 +799,10 @@ impl Fixture {
+             team,
+         }
+     }
++    /// Return the loopback mock GraphQL endpoint for a separate production-server test process.
++    pub fn endpoint(&self) -> &str {
++        &self.endpoint
++    }
+     /// Replace all process memory while retaining only native Linear data.
+     pub fn restart(&mut self) {
+         self.gateway = Gateway::new(Linear::mock(&self.endpoint).unwrap()).unwrap();
+diff --git a/tests/workflow.rs b/tests/workflow.rs
+index fc8ab4e..17dc374 100644
+--- a/tests/workflow.rs
++++ b/tests/workflow.rs
+@@ -2502,7 +2502,9 @@ async fn uncertain_creates_reviews_and_frozen_reparenting() {
+     assert!(history.iter().all(|r| !r.formal_review));
+     f.result("atomic", &atom).await;
+     f.mv(&atom, "In Review").await;
+-    assert_eq!(f.call("record_review", review).await.status, "blocked");
++    let historical = f.ok("record_review", review).await;
++    assert_eq!(historical["historical"], true);
++    assert!(historical["review"].is_null());
+ }
+ 
+ /// A successful native envelope with unapplied fields never publishes a false workflow result.
