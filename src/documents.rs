@@ -2253,7 +2253,7 @@ pub fn relocate(
             let (Some(bytes), State::Unmanaged) = (bytes, leftover.state) else {
                 return Err(stale(&leftover.version));
             };
-            let references = move_references(port, &leftover, to);
+            let references = move_references(port, &leftover, to, &bytes);
             port.del(Del {
                 rel: leftover_path.as_str(),
                 observed: &bytes,
@@ -2285,7 +2285,14 @@ pub fn relocate(
     }
 }
 
-/// Steps S2 and S3 of a move, after the destination body exists.
+/// Steps S2 and S3 of a move, after the destination body exists, preceded by the reference scan of
+/// the move. The scan runs once, before S2 and before any removal, over the whole root with the move
+/// applied in memory (see [`move_references`]); its result is returned in [`Receipt::references`] and
+/// a scan that cannot run is `Unknown` and never blocks S2 or S3. `body` is the verified destination
+/// copy (equal to the body of `src`): it is the body of `to` in the preview, as the contract requires
+/// of a destination that already exists. `first_run` and `actor` are as for the callers; `hint` names
+/// the recovery guidance of a partial publication. Errors: a failed record replacement or source
+/// removal is `partial_publication` after the copy exists.
 #[allow(clippy::too_many_arguments)]
 fn finish_move(
     scope: &mut Scope<'_>,
@@ -2299,7 +2306,7 @@ fn finish_move(
 ) -> Result<Receipt> {
     let port = scope.port;
     let (op, required) = (scope.operation, scope.required());
-    let references = move_references(port, src, to);
+    let references = move_references(port, src, to, body);
     let mut record_done = false;
     if let Some(r) = &src.record {
         let mut record = r.record.clone();
@@ -2342,13 +2349,21 @@ fn finish_move(
 /// integrity preview with the move applied, so a link by the old path (including a record detail
 /// reference) is reported as introduced dangling while a link by DOC identifier follows its file.
 /// Computed before the first removal of the move so the pre-change graph is intact; a failed check
-/// is reported as unknown and never stops the move.
-fn move_references(port: &dyn Port, src: &Observation, to: &DocPath) -> ReferenceCheck {
+/// is reported as unknown and never stops the move. Every caller runs after the destination copy
+/// exists and was verified equal to the moved body, so `body` is passed as the `put` of `to`: the
+/// overlay precondition (`to` absent or in `put`) holds and no foreign destination is ever replaced.
+fn move_references(
+    port: &dyn Port,
+    src: &Observation,
+    to: &DocPath,
+    body: &[u8],
+) -> ReferenceCheck {
     let moves = [(src.path.clone(), to.clone())];
+    let put = [(to.clone(), body.to_vec())];
     references::preview(
         port,
         &references::Overlay {
-            put: &[],
+            put: &put,
             remove: &[],
             moves: &moves,
         },

@@ -853,6 +853,12 @@ fn relocate_identity_resume_windows() {
                 && done.warnings.contains(&Warning::AlreadyApplied)
                 && done.publications.is_empty()
         );
+        // The repeat has nothing left to check, so it reports no reference attention at all.
+        assert!(
+            matches!(done.references, ReferenceCheck::Skipped),
+            "window {window}: {:?}",
+            done.references
+        );
     }
 }
 
