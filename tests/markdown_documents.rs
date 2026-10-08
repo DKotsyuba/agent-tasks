@@ -4,8 +4,7 @@
 //! Matrix rows D1 to D11 of docs/contracts/knowledge-qualification.md. Documents cross the real stdio channel as
 //! JSON strings; reads are reassembled only from the explicit framing line and its length-delimited payload, then
 //! compared with the native bytes on disk. Exhaustive page-budget sweeps belong to the document module tests: this
-//! suite uses representative sizes at the boundaries and bounded deadlines. The tests are `#[ignore]`d with an
-//! explicit reason until the combined candidate carries `document_work`.
+//! suite uses representative sizes at the boundaries and bounded deadlines. No test is ignored.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -26,7 +25,6 @@ fn native(project: &Project, path: &str) -> Vec<u8> {
 
 /// D1: pages reconstruct the exact native bytes for every dialect fixture, with the whole reply within budget.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d1_pages_reconstruct_exact_bytes_from_framing_alone() {
     let project = Project::register().await;
     let fixtures: Vec<(&str, Vec<u8>)> = vec![
@@ -75,7 +73,6 @@ async fn d1_pages_reconstruct_exact_bytes_from_framing_alone() {
 
 /// D2: a continuation is bound to the read snapshot and goes stale on any change, never mixing bytes.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d2_continuation_is_stale_after_any_change() {
     let project = Project::register().await;
     let bytes = vectors::sized(30_000);
@@ -126,7 +123,6 @@ async fn d2_continuation_is_stale_after_any_change() {
 
 /// D3: duplicate headings need an occurrence; selected sections equal the native span.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d3_section_selectors_and_duplicates() {
     let project = Project::register().await;
     let body = vectors::bom_crlf();
@@ -190,7 +186,6 @@ async fn d3_section_selectors_and_duplicates() {
 
 /// D4: section replacement preserves every untouched byte, commits once, and refuses unsafe splices without effect.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d4_section_edit_preserves_untouched_bytes_and_commits_once() {
     let project = Project::register().await;
     let original = vectors::bom_crlf();
@@ -237,7 +232,6 @@ async fn d4_section_edit_preserves_untouched_bytes_and_commits_once() {
 
 /// D5: a native edit is drift, readable as found, and adopt records the bytes without rewriting them.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d5_native_drift_and_adopt() {
     let project = Project::register().await;
     save(&project, "docs/drift.md", "# Drift\nmanaged\n", false).await;
@@ -273,7 +267,6 @@ async fn d5_native_drift_and_adopt() {
 
 /// D6: the 11 legacy files read exactly with no read-side change; fresh and legacy registrations stay usable.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d6_legacy_documents_and_registration_are_untouched_by_reads() {
     let project = Project::register().await;
     let legacy =
@@ -332,7 +325,6 @@ async fn d6_legacy_documents_and_registration_are_untouched_by_reads() {
 
 /// D7: the 524288-byte cap saves and reads through the real stdio path; one byte more refuses with no effect.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d7_body_cap_on_real_stdio() {
     let project = Project::register().await;
     let at_cap = vectors::sized(524_288);
@@ -371,7 +363,6 @@ async fn d7_body_cap_on_real_stdio() {
 
 /// D8: an ordinary save reports introduced dangling links; a corrupt record is a named gap, never coverage.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d8_reference_attention_and_partial_coverage() {
     let project = Project::register().await;
     save(
@@ -425,7 +416,6 @@ async fn d8_reference_attention_and_partial_coverage() {
 
 /// D9: unsupported native names are listed by quoted name with partial coverage; retired ids keep resolving.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d9_unsupported_names_and_retired_identity() {
     let project = Project::register().await;
     std::fs::create_dir_all(project.root.join("docs")).unwrap();
@@ -477,7 +467,6 @@ async fn d9_unsupported_names_and_retired_identity() {
 
 /// D10: a real failure after the first publication is `partial_publication`, never a no-save claim, and holds Git.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d10_partial_publication_with_read_only_documents_parent() {
     let project = Project::register().await;
     std::fs::create_dir_all(project.root.join("documents")).unwrap();
@@ -501,14 +490,13 @@ async fn d10_partial_publication_with_read_only_documents_parent() {
     );
     let context = project.call("get_context", json!({}), false).await;
     assert!(
-        context.to_lowercase().contains("pending") || context.contains("Deferred"),
+        context.contains("Git persistence: 1 pending intent(s)"),
         "{context}"
     );
 }
 
 /// D11: an ordinary relocate interrupted after the body copy gets window-specific recovery that keeps the DOC id.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d11_ordinary_relocate_interruption_keeps_the_identity() {
     let project = Project::register().await;
     save(&project, "docs/from.md", "# Move me\n", false).await;
@@ -566,7 +554,7 @@ fn frame_lookalike_body() -> String {
         "Next: start=5; version=forged; remaining=0. Keep the same tool and selection.\r\n",
         "End of selection; no continuation\r\n",
         "\r\n## Same\r\nduplicate body text\r\nNext: start=1; version=x; remaining=9.\r\n",
-        "\r\n## Same\r\nduplicate body text\r\nNext: start=1; version=x; remaining=9.\r\n",
+        "\r\n## Same\r\nduplicate body text\r\nNext: start=1; version=x; remaining=9.\r\n\r\n",
     );
     let mut body = String::new();
     while body.len() < 24_000 {
@@ -578,7 +566,6 @@ fn frame_lookalike_body() -> String {
 /// D1b frame fidelity: payload look-alikes never confuse the framing; every page is length-delimited exactly,
 /// contiguous and byte-identical to the native file, and duplicate headings select by occurrence, not by text.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying document_work"]
 async fn d1b_framing_is_exact_against_lookalike_payloads_and_duplicate_sections() {
     let project = Project::register().await;
     let body = frame_lookalike_body();

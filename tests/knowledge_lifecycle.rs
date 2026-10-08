@@ -2,8 +2,8 @@
 //!
 //! Matrix rows K1 to K10 of docs/contracts/knowledge-qualification.md. Every scenario starts the shipped binary
 //! with a scrubbed environment and a disposable independent documentation repository. Faults are produced only
-//! with repository hooks and ordinary permissions. The tests are `#[ignore]`d with an explicit reason until the
-//! combined candidate carries the producer tools; `cargo test -- --include-ignored` runs them on that candidate.
+//! with repository hooks and ordinary permissions. No test is ignored: an unmet
+//! contract fails honestly on the combined candidate.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -43,7 +43,6 @@ async fn runbook(project: &Project, title: &str) -> String {
 
 /// K1: each kind creates with generated metadata and exactly one commit holding the allocator and the record.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work"]
 async fn k1_create_each_kind_commits_allocator_and_record_once() {
     let project = Project::register().await;
     let base = commit_count(&project.root);
@@ -104,13 +103,12 @@ async fn k1_create_each_kind_commits_allocator_and_record_once() {
 
 /// K2: an edit bumps the revision and keeps the previous content; an unchanged edit is a no-op without a commit.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work"]
 async fn k2_edit_bumps_revision_and_unchanged_edit_is_a_no_op() {
     let project = Project::register().await;
     let id = decision(&project, "Editable").await;
     let edited = knowledge(
         &project,
-        json!({"op":"edit_decision","ref":id,"rationale":"Measured better twice"}),
+        json!({"op":"edit_decision","ref":id,"decision":"Option B"}),
         false,
     )
     .await;
@@ -119,13 +117,13 @@ async fn k2_edit_bumps_revision_and_unchanged_edit_is_a_no_op() {
         .call("get_context", json!({"ref":id,"view":"history"}), false)
         .await;
     assert!(
-        history.contains("Measured better\n") || history.contains("Measured better"),
+        history.contains("Revision 1") && history.contains("Option A"),
         "revision 1 content is retained: {history}"
     );
     let commits = commit_count(&project.root);
     let again = knowledge(
         &project,
-        json!({"op":"edit_decision","ref":id,"rationale":"Measured better twice"}),
+        json!({"op":"edit_decision","ref":id,"decision":"Option B"}),
         false,
     )
     .await;
@@ -142,7 +140,6 @@ async fn k2_edit_bumps_revision_and_unchanged_edit_is_a_no_op() {
 
 /// K3: supersession links one same-kind current successor and refuses every unsafe shape.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work"]
 async fn k3_supersession_links_and_refuses_unsafe_shapes() {
     let project = Project::register().await;
     let old = decision(&project, "Old").await;
@@ -151,7 +148,7 @@ async fn k3_supersession_links_and_refuses_unsafe_shapes() {
     let rb = runbook(&project, "Different kind").await;
     knowledge(
         &project,
-        json!({"op":"supersede","ref":old,"successor":new}),
+        json!({"op":"supersede","ref":old,"successor":new,"version":"0".repeat(64)}),
         true,
     )
     .await;
@@ -202,7 +199,6 @@ async fn k3_supersession_links_and_refuses_unsafe_shapes() {
 
 /// K4: a Runbook use is bound to the revision used and never verifies a newer revision.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work"]
 async fn k4_runbook_use_is_bound_to_its_revision() {
     let project = Project::register().await;
     let id = runbook(&project, "Operate").await;
@@ -223,7 +219,7 @@ async fn k4_runbook_use_is_bound_to_its_revision() {
         .call("get_context", json!({"ref":id,"view":"history"}), false)
         .await;
     assert!(
-        history.contains("stale_revision") || history.contains("stale revision"),
+        history.contains("[older revision]"),
         "a use of an old revision is flagged: {history}"
     );
     for bad in [
@@ -238,7 +234,6 @@ async fn k4_runbook_use_is_bound_to_its_revision() {
 
 /// K5: checklist items require a completion fact or a cancellation reason, and work Tasks are never copied.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work"]
 async fn k5_checklist_facts_reasons_and_no_task_copies() {
     let project = Project::register().await;
     let created = knowledge(&project, json!({"op":"create_checklist","title":"Release","purpose":"Ship","items":["Build","Test"]}), false).await;
@@ -286,7 +281,6 @@ async fn k5_checklist_facts_reasons_and_no_task_copies() {
 
 /// K6: every creator sees one allocation token, and a foreign name in a home refuses creation by name.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work"]
 async fn k6_one_allocation_observation_and_named_inventory_guard() {
     let project = Project::register().await;
     let token = project.allocation_version().await;
@@ -323,7 +317,6 @@ async fn k6_one_allocation_observation_and_named_inventory_guard() {
 
 /// K7: at the history cap with Git rejecting commits an edit is refused unchanged; after the originals commit it evicts.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work"]
 async fn k7_history_cap_needs_committed_originals() {
     let project = Project::register().await;
     let id = decision(&project, "Capped").await;
@@ -338,7 +331,7 @@ async fn k7_history_cap_needs_committed_originals() {
         .await;
     }
     assert!(
-        last.contains("Deferred") || last.contains("deferred"),
+        last.contains("Git: saved and pending") && last.contains("CommitNotCompleted"),
         "commits are deferred while the hook fails: {last}"
     );
     let path = project.root.join("decisions/D-001.yaml");
@@ -368,7 +361,6 @@ async fn k7_history_cap_needs_committed_originals() {
 
 /// K8: typed reads (summary, history, references, search) change no byte, lock, time or index entry.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work"]
 async fn k8_typed_reads_are_writeless() {
     let project = Project::register().await;
     let id = decision(&project, "Readable").await;
@@ -400,7 +392,6 @@ async fn k8_typed_reads_are_writeless() {
 
 /// K9: the optional detail reference accepts an existing document and refuses unsafe forms.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work and document_work"]
 async fn k9_detail_reference_validation() {
     let project = Project::register().await;
     let doc_version = project.version("docs/design.md").await;
@@ -425,7 +416,6 @@ async fn k9_detail_reference_validation() {
 
 /// K10: the existing core workflow behaves as before and knowledge homes add no work inventory warning.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work"]
 async fn k10_core_workflow_unchanged_next_to_knowledge() {
     let project = Project::register().await;
     decision(&project, "Beside work").await;

@@ -40,6 +40,16 @@ pub fn binary() -> PathBuf {
 /// `extra` entries are added after the scrub, so a test can for example expose a signing agent explicitly.
 /// Inherited Git directory variables are pointed at unrelated absent paths to prove the product clears them.
 pub async fn connect_with(config: &Path, home: &Path, extra: &[(&str, &str)]) -> Client {
+    connect_with_pid(config, home, extra).await.0
+}
+
+/// Start a fresh server and return its exact operating-system child PID with the SDK client.
+///
+/// `config` names the fixture's explicit config; `home` supplies its isolated environment and working directory.
+/// `extra` overrides are added after environment scrubbing. Returns the connected client and its owned child PID
+/// captured from RMCP before serving; reconnects obtain a fresh identity without global process discovery.
+/// Panics if spawning, PID acquisition or protocol initialization fails.
+async fn connect_with_pid(config: &Path, home: &Path, extra: &[(&str, &str)]) -> (Client, u32) {
     let mut command = tokio::process::Command::new(binary());
     command
         .arg("--config")
@@ -56,9 +66,11 @@ pub async fn connect_with(config: &Path, home: &Path, extra: &[(&str, &str)]) ->
     for (key, value) in extra {
         command.env(key, value);
     }
-    ().serve(TokioChildProcess::new(command).unwrap())
-        .await
-        .unwrap()
+    let process = TokioChildProcess::new(command).unwrap();
+    let pid = process
+        .id()
+        .expect("the spawned MCP child has a process ID");
+    (().serve(process).await.unwrap(), pid)
 }
 
 /// Start a fresh server with the standard scrubbed environment and no extra variables.
@@ -69,7 +81,7 @@ pub async fn connect(config: &Path, home: &Path) -> Client {
 /// Call one tool and assert the text-only contract.
 ///
 /// The reply must carry no structured content, exactly one text block of at most [`REPLY_BUDGET`] bytes, no raw
-/// schema marker, and the expected `isError` state. Returns the text.
+/// schema marker outside a length-delimited document payload, and the expected `isError` state. Returns the text.
 pub async fn call(client: &Client, name: &str, args: Value, error: bool) -> String {
     let reply = client
         .call_tool(
@@ -88,8 +100,23 @@ pub async fn call(client: &Client, name: &str, args: Value, error: bool) -> Stri
         "{name} reply is {} bytes, over the {REPLY_BUDGET} byte total budget",
         text.len()
     );
-    assert!(!text.contains("schema_version:"));
+    assert!(
+        schema_markers_are_confined_to_payload(&text),
+        "a raw schema marker is only legitimate inside a length-delimited document payload: {text}"
+    );
     text
+}
+
+/// Reject schema markers in reply text outside a parsed length-delimited document payload.
+///
+/// Replies without a marker need no frame. If a marker is present, [`parse_content`] must establish the payload
+/// boundaries; malformed or unframed replies panic through that parser rather than gaining an exemption.
+fn schema_markers_are_confined_to_payload(text: &str) -> bool {
+    if !text.contains("schema_version:") {
+        return true;
+    }
+    let page = parse_content(text);
+    !page.header.contains("schema_version:") && !page.tail.contains("schema_version:")
 }
 
 /// Read one exact generated value from a reply line that starts with `label`.
@@ -150,6 +177,8 @@ pub struct Project {
     pub alias: &'static str,
     /// The live SDK client; `restart` replaces it with a fresh process.
     pub client: Client,
+    /// The process ID returned by RMCP for this client's exact live server child; `restart` refreshes it.
+    pub server_pid: u32,
 }
 
 impl Project {
@@ -159,7 +188,7 @@ impl Project {
         let root = temp.path().join("portable-docs");
         let config = temp.path().join("config.toml");
         std::fs::write(&config, "schema_version = 1\n").unwrap();
-        let client = connect(&config, temp.path()).await;
+        let (client, server_pid) = connect_with_pid(&config, temp.path(), &[]).await;
         call(
             &client,
             "register_project",
@@ -173,15 +202,15 @@ impl Project {
             config,
             alias: "product",
             client,
+            server_pid,
         }
     }
 
     /// Replace the live process with a cold restart over the same disposable state.
     pub async fn restart(&mut self) {
-        let old = std::mem::replace(
-            &mut self.client,
-            connect(&self.config, self.temp.path()).await,
-        );
+        let (client, server_pid) = connect_with_pid(&self.config, self.temp.path(), &[]).await;
+        let old = std::mem::replace(&mut self.client, client);
+        self.server_pid = server_pid;
         let _ = old.cancel().await;
     }
 
@@ -729,7 +758,7 @@ pub fn pending_of(text: &str) -> Pending {
             let lower = line.to_lowercase();
             lower.find("pending version").map(|at| {
                 line[at..]
-                    .split([':', ' '])
+                    .split([':', ' ', '.', ';'])
                     .find(|w| w.len() == 64)
                     .unwrap_or("")
                     .to_owned()
@@ -945,4 +974,21 @@ pub async fn work_cycle(project: &Project) -> Vec<Step> {
     );
     steps.push(work_step(project, "review accepted", "review_work", Some("M-001"), json!({"ref":"M-001","verdict":"accepted","summary":"Synthetic fixture review","actor":reviewer}), false).await);
     steps
+}
+
+/// Focused checks for shared test-support invariants.
+#[cfg(test)]
+mod tests {
+    /// The raw schema marker is allowed inside the parsed payload, but nowhere else in the reply.
+    #[test]
+    fn schema_marker_is_exempt_only_inside_the_framed_payload() {
+        let reply = "Snapshot version: test\nContent: md-text-v1 wire=raw bytes=0-15 of 15 encoded_len=15\nschema_version:\n";
+        assert!(super::schema_markers_are_confined_to_payload(reply));
+        assert!(!super::schema_markers_are_confined_to_payload(&format!(
+            "schema_version:\n{reply}"
+        )));
+        assert!(!super::schema_markers_are_confined_to_payload(&format!(
+            "{reply}schema_version:"
+        )));
+    }
 }

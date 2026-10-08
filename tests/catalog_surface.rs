@@ -2,8 +2,7 @@
 //!
 //! Rows covered: the registered 14-tool surface of `registered-tool-surface` r4 (catalog, closed schemas, exact
 //! operation lists), the field-named validation observation AT-003, and the proof that reads change nothing.
-//! Tests that need the four producer tools are `#[ignore]`d with the exact reason until the combined candidate
-//! exists; the read-writeless and legacy-compatibility tests run against any candidate.
+//! No test is ignored: every scenario runs on the combined 14-tool candidate and an unmet contract fails honestly.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -98,7 +97,6 @@ fn ops(schema: &Value) -> BTreeSet<String> {
 /// The real discovery list: exactly ten existing plus four producer tools, each with a root object schema,
 /// the provider's closed operation list, and discovery equal to the exported snapshot.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate: knowledge_work, document_work, compaction_work and git_recovery"]
 async fn catalog_is_exactly_fourteen_closed_tools() {
     let temp = tempfile::tempdir_in("/private/tmp").unwrap();
     let config = temp.path().join("config.toml");
@@ -155,7 +153,6 @@ async fn catalog_is_exactly_fourteen_closed_tools() {
 
 /// A bad call to each producer tool is refused with a field-named, value-free error and saves nothing.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate: knowledge_work, document_work, compaction_work and git_recovery"]
 async fn producer_tools_refuse_unknown_operations_and_fields_by_name() {
     let project = Project::register().await;
     let before = tree(&project.root);
@@ -199,7 +196,6 @@ async fn producer_tools_refuse_unknown_operations_and_fields_by_name() {
 
 /// AT-003 retest on the real stdio path: an over-long list names its field and limit and echoes no value.
 #[tokio::test]
-#[ignore = "AT-003: reproduced on baseline 0.9.2 (generic error); passes only on the combined candidate with M-003 field-named errors"]
 async fn over_long_list_refusal_names_the_field_and_limit() {
     let project = Project::register().await;
     let context = project.call("get_context", json!({}), false).await;
@@ -225,13 +221,12 @@ async fn over_long_list_refusal_names_the_field_and_limit() {
 
 /// AT-003 retest: a wrong field name on a planning edit is named, not reported as a generic shape failure.
 #[tokio::test]
-#[ignore = "AT-003: reproduced on baseline 0.9.2 (generic error); passes only on the combined candidate with M-003 field-named errors"]
 async fn wrong_field_name_is_named_on_a_real_call() {
     let project = Project::register().await;
     let text = project
         .call(
             "plan_work",
-            json!({"version":"0".repeat(64),"op":"edit_task","module":"M-001","task":"T-001","titel":"QUALIFICATION-VALUE"}),
+            json!({"version":"0".repeat(64),"op":"edit_task","ref":"M-001/T-001","titel":"QUALIFICATION-VALUE"}),
             true,
         )
         .await;
@@ -311,7 +306,6 @@ async fn cold_restart_reads_the_same_project() {
 /// A project with an Epic and two member Modules must report the two members as readable of declared, never zero,
 /// and a corrupted member must be named with partial coverage rather than counted as nothing.
 #[tokio::test]
-#[ignore = "AT-004: reproduced on baseline 0.9.2 (project_status module=E-001 shows no readable members); passes with M-003 Epic roll-up"]
 async fn epic_status_keeps_honest_child_counts() {
     let project = Project::register().await;
     let version = |text: &str| support::field(text, "Allocation version: ");
@@ -348,7 +342,7 @@ async fn epic_status_keeps_honest_child_counts() {
         .call("project_status", json!({"module":"E-001"}), false)
         .await;
     assert!(
-        !status.contains("/ 0 readable") && status.contains('2'),
+        status.contains("Modules: 0 current-reviewed / 2 readable"),
         "both declared members are counted readable, never zero: {status}"
     );
     std::fs::write(project.root.join("modules/M-002.yaml"), "not: [valid").unwrap();

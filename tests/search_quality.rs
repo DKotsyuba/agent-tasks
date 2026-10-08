@@ -5,8 +5,7 @@
 //! bytes and whether the expected term is actually present. Rows of class `vocab-gap` (paraphrase, misspelling) and
 //! `negative` are expected misses: they prove the miss is detected and are the only rows that could ever motivate a
 //! semantic proposal; no semantic service is added. A miss on any other class is a defect and fails. The measured
-//! table is written to `CARGO_TARGET_TMPDIR/search-quality.md`. The work-only subset runs on any candidate; the rest
-//! is `#[ignore]`d until the combined candidate carries the typed and document tools.
+//! table is written to `CARGO_TARGET_TMPDIR/search-quality.md`. No test is ignored.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -218,7 +217,6 @@ async fn work_queries_hit_and_vocabulary_gaps_are_detected() {
 
 /// The full corpus across work, typed records and Markdown with at least sixty declared queries.
 #[tokio::test]
-#[ignore = "needs the combined E-001 candidate carrying knowledge_work and document_work and kinds filters in search"]
 async fn full_corpus_measurement_over_work_knowledge_and_documents() {
     let project = Project::register().await;
     let mut keys = work_corpus(&project).await;
@@ -234,8 +232,8 @@ async fn full_corpus_measurement_over_work_knowledge_and_documents() {
         let checklist = knowledge(&project, json!({"op":"create_checklist","title":format!("Release {word}"),"purpose":"Ship","items":[format!("Verify {word} manifest")]}), false).await;
         keys.push((format!("checklist:{index}"), target(&checklist)));
         let path = format!("docs/{word}-guide.md");
-        save(&project, &path, &format!("# {word} guide\n\n## Overview\nThe {body} sector is described here.\n\n## Details\nMore about {word}.\n"), false).await;
-        keys.push((format!("doc:{index}"), path));
+        let saved = save(&project, &path, &format!("# {word} guide\n\n## Overview\nThe {body} sector is described here.\n\n## Details\nMore about {word}.\n"), false).await;
+        keys.push((format!("doc:{index}"), target(&saved)));
         queries.extend([
             Query {
                 class: "exact-title",
@@ -330,8 +328,11 @@ async fn full_corpus_measurement_over_work_knowledge_and_documents() {
     let state = document(
         &project,
         json!({"op":"adopt","ref":"docs/zephyr-guide.md"}),
-        false,
+        true,
     )
     .await;
-    assert!(!state.is_empty());
+    assert!(
+        state.contains("Only an unmanaged or drifted document can be adopted"),
+        "{state}"
+    );
 }
