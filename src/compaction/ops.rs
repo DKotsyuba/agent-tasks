@@ -40,7 +40,8 @@ pub struct Outcome {
     pub blocked: Option<record::BlockedInfo>,
     /// Plain lines for the acknowledgement notes, at most eight of 200 bytes.
     pub notes: Vec<String>,
-    /// Canonical references of affected records, at most 16 of 256 bytes.
+    /// Canonical references of every affected record, unbounded by the domain; the acknowledgement keeps the
+    /// first sixteen of at most 256 bytes and counts the rest as omitted.
     pub refs: Vec<String>,
 }
 
@@ -67,13 +68,9 @@ impl Outcome {
                     refs.push(id.clone());
                 }
             }
-            for p in validate::touched_paths(b) {
-                if refs.len() < 16 && p.len() <= 256 {
-                    refs.push(p);
-                }
-            }
+            // The acknowledgement owner bounds and counts what it shows; nothing is dropped here.
+            refs.extend(validate::touched_paths(b));
         }
-        refs.truncate(16);
         let mut notes = vec![format!(
             "{}/{} actions applied.",
             applied_count(record),

@@ -2117,6 +2117,27 @@ fn removal_waits_when_the_current_intent_cannot_commit_atomically() {
     );
 }
 
+/// The domain outcome keeps every affected reference, so the producer's omitted count is exact: a
+/// Replace plus nineteen created documents yield the record id, the DOC id and twenty paths, none
+/// truncated here.
+#[test]
+fn outcome_refs_are_not_truncated_by_the_domain() {
+    let env = world();
+    let mut input = replace_a(&env);
+    input.actions.extend((2..=20).map(|n| ActionIn {
+        content: Some("Fresh\n".into()),
+        purpose: Some("fresh".into()),
+        ..action(
+            &format!("A-{n:02}"),
+            ActionKind::Create,
+            &format!("docs/n{n:02}.md"),
+        )
+    }));
+    let out = propose(&env, "key-0095-aa", &input).unwrap();
+    assert!(out.refs.len() > 16, "{:?}", out.refs);
+    assert_eq!(out.refs.len(), 22, "{:?}", out.refs);
+}
+
 // ------------------------------------------------------- retained reads (revision 7)
 
 /// A revise of [`replace_a`] whose candidate differs from revision one, so a read of the wrong

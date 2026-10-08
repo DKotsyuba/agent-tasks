@@ -446,13 +446,14 @@ fn acknowledgement(out: Outcome) -> Ack {
         out.state.label(),
         out.changed,
     );
-    let omitted = out.refs.len().saturating_sub(16);
+    let total = out.refs.len();
     ack.refs = out
         .refs
         .into_iter()
         .filter(|r| r.len() <= 256)
         .take(16)
         .collect();
+    let omitted = total - ack.refs.len();
     let mut notes: Vec<String> = out.notes.iter().map(|n| bound(n, 200)).collect();
     notes.truncate(if omitted > 0 { 7 } else { 8 });
     if omitted > 0 {
@@ -743,5 +744,25 @@ mod tests {
         assert_eq!(ack.refs.len(), 16);
         assert!(ack.notes.len() <= 8 && ack.notes.iter().all(|n| n.len() <= 200));
         assert!(ack.notes.last().unwrap().contains("4 references omitted"));
+    }
+
+    /// A reference too long for the acknowledgement is counted as omitted, never silently dropped.
+    #[test]
+    fn acknowledgement_counts_every_omitted_reference() {
+        let out = Outcome {
+            id: "CP-001".into(),
+            version: "v".into(),
+            state: compaction::record::CpState::Proposed,
+            revision: 1,
+            changed: true,
+            applied: vec![],
+            total: 1,
+            blocked: None,
+            notes: vec![],
+            refs: vec!["CP-001".into(), "d/".to_owned() + &"x".repeat(300)],
+        };
+        let ack = acknowledgement(out);
+        assert_eq!(ack.refs, ["CP-001"]);
+        assert!(ack.notes.last().unwrap().contains("1 references omitted"));
     }
 }

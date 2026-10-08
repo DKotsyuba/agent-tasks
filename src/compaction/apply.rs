@@ -575,6 +575,14 @@ pub fn apply(
         .chain(body.sources.iter().filter_map(|s| s.record_path.as_deref()))
         .chain(std::iter::once(record_path.as_str()))
         .collect();
+    if let Some(gap) = env.pending_gap() {
+        return Err(refuse(
+            "effect_unknown",
+            format!(
+                "Pending intent coverage is incomplete, so no earlier held effect can be ruled out: {gap}. Resolve them with git_recovery, then apply again."
+            ),
+        ));
+    }
     let held: Vec<_> = env
         .pending()
         .into_iter()

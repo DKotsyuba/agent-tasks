@@ -283,12 +283,25 @@ fn source_kind(kind: references::SourceKind) -> SourceKind {
 }
 
 /// Named coverage gaps as bounded text lines.
+///
+/// An incomplete coverage always names its cause: the listed gaps, the count of constructs seen but not
+/// interpreted, and a generic line only when neither explains the incompleteness.
 fn gap_lines(coverage: &references::Coverage) -> Vec<String> {
-    coverage
+    let mut lines: Vec<String> = coverage
         .gaps
         .iter()
         .map(|g| format!("{}: {:?}", g.what, g.reason))
-        .collect()
+        .collect();
+    if coverage.unparsed > 0 {
+        lines.push(format!(
+            "{} construct(s) seen but not interpreted.",
+            coverage.unparsed
+        ));
+    }
+    if !coverage.complete && lines.is_empty() {
+        lines.push("reference coverage is incomplete without a named cause.".to_owned());
+    }
+    lines
 }
 
 /// Effect kind of a file effect; directory effects are not operation rows.
@@ -644,6 +657,30 @@ impl Env for LiveEnv<'_> {
             .collect()
     }
 
+    /// Names why the bounded pending list is not the whole truth: an unreadable journal, more pending
+    /// intents than the engine lists, or a listed intent whose evidence cannot be read.
+    fn pending_gap(&self) -> Option<String> {
+        let summary = persist::pending(self.store);
+        if !summary.complete {
+            return Some(format!(
+                "the pending journal is not fully readable ({})",
+                summary.warnings.join("; ")
+            ));
+        }
+        if summary.facts.intents > summary.refs.len() {
+            return Some(format!(
+                "{} pending intents exist but only {} are listed",
+                summary.facts.intents,
+                summary.refs.len()
+            ));
+        }
+        summary
+            .refs
+            .iter()
+            .find(|r| persist::intent_view(self.store, &r.intent).is_none())
+            .map(|r| format!("the evidence of pending intent {} cannot be read", r.intent))
+    }
+
     /// The typed publication events of this request, an unconfirmed entry counting as untracked.
     fn call_events(&self) -> Vec<EventView> {
         self.store
@@ -678,6 +715,27 @@ impl Env for LiveEnv<'_> {
     reason = "Explicit isolated fixture assertions"
 )]
 mod tests {
+    /// Incomplete coverage always names its cause: listed gaps, uninterpreted constructs, or an explicit
+    /// unnamed-cause line, and complete coverage names nothing.
+    #[test]
+    fn gap_lines_always_name_an_incomplete_cause() {
+        let coverage = |complete, unparsed| references::Coverage {
+            complete,
+            files_read: 0,
+            bytes_read: 0,
+            gaps: Vec::new(),
+            unparsed,
+            limits: &[],
+            version: String::new(),
+        };
+        assert!(gap_lines(&coverage(true, 0)).is_empty());
+        let unparsed = gap_lines(&coverage(false, 2));
+        assert_eq!(unparsed, ["2 construct(s) seen but not interpreted."]);
+        let unnamed = gap_lines(&coverage(false, 0));
+        assert_eq!(unnamed.len(), 1);
+        assert!(unnamed[0].contains("without a named cause"), "{unnamed:?}");
+    }
+
     use super::*;
     use crate::{
         compaction::{

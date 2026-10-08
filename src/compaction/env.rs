@@ -200,7 +200,12 @@ pub enum DocOp {
         /// Observation version expected at the path.
         expected: String,
     },
-    /// Adopt an attested body that lacks its record (Create and Replace of unmanaged only).
+    /// Adopt an attested body whose record the interrupted call did not publish or update.
+    ///
+    /// Allowed only for a Create, a Replace of an Unmanaged document, and, by revision 8 of the
+    /// contract, the interrupted Replace of a Managed document whose body was attested for the action's
+    /// own operation identity; the verified post image (same DOC identifier, base revision plus one,
+    /// recorded hash) must hold afterwards. Equal bytes alone are never ownership.
     Adopt {
         /// Path whose current bytes are recorded.
         path: String,
@@ -415,8 +420,17 @@ pub trait Env {
     fn effect_status(&self, operation: &str, expected: &[Expected]) -> StatusView;
     /// Prove every item exists byte identical in a reachable commit; `not_committed` names the missing.
     fn verify_committed(&self, items: &[OriginalItem]) -> Result<Vec<LocatorView>>;
-    /// Pending intents of the persistence engine.
+    /// Pending intents of the persistence engine, at most the first sixteen the engine lists.
     fn pending(&self) -> Vec<PendingIntent>;
+    /// Why [`Env::pending`] cannot be trusted to show every pending intent with its paths, or `None`
+    /// when it can.
+    ///
+    /// The list is bounded and an intent whose evidence is unreadable shows no paths, so a barrier that
+    /// reads it alone could miss a held or unknown intent on a path the proposal needs. A caller must
+    /// refuse, never proceed, while this names a gap. The default is for substitutes that list everything.
+    fn pending_gap(&self) -> Option<String> {
+        None
+    }
     /// Every publication event the current request has produced so far.
     fn call_events(&self) -> Vec<EventView>;
 }

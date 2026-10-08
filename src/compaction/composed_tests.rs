@@ -649,6 +649,11 @@ fn an_unreadable_typed_home_blocks_destructive_proposals() {
         preservation: vec![],
     });
     assert_eq!(code(&refused), "coverage_incomplete", "{refused:?}");
+    // The refusal names the unreadable record, never a blank unknown.
+    assert!(
+        refused.as_ref().unwrap_err().message.contains("D-001"),
+        "{refused:?}"
+    );
 }
 
 /// An original that exists only in the working tree is not provably committed: apply publishes nothing.
@@ -1066,4 +1071,61 @@ fn an_unrelated_held_intent_neither_blocks_nor_is_stranded() {
     assert_eq!(recovered.outcome, GitOutcome::Committed, "{recovered:?}");
     let (second, _) = repo.apply("CP-002", vec![]);
     assert_eq!(second.unwrap().state, CpState::Applied);
+}
+
+/// The engine lists at most sixteen pending intents. With seventeen, the newest, which here holds the
+/// proposal's own document, is hidden from the listing, so the held barrier alone could not see it. Apply
+/// must refuse and say why rather than write over an intent it cannot rule out.
+#[test]
+fn seventeen_pending_intents_hide_an_overlapping_held_intent_so_apply_refuses() {
+    let repo = Repo::new();
+    repo.seed("docs/a.md", A_BODY);
+    repo.propose("key-real-0030", replace_a).unwrap();
+    repo.accept("CP-001").unwrap();
+    for n in 0..16 {
+        let path = format!("docs/u{n:02}.md");
+        let (held, _) = repo.step(
+            EventClass::Document,
+            vec![fault("put", "documents/DOC-", "io", false)],
+            |env, fx| {
+                let expected = env.observe(&path)?.version;
+                env.doc_op(
+                    &format!("unrelated-{n}"),
+                    "tester",
+                    &DocOp::Save {
+                        path: path.clone(),
+                        body: b"U\n".to_vec(),
+                        purpose: Some("fixture".into()),
+                        expected,
+                    },
+                    fx,
+                )
+            },
+        );
+        assert!(
+            held.is_err(),
+            "{path}: the scripted fault leaves a held intent"
+        );
+    }
+    assert_eq!(repo.pending_intents(), 16);
+    // Sixteen unrelated intents are fully listed, so the first apply runs and itself leaves a held intent
+    // on the proposal's document: the seventeenth, beyond the engine's listing.
+    let (first, _) = repo.apply(
+        "CP-001",
+        vec![fault("put", "documents/DOC-001.yaml", "io", false)],
+    );
+    assert_eq!(code(&first), "partial_publication", "{first:?}");
+    let store = Store::from_root(repo.fx.dir.path()).unwrap();
+    let summary = crate::persist::pending(&store);
+    assert_eq!((summary.facts.intents, summary.refs.len()), (17, 16));
+    let before = repo.bytes("docs/a.md");
+    let (second, _) = repo.apply("CP-001", vec![]);
+    let err = second.unwrap_err();
+    assert_eq!(err.code, "effect_unknown", "{err:?}");
+    assert!(
+        err.message.contains("17 pending intents") && err.message.contains("only 16"),
+        "{}",
+        err.message
+    );
+    assert_eq!(repo.bytes("docs/a.md"), before, "nothing was written");
 }
