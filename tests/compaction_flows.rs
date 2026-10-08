@@ -1,7 +1,7 @@
 //! Real-process qualification of reviewed compaction through `compaction_work` (M-006 criterion 5).
 //!
-//! Matrix rows C1 to C14 of docs/contracts/knowledge-qualification.md against `compaction-operations` r6 and
-//! `cp-inventory` r1. A trusted agent proposes, an independent reviewer accepts, and apply runs under the production
+//! Matrix rows C1 to C14 (C7b over `registered-tool-surface` r5 section 15) of docs/contracts/knowledge-qualification.md
+//! against `compaction-operations` r7 and `cp-inventory` r1. A trusted agent proposes, an independent reviewer accepts, and apply runs under the production
 //! Git policy. Interruptions use an ordinary read-only `documents/` parent that fails a later step after an earlier one
 //! published, then restore the permission and repeat the same call; a crash inside a handler stays with the provider's
 //! in-crate fault points. Payload shapes follow the exported closed wire of `compaction_work`: section addresses are
@@ -552,6 +552,43 @@ async fn c7b_retained_revision_is_reconstructed_exactly_through_the_public_reads
         retained_candidate(&project, &cp, 1, "A-02").await.0,
         replace,
         "a native edit of the live document changes no retained byte"
+    );
+
+    // A damaged staged file is `invalid_data`, never repaired and never replaced by another byte source: a flipped
+    // byte of equal length breaks the hash, a truncated file breaks the recorded length, a removed file is missing.
+    let blob = |revision: u32, action: &str| {
+        project
+            .root
+            .join(format!("compactions/{cp}/r{revision}/{action}.md"))
+    };
+    let mut damaged = one.clone().into_bytes();
+    let last = damaged.len() - 3;
+    damaged[last] ^= 1;
+    std::fs::write(blob(1, "A-01"), &damaged).unwrap();
+    std::fs::write(blob(2, "A-01"), &two.as_bytes()[..two.len() - 5]).unwrap();
+    std::fs::remove_file(blob(1, "A-02")).unwrap();
+    let damaged_tree = tree(&project.root);
+    for (revision, action, expected) in [
+        (1, "A-01", "recorded hash"),
+        (2, "A-01", "recorded hash"),
+        (1, "A-02", "missing"),
+    ] {
+        let refused = project
+            .call(
+                "get_context",
+                json!({"ref":cp,"view":"content","revision":revision,"action":action}),
+                true,
+            )
+            .await;
+        assert!(
+            refused.contains("invalid_data") && refused.contains(expected),
+            "r{revision}/{action} must refuse invalid_data ({expected}): {refused}"
+        );
+    }
+    assert_eq!(
+        damaged_tree,
+        tree(&project.root),
+        "a refused retained read repairs nothing"
     );
 }
 
