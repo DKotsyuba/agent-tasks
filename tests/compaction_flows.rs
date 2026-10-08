@@ -314,6 +314,247 @@ async fn c1_c2_review_independence_and_revision_history() {
     );
 }
 
+/// A staged candidate that stresses the page wire: a BOM, CRLF line ends, a fenced heading, non-BMP and multibyte
+/// text, and enough lines to cross the 8192-byte page budget several times. `tag` makes each revision distinct.
+fn staged_candidate(tag: &str) -> String {
+    let mut body = format!(
+        "\u{feff}# AB {tag}\r\n```\r\n## not a heading {tag}\r\n```\r\nRocket 🚀 日本語 Привет {tag}\r\n"
+    );
+    let mut n = 0;
+    while body.len() < 20_000 {
+        body.push_str(&format!("line {n} of {tag}\r\n"));
+        n += 1;
+    }
+    body
+}
+
+/// The staged bytes of one action as the product wrote them under the proposal directory.
+fn stored_candidate(project: &Project, cp: &str, revision: u32, action: &str) -> Vec<u8> {
+    std::fs::read(
+        project
+            .root
+            .join(format!("compactions/{cp}/r{revision}/{action}.md")),
+    )
+    .unwrap()
+}
+
+/// Read a retained candidate page by page and return the reassembled bytes, the pages and the final snapshot.
+async fn retained_candidate(
+    project: &Project,
+    cp: &str,
+    revision: u32,
+    action: &str,
+) -> (Vec<u8>, Vec<support::ContentPage>) {
+    let pages =
+        support::read_pages(project, cp, json!({"revision":revision,"action":action})).await;
+    let bytes = pages
+        .iter()
+        .flat_map(|page| support::decode_wire(&page.wire, &page.payload))
+        .collect();
+    (bytes, pages)
+}
+
+/// C7b: after revision 2 the public surface reconstructs revision 1 exactly: its proposal and review through the
+/// history view, and its staged candidate byte for byte over every page, while misuse refuses by field, a record
+/// change makes continuation stale and no read writes (`registered-tool-surface` r5 section 15).
+#[tokio::test]
+async fn c7b_retained_revision_is_reconstructed_exactly_through_the_public_reads() {
+    let project = Project::register().await;
+    let rows = fixture_docs(&project).await;
+    let one = staged_candidate("revision one");
+    let two = staged_candidate("revision two");
+    let mut first = merge_proposal(&rows, "qual-retained");
+    first["actions"][0]["content"] = json!(one);
+    let cp = target(&compaction(&project, first, "author-agent", false).await);
+    compaction(
+        &project,
+        accept(&project, &cp).await,
+        "reviewer-agent",
+        false,
+    )
+    .await;
+    let mut revised = merge_proposal(&rows, "unused");
+    revised.as_object_mut().unwrap().remove("request_key");
+    revised["op"] = json!("revise");
+    revised["cp"] = json!(cp);
+    revised["title"] = json!("Second revision title");
+    revised["actions"][0]["content"] = json!(two);
+    revised["actions"][0]["reason"] = json!("Revision two reason");
+    compaction(&project, revised, "author-agent", false).await;
+
+    // Everything below is a read: the tree is byte identical before and after.
+    let before = tree(&project.root);
+    let (first_bytes, first_pages) = retained_candidate(&project, &cp, 1, "A-01").await;
+    let (second_bytes, second_pages) = retained_candidate(&project, &cp, 2, "A-01").await;
+    assert!(
+        first_pages.len() > 2 && second_pages.len() > 2,
+        "both candidates cross the 8192-byte page budget"
+    );
+    assert_eq!(first_bytes, one.as_bytes(), "revision 1 candidate bytes");
+    assert_eq!(second_bytes, two.as_bytes(), "revision 2 candidate bytes");
+    assert_eq!(first_bytes, stored_candidate(&project, &cp, 1, "A-01"));
+    assert_eq!(second_bytes, stored_candidate(&project, &cp, 2, "A-01"));
+    assert_ne!(first_bytes, second_bytes);
+    assert!(
+        first_pages[0].header.contains("historical") && second_pages[0].header.contains("current"),
+        "page headers label the revision: {:?} / {:?}",
+        first_pages[0].header,
+        second_pages[0].header
+    );
+    assert!(!second_pages[0].header.contains("historical"));
+    let replace = retained_candidate(&project, &cp, 1, "A-02").await.0;
+    assert_eq!(replace, stored_candidate(&project, &cp, 1, "A-02"));
+
+    // History: all revisions, then each revision alone; the revision 1 review is historical after revision 2.
+    let (all, _) = paged_cp_view(&project, &cp, "history", None).await;
+    let (one_only, _) = paged_cp_view(&project, &cp, "history", Some(1)).await;
+    let (two_only, _) = paged_cp_view(&project, &cp, "history", Some(2)).await;
+    for needed in [
+        "Qualification compaction",
+        "Second revision title",
+        "Merge a and b",
+        "Revision two reason",
+        "Independent structural review",
+        "reviewer-agent",
+        "historical",
+    ] {
+        assert!(all.contains(needed), "full history lacks {needed}: {all}");
+    }
+    assert!(
+        one_only.contains("Qualification compaction")
+            && one_only.contains("Merge a and b")
+            && one_only.contains("Independent structural review"),
+        "{one_only}"
+    );
+    assert!(
+        !one_only.contains("Second revision title") && !one_only.contains("Revision two reason"),
+        "revision 1 alone shows no revision 2 fact: {one_only}"
+    );
+    assert!(
+        two_only.contains("Second revision title")
+            && two_only.contains("Revision two reason")
+            && !two_only.contains("Independent structural review")
+            && !two_only.contains("Qualification compaction"),
+        "revision 2 alone shows only its own proposal and reviews: {two_only}"
+    );
+    assert_eq!(
+        before,
+        tree(&project.root),
+        "retained reads leave the tree byte identical"
+    );
+
+    // Misuse refuses naming the field and writes nothing.
+    let before_refusals = tree(&project.root);
+    let first_page = &first_pages[0];
+    let inside = first_bytes
+        .windows(4)
+        .position(|w| w == "🚀".as_bytes())
+        .unwrap()
+        + 1;
+    for (args, field_name) in [
+        (
+            json!({"ref":"docs/a.md","view":"content","revision":1}),
+            "revision",
+        ),
+        (json!({"ref":cp,"view":"tasks","revision":1}), "revision"),
+        (json!({"ref":cp,"view":"history","action":"A-01"}), "action"),
+        (
+            json!({"ref":cp,"view":"content","action":"A-01"}),
+            "revision",
+        ),
+        (json!({"ref":cp,"view":"content","revision":1}), "action"),
+        (
+            json!({"ref":cp,"view":"content","revision":0,"action":"A-01"}),
+            "revision",
+        ),
+        (
+            json!({"ref":cp,"view":"content","revision":1,"action":"A-01","limit":5}),
+            "limit",
+        ),
+        (
+            json!({"ref":cp,"view":"content","revision":1,"action":"A-01","heading":"AB"}),
+            "heading",
+        ),
+        (
+            json!({"ref":cp,"view":"history","review_index":0}),
+            "review_index",
+        ),
+        (
+            json!({"ref":cp,"view":"content","revision":9,"action":"A-01"}),
+            "revision",
+        ),
+        (
+            json!({"ref":cp,"view":"content","revision":1,"action":"A-30"}),
+            "action",
+        ),
+        (
+            json!({"ref":cp,"view":"content","revision":1,"action":"A-03"}),
+            "action",
+        ),
+        (
+            json!({"ref":cp,"view":"content","revision":1,"action":"A-1"}),
+            "action",
+        ),
+        (
+            json!({"ref":cp,"view":"content","revision":1,"action":"A-01","start":inside,"version":first_page.snapshot}),
+            "start",
+        ),
+        (
+            json!({"ref":cp,"view":"content","revision":1,"action":"A-01","start":first_page.end}),
+            "version",
+        ),
+    ] {
+        let text = project.call("get_context", args.clone(), true).await;
+        assert!(
+            text.contains(field_name),
+            "{args} must refuse naming {field_name}: {text}"
+        );
+    }
+    assert_eq!(
+        before_refusals,
+        tree(&project.root),
+        "refused reads write nothing"
+    );
+
+    // A record change makes an old continuation stale and never mixes revisions.
+    let mut third = merge_proposal(&rows, "unused");
+    third.as_object_mut().unwrap().remove("request_key");
+    third["op"] = json!("revise");
+    third["cp"] = json!(cp);
+    third["title"] = json!("Third revision title");
+    compaction(&project, third, "author-agent", false).await;
+    let stale = project
+        .call(
+            "get_context",
+            json!({"ref":cp,"view":"content","revision":1,"action":"A-01","start":first_page.end,"version":first_page.snapshot}),
+            true,
+        )
+        .await;
+    assert!(stale.contains("stale"), "{stale}");
+    assert_eq!(
+        retained_candidate(&project, &cp, 1, "A-01").await.0,
+        one.as_bytes(),
+        "revision 1 stays readable after revision 3"
+    );
+
+    // The live documents never substitute for a retained byte.
+    std::fs::write(
+        project.root.join("docs/index.md"),
+        b"# Index\nnative edit\n",
+    )
+    .unwrap();
+    std::fs::remove_file(project.root.join("docs/b.md")).unwrap();
+    assert_eq!(
+        retained_candidate(&project, &cp, 1, "A-01").await.0,
+        one.as_bytes()
+    );
+    assert_eq!(
+        retained_candidate(&project, &cp, 1, "A-02").await.0,
+        replace,
+        "a native edit of the live document changes no retained byte"
+    );
+}
+
 /// C6 (r6): a Replace whose candidate equals the current bytes is refused at propose with no record and no effect.
 #[tokio::test]
 async fn c6_identical_replace_is_refused_at_propose() {

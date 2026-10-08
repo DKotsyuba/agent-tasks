@@ -21,6 +21,23 @@ Gate: `cargo xtask check` (fmt, all-features clippy, all tests, rustdoc, contrac
 
 Not run: every scenario that needs `knowledge_work`, `document_work`, `compaction_work`, `git_recovery` or production Git settlement is `#[ignore]`d with its exact reason (typed knowledge 10, documents 13, Git 13, compaction 6, catalog and field errors 3, full search corpus 1). They are written against the pinned artifacts and are not evidence until the combined candidate runs them with `cargo test -- --include-ignored`, together with the implementation-mutation controls of each consumed boundary.
 
+## Epic E-001 implementation-mutation controls observed (source-only, 2026-10-08)
+
+On the combined source with the E-001 qualification tests, eight deliberate implementation mutants were applied one at a time to a clean checkout, the same named cases were run, and the source was restored and rerun. Every mutant failed its intended case with exit 101 and every restored run passed with exit 0; no assertion or setup was mutated. The mutants were not committed.
+
+| Boundary | Mutant | Failing case |
+|---|---|---|
+| `kr-operations` r7 | runbook attribution against a bound lead skipped | `kr7_task_versus_atomic_and_attribution` |
+| `kr-operations` r7 | embedded Atomic looked up among Tasks | `kr7_runbook_work_coverage_matrix`, `kr7_task_versus_atomic_and_attribution` |
+| `kr-operations` r7 | a superseded successor accepted | `kr7_successor_must_be_current` |
+| `registered-tool-surface` r4 | `knowledge_work` unregistered from discovery | `catalog_is_exactly_fourteen_closed_tools` |
+| `registered-tool-surface` r4 | recovery acknowledgement routed with the display label as a reference | `g9_g14_recovery_version_and_display_label` |
+| Markdown | repeated heading without occurrence picks the first | `d3_section_selectors_and_duplicates` |
+| Git persistence | the engine bypasses the user's commit hooks | `g5_git_failures_defer_and_a_later_success_settles_them` |
+| Compaction | any document state accepted as a source | `c3_sources_and_typed_bodies_are_refused` |
+
+These controls bind to the source and tests of the tree that Root signs; they record exact boundary observations, not a certificate. The lexical corpus run on the same source measured 62 expected hits at rank 1 and six expected misses detected, with no defect.
+
 ## Epic E-001 release qualification plan (planned, none of it run)
 
 The baseline observations above are source-only. A release with the full E-001 functionality needs every item below on one exact candidate; a missing item is reported as missing, never replaced by a substitute or inferred from an earlier source check.
