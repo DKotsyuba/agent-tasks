@@ -657,6 +657,109 @@ fn a_journal_removed_during_a_landed_attempt_reports_the_commit() {
     );
 }
 
+/// Native journal states a hook can leave behind that `journal::load` refuses: the shell command that
+/// writes them, and the exact bytes they leave (`None` when the file becomes unreadable instead).
+#[cfg(unix)]
+const UNUSABLE_JOURNALS: [(&str, &str, Option<usize>); 3] = [
+    (
+        "corrupt",
+        "printf 'not: [valid' > .git/agent-tasks/pending.yaml",
+        Some(11),
+    ),
+    (
+        "oversize",
+        "head -c 300000 /dev/zero | tr '\\0' x > .git/agent-tasks/pending.yaml",
+        Some(300_000),
+    ),
+    (
+        "unreadable",
+        "chmod 000 .git/agent-tasks/pending.yaml",
+        None,
+    ),
+];
+
+/// A hook that leaves the journal corrupt, oversize or unreadable after an accepted commit does not
+/// discard the verified commit: it is reported with the lost-tracking attention, holds the exact bytes,
+/// and the native journal is neither recreated nor overwritten.
+#[cfg(unix)]
+#[test]
+fn an_unusable_journal_after_a_landed_attempt_still_reports_the_commit() {
+    use std::os::unix::fs::PermissionsExt;
+    for (name, command, length) in UNUSABLE_JOURNALS {
+        let f = GitFixture::new();
+        hook(&f, "pre-commit", command);
+        let (store, guard) = call(&f);
+        create(&store, "modules/M-001.yaml", b"one");
+        let before = commits(&f);
+        let receipt = commit_now(&store, &guard);
+        assert_eq!(
+            receipt.outcome,
+            GitOutcome::Committed,
+            "{name}: {receipt:?}"
+        );
+        assert_eq!(
+            receipt.commit.as_deref(),
+            Some(f.git(&["rev-parse", "HEAD"]).as_str()),
+            "{name}"
+        );
+        assert_eq!(receipt.paths, ["modules/M-001.yaml"], "{name}: {receipt:?}");
+        assert!(
+            receipt.attention.contains(&Attention::UntrackedMutation),
+            "{name}: {receipt:?}"
+        );
+        assert!(receipt.pending.is_empty(), "{name}: {receipt:?}");
+        assert_eq!(commits(&f), before + 1, "{name}");
+        assert_eq!(f.git(&["show", "HEAD:modules/M-001.yaml"]), "one", "{name}");
+        let meta = std::fs::metadata(journal_file(&f)).unwrap();
+        match length {
+            Some(len) => assert_eq!(meta.len(), len as u64, "{name}: native bytes kept"),
+            None => assert_eq!(meta.permissions().mode() & 0o777, 0, "{name}"),
+        }
+    }
+}
+
+/// The same native journal damage during a rejected attempt: nothing landed, the files stay saved, the
+/// receipt reports them untracked instead of pending, and the damaged journal is left exactly as found.
+#[cfg(unix)]
+#[test]
+fn an_unusable_journal_after_a_rejected_attempt_reports_untracked_not_pending() {
+    use std::os::unix::fs::PermissionsExt;
+    for (name, command, length) in UNUSABLE_JOURNALS {
+        let f = GitFixture::new();
+        hook(&f, "pre-commit", &format!("{command}\nexit 1"));
+        let (store, guard) = call(&f);
+        create(&store, "modules/M-001.yaml", b"one");
+        let before = commits(&f);
+        let receipt = commit_now(&store, &guard);
+        assert_eq!(
+            (receipt.outcome, receipt.reason),
+            (GitOutcome::Deferred, Some(Reason::CommitNotCompleted)),
+            "{name}: {receipt:?}"
+        );
+        assert_eq!(
+            receipt.untracked,
+            ["modules/M-001.yaml"],
+            "{name}: {receipt:?}"
+        );
+        assert!(
+            receipt.attention.contains(&Attention::UntrackedMutation),
+            "{name}: {receipt:?}"
+        );
+        assert!(receipt.pending.is_empty(), "{name}: {receipt:?}");
+        assert_eq!(commits(&f), before, "{name}");
+        assert_eq!(
+            std::fs::read(f.dir.path().join("modules/M-001.yaml")).unwrap(),
+            b"one",
+            "{name}"
+        );
+        let meta = std::fs::metadata(journal_file(&f)).unwrap();
+        match length {
+            Some(len) => assert_eq!(meta.len(), len as u64, "{name}: native bytes kept"),
+            None => assert_eq!(meta.permissions().mode() & 0o777, 0, "{name}"),
+        }
+    }
+}
+
 /// A journal reordered during an accepted attempt is updated by identity: the held call in the front
 /// row is never marked committed in place of the selected ones.
 #[cfg(unix)]

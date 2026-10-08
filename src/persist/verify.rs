@@ -2,7 +2,8 @@
 //!
 //! A commit is certified only when its message trailers equal the journal entries and its tree holds
 //! the recorded bytes. Equal-looking trailers alone, a hook-rewritten worktree or a failed read never
-//! certify anything. All Git here is read-only and bounded.
+//! certify anything. Git here is bounded and read-only except [`raw_blob_ids`], which stores the caller's
+//! verified bytes as unreferenced objects and touches nothing else.
 use super::{
     git,
     journal::{self, Intent},

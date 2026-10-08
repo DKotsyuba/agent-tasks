@@ -1182,7 +1182,9 @@ fn apply_barrier(
 /// while missing or rewritten rows are left exactly as found and never recreated. A verified landed
 /// commit is always reported as such, with [`Attention::UntrackedMutation`] when this call's own row is
 /// no longer ours; a rejected attempt in that state reports this call's paths untracked instead of
-/// pending. Nothing here lets lost journal tracking change a Git outcome or replay business work.
+/// pending. A journal that cannot be read after the attempt (corrupt, oversize, unavailable) is treated
+/// exactly like a missing one and is never written. Nothing here lets lost journal tracking change a
+/// Git outcome or replay business work.
 pub fn run_engine(
     store: &Store,
     current: &str,
@@ -1358,10 +1360,9 @@ pub fn run_engine(
         return;
     }
     let attempt = commit_paths(store, &repo.parent, &paths, &message, &expected, deadline);
-    let Ok((mut after, observed)) = journal::load(store) else {
-        receipt.outcome = GitOutcome::Unknown;
-        return;
-    };
+    // An unreadable, corrupt or oversize journal after the attempt is the same lost tracking as a missing
+    // one: no row is intact, nothing is written, and the Git outcome below is still reported.
+    let (mut after, observed) = journal::load(store).unwrap_or_default();
     // The reloaded journal may no longer be the one that was saved before the attempt: a hook or a
     // native edit can remove, replace, reorder, shrink or rewrite rows. A row is ours to update only
     // when it is found by identity AND still equals the image saved just before the attempt; anything
