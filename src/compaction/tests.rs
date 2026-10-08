@@ -2116,3 +2116,173 @@ fn removal_waits_when_the_current_intent_cannot_commit_atomically() {
         "the replacement was published"
     );
 }
+
+// ------------------------------------------------------- retained reads (revision 7)
+
+/// A revise of [`replace_a`] whose candidate differs from revision one, so a read of the wrong
+/// revision is visible in the bytes.
+fn revise_a(env: &FakeEnv) {
+    let candidate = "Intro\n## S1\none\nplus\n";
+    let mut next = replace_a(env);
+    next.title = "Trim A again".into();
+    next.actions[0].content = Some(candidate.into());
+    next.sections = ledger(env, "docs/a.md", Some(("A-01", candidate)));
+    let v = version(env, "CP-001");
+    call(env, |fx| {
+        ops::revise(env, "author", &v, "CP-001", &next, fx)
+    })
+    .unwrap();
+}
+
+/// Revision selection returns exactly the named retained revision and refuses zero and unretained
+/// numbers naming `revision` with the retained range.
+#[test]
+fn retained_revision_selects_exactly_the_named_revision() {
+    let env = world();
+    propose(&env, "key-0090-aa", &replace_a(&env)).unwrap();
+    accept(&env, "CP-001", "rev1").unwrap();
+    revise_a(&env);
+    let rec = super::read_cp(env.store(), "CP-001").unwrap().value;
+    assert_eq!(rec.current, 2);
+    // The review bound to revision one is retained and still names exactly revision one's hash.
+    let bound: Vec<_> = rec.reviews.iter().filter(|r| r.revision == 1).collect();
+    assert_eq!(bound.len(), 1);
+    assert_eq!(
+        bound[0].content_hash,
+        super::retained_revision(&rec, 1).unwrap().content_hash
+    );
+    for n in [1, 2] {
+        assert_eq!(super::retained_revision(&rec, n).unwrap().revision, n);
+    }
+    assert_eq!(
+        super::retained_revision(&rec, 1).unwrap(),
+        &rec.revisions[0]
+    );
+    assert_ne!(rec.revisions[0].title, rec.revisions[1].title);
+    for n in [0, 3, u32::MAX] {
+        let e = super::retained_revision(&rec, n).unwrap_err();
+        assert_eq!(e.code, "invalid_arguments");
+        assert!(
+            e.message.starts_with("revision:") && e.message.contains("1 to 2"),
+            "{}",
+            e.message
+        );
+    }
+}
+
+/// An earlier revision still yields its own verified bytes after a revise, equal to what was staged,
+/// and the live document and the tree stay untouched by the read.
+#[test]
+fn read_staged_returns_earlier_revisions_exactly() {
+    let env = world();
+    propose(&env, "key-0091-aa", &replace_a(&env)).unwrap();
+    revise_a(&env);
+    let snap = super::read_cp(env.store(), "CP-001").unwrap();
+    let one = super::read_staged(env.store(), &snap.value, 1, "A-01").unwrap();
+    let two = super::read_staged(env.store(), &snap.value, 2, "A-01").unwrap();
+    assert_eq!(one.bytes, b"Intro\n## S1\none\n");
+    assert_eq!(two.bytes, b"Intro\n## S1\none\nplus\n");
+    assert_eq!(
+        (
+            one.revision,
+            one.action.as_str(),
+            one.kind,
+            one.path.as_str()
+        ),
+        (1, "A-01", ActionKind::Replace, "docs/a.md")
+    );
+    assert_eq!(one.sha256, record::sha256_hex(&one.bytes));
+    assert_ne!(one.sha256, two.sha256);
+    // A live edit changes no candidate byte and a read repairs or writes nothing.
+    env.dirty("docs/a.md", "Changed live\n");
+    let again = super::read_staged(env.store(), &snap.value, 1, "A-01").unwrap();
+    assert_eq!(again, one);
+    assert_eq!(version(&env, "CP-001"), snap.version);
+}
+
+/// Action identifiers are unique but not dense: A-32 alone is readable and the others are absent.
+#[test]
+fn read_staged_accepts_sparse_action_identifiers() {
+    let env = world();
+    let mut input = replace_a(&env);
+    input.actions[0].id = "A-32".into();
+    input.sections = ledger(&env, "docs/a.md", Some(("A-32", "Intro\n## S1\none\n")));
+    propose(&env, "key-0092-aa", &input).unwrap();
+    let rec = super::read_cp(env.store(), "CP-001").unwrap().value;
+    let got = super::read_staged(env.store(), &rec, 1, "A-32").unwrap();
+    assert_eq!(got.bytes, b"Intro\n## S1\none\n");
+    for id in ["A-01", "A-31"] {
+        let e = super::read_staged(env.store(), &rec, 1, id).unwrap_err();
+        assert_eq!(e.code, "invalid_arguments");
+        assert!(e.message.starts_with("action:"), "{}", e.message);
+    }
+}
+
+/// Non canonical, absent and candidate-less action selections refuse naming `action`; a bad revision
+/// refuses naming `revision` first.
+#[test]
+fn read_staged_refuses_bad_selectors() {
+    let env = world();
+    propose(&env, "key-0093-aa", &merge_input(&env)).unwrap();
+    let rec = super::read_cp(env.store(), "CP-001").unwrap().value;
+    assert!(super::read_staged(env.store(), &rec, 1, "A-01").is_ok());
+    for id in [
+        "", "A-1", "a-01", "A-00", "A-33", "A-001", "A-+1", " A-01", "A-01 ", "A-04", "CP-001",
+        "../A-01",
+    ] {
+        let e = super::read_staged(env.store(), &rec, 1, id).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.starts_with("action:")),
+            ("invalid_arguments", true),
+            "{id:?}: {}",
+            e.message
+        );
+    }
+    for id in ["A-02", "A-03"] {
+        let e = super::read_staged(env.store(), &rec, 1, id).unwrap_err();
+        assert_eq!(e.code, "invalid_arguments");
+        assert!(e.message.starts_with("action:") && e.message.contains("Remove"));
+    }
+    let e = super::read_staged(env.store(), &rec, 2, "A-99").unwrap_err();
+    assert!(e.message.starts_with("revision:"), "{}", e.message);
+}
+
+/// A missing blob, a corrupt blob of the same length, a different length and an oversize file all
+/// refuse `invalid_data` with the relative path, and apply preparation refuses identically because
+/// both use the one verifier.
+#[test]
+fn read_staged_verifies_blob_hash_and_length() {
+    let env = world();
+    propose(&env, "key-0094-aa", &replace_a(&env)).unwrap();
+    let rec = super::read_cp(env.store(), "CP-001").unwrap().value;
+    let relative = record::stage_path("CP-001", 1, "A-01");
+    let path = env.store().path(&relative).unwrap();
+    let good = std::fs::read(&path).unwrap();
+    let mismatch = format!("{relative}: staged candidate does not match its recorded hash.");
+    let check = |expected: &str| {
+        let e = super::read_staged(env.store(), &rec, 1, "A-01").unwrap_err();
+        assert_eq!((e.code, e.message.as_str()), ("invalid_data", expected));
+        let e = ops::load_blobs(&env, &rec).unwrap_err();
+        assert_eq!((e.code, e.message.as_str()), ("invalid_data", expected));
+    };
+    let mut same_length = good.clone();
+    same_length[0] ^= 1;
+    std::fs::write(&path, &same_length).unwrap();
+    check(&mismatch);
+    std::fs::write(&path, [good.as_slice(), b"x"].concat()).unwrap();
+    check(&mismatch);
+    std::fs::write(&path, vec![b'x'; BLOB_CAP + 1]).unwrap();
+    check(&mismatch);
+    std::fs::remove_file(&path).unwrap();
+    check(&format!("{relative}: staged candidate is missing."));
+    // Correct bytes whose recorded length disagrees are refused even though the hash matches.
+    std::fs::write(&path, &good).unwrap();
+    let mut wrong_len = rec.clone();
+    wrong_len.revisions[0].body.actions[0].staged_len = Some(good.len() as u64 + 1);
+    let e = super::read_staged(env.store(), &wrong_len, 1, "A-01").unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        ("invalid_data", mismatch.as_str())
+    );
+    assert!(super::read_staged(env.store(), &rec, 1, "A-01").is_ok());
+}

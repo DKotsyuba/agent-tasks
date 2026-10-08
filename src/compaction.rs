@@ -50,6 +50,9 @@ mod tests;
 )]
 pub use {
     inventory::{CpScan, inventory, scan},
-    read::{CpSummaries, CpSummaryRow, read_cp, summaries},
+    read::{
+        CpSummaries, CpSummaryRow, StagedCandidate, read_cp, read_staged, retained_revision,
+        summaries,
+    },
     record::*,
 };

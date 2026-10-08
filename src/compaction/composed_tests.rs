@@ -12,7 +12,7 @@
 )]
 use super::{
     apply::apply,
-    env::{DocOp, Env, whole},
+    env::{DocOp, DocState, Env, whole},
     live::{Fault, LiveEnv},
     ops::{self, Outcome},
     record::{ActionKind, CpState, Disposition, DropKind},
@@ -852,15 +852,19 @@ fn the_outline_is_the_markdown_owners_sections() {
     );
 }
 
-/// Why the resume barrier exists. A successful later call that rewrites the proposal record commits
-/// without the older held intent, and the persistence engine then judges that intent drifted because
-/// the record's current bytes are no longer its last image: explicit `Retry` can no longer commit it.
-/// Here the later call is a withdrawal with `abandon_partial`; without the barrier a resumed apply would
-/// strand the held body and record images exactly the same way.
+/// What a later committed record write does to an older held intent. A successful later call that
+/// rewrites the proposal record commits without the older held intent, so the intent's last image of the
+/// record is superseded. The persistence engine of this checkout recovers that case by explicit `Retry`:
+/// it skips the superseded paths, keeps their committed successors and commits the rest, where the
+/// engine this test was first written against refused `recovery_blocked`. The revision 6 held barrier
+/// still refuses an apply attempt before it can write over such an intent, which stays the conservative
+/// contract; this control pins the engine's present recovery so a change in either direction is seen.
+/// Here the later call is a withdrawal with `abandon_partial`.
 #[test]
-fn a_later_committed_record_write_strands_an_older_held_intent() {
+fn a_later_committed_record_write_supersedes_an_older_held_intent() {
     let repo = Repo::new();
     repo.seed("docs/a.md", A_BODY);
+    let original_commit = repo.fx.git(&["rev-parse", "HEAD"]);
     repo.propose("key-real-0015", replace_a).unwrap();
     repo.accept("CP-001").unwrap();
     let (first, _) = repo.apply(
@@ -886,11 +890,118 @@ fn a_later_committed_record_write_strands_an_older_held_intent() {
         &pending.version,
         crate::persist::recover::Action::Retry(ids),
     );
-    assert_eq!(
-        code(&retry),
-        "recovery_blocked",
-        "stranded by the later write"
+    let report = retry.unwrap_or_else(|e| panic!("retry refused: {e:?}"));
+    // Only the held intent's own unsuperseded body is committed, by one new commit.
+    assert_eq!(report.receipt.outcome, GitOutcome::Committed);
+    assert_eq!(report.receipt.paths, ["docs/a.md"]);
+    assert!(
+        report
+            .lines
+            .iter()
+            .any(|l| l.starts_with("Skipped 2 superseded path(s)")),
+        "{:?}",
+        report.lines
     );
+    assert!(crate::persist::pending(&store).refs.is_empty());
+    assert!(repo.fx.git(&["status", "--porcelain"]).is_empty());
+    assert_eq!(
+        repo.fx
+            .git(&["show", "--name-only", "--format=", "HEAD"])
+            .trim(),
+        "docs/a.md"
+    );
+    // The newer record bytes are retained: the retry commit left the record exactly as the withdrawal
+    // committed it, and the proposal is still the abandoned partial the owner chose.
+    let withdraw_image = repo.fx.git(&["show", "HEAD~1:compactions/CP-001.yaml"]);
+    assert_eq!(
+        repo.fx.git(&["show", "HEAD:compactions/CP-001.yaml"]),
+        withdraw_image
+    );
+    let current = repo.bytes("compactions/CP-001.yaml").unwrap();
+    assert_eq!(
+        String::from_utf8(current.clone()).unwrap().trim_end(),
+        withdraw_image
+    );
+    assert_eq!(repo.cp("CP-001").state, CpState::AbandonedPartial);
+    // Both superseded record effects keep their own true digests and name the exact committed successor
+    // (`into=`), which is the withdrawal image; the body effect is the staged candidate's own digest.
+    let successor = super::record::sha256_hex(&current);
+    let trailers = repo.fx.git(&["show", "--format=%B", "--no-patch", "HEAD"]);
+    let effects: Vec<&str> = trailers
+        .lines()
+        .filter_map(|l| l.strip_prefix("Agent-Tasks-Effect: "))
+        .collect();
+    assert_eq!(effects.len(), 3, "{effects:?}");
+    for rec in ["cp:CP-001:r1:rec:3 ", "cp:CP-001:r1:rec:4 "] {
+        let line = effects.iter().find(|l| l.starts_with(rec)).unwrap();
+        assert!(line.ends_with(&format!(" into={successor}")), "{line}");
+        assert!(
+            !line.contains(&format!(" {successor} ")),
+            "never rewritten to the successor: {line}"
+        );
+    }
+    let staged = repo.cp("CP-001").revisions[0].body.actions[0]
+        .staged_sha256
+        .clone()
+        .unwrap();
+    let body = effects
+        .iter()
+        .find(|l| l.starts_with("cp:CP-001:r1:A-01 replaced docs/a.md "))
+        .unwrap();
+    assert!(
+        body.ends_with(&format!(" {staged}")) && !body.contains("into="),
+        "{body}"
+    );
+    assert_eq!(repo.bytes("docs/a.md").unwrap(), b"Intro\n## S1\none\n");
+    // Honest limit: the failed document record put was never published, so the committed body is new
+    // while `documents/DOC-001.yaml` still records the old body digest. Abandoning the partial apply
+    // accepts this state; nothing reports it as applied or complete.
+    let doc = String::from_utf8(repo.bytes("documents/DOC-001.yaml").unwrap()).unwrap();
+    assert!(
+        doc.contains(&format!(
+            "body_sha256: {}",
+            super::record::sha256_hex(A_BODY.as_bytes())
+        )),
+        "{doc}"
+    );
+    assert!(!doc.contains(&staged), "{doc}");
+    drop(guard);
+    // The mismatch stays visible and is never counted as applied or as current coverage: the document
+    // owner reports the record and the path drifted, the proposal stays an abandoned partial that cannot
+    // be applied again, the original body is still retrievable from its committed seed, and a new
+    // destructive proposal over the drifted document is refused at its source.
+    let (obs, _) = repo.step(EventClass::Document, vec![], |env, _| {
+        Ok((env.observe_id("DOC-001")?, env.observe("docs/a.md")?))
+    });
+    let (by_id, by_path) = obs.unwrap();
+    assert_eq!(by_id.state, DocState::Other("drifted".into()));
+    assert_eq!(by_path.state, DocState::Other("drifted".into()));
+    assert_eq!(repo.cp("CP-001").state, CpState::AbandonedPartial);
+    assert_eq!(
+        repo.fx
+            .git(&["show", &format!("{original_commit}:docs/a.md")]),
+        A_BODY.trim_end()
+    );
+    let (again, _) = repo.apply("CP-001", vec![]);
+    assert_eq!(code(&again), "already_withdrawn");
+    let (next, _) = repo.step(EventClass::CompactionPropose, vec![], |env, fx| {
+        let input = ProposalIn {
+            title: "Remove A".into(),
+            sources: vec![source(env, "docs/a.md")],
+            actions: vec![action("A-01", ActionKind::Remove, "docs/a.md")],
+            sections: ledger(env, "docs/a.md", None, None),
+            preservation: vec![],
+        };
+        ops::propose(
+            env,
+            "author",
+            &env.allocation_version()?,
+            "key-real-0099",
+            &input,
+            fx,
+        )
+    });
+    assert_eq!(code(&next), "source_refused");
 }
 
 /// A held intent that carries only the proposal's own record (the first apply published its `Applying`

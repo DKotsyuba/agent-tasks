@@ -5,7 +5,7 @@
 //! through the adapter, always with a deterministic operation identity.
 use super::{
     env::{EffectKindView, Env, Expected, StatusView},
-    inventory,
+    inventory, read,
     record::{
         self, Acceptance, CpRecord, CpState, MAX_ACTIVE, MAX_REVISIONS, MAX_TOTAL, REASON_CAP,
         RevisionRecord, SCHEMA,
@@ -204,23 +204,9 @@ pub(crate) fn load_blobs(env: &dyn Env, rec: &CpRecord) -> Result<Vec<(String, V
     let revision = rec.revision()?;
     let mut out = Vec::new();
     for a in &revision.body.actions {
-        let Some(expected) = &a.staged_sha256 else {
-            continue;
-        };
-        let relative = record::stage_path(&rec.id, revision.revision, &a.id);
-        let bytes = env.store().bytes(&relative)?.ok_or_else(|| {
-            refuse(
-                "invalid_data",
-                format!("{relative}: staged candidate is missing."),
-            )
-        })?;
-        if &record::sha256_hex(&bytes) != expected {
-            return Err(refuse(
-                "invalid_data",
-                format!("{relative}: staged candidate does not match its recorded hash."),
-            ));
+        if let Some(bytes) = read::verified_blob(env.store(), &rec.id, revision.revision, a)? {
+            out.push((a.id.clone(), bytes));
         }
-        out.push((a.id.clone(), bytes));
     }
     Ok(out)
 }
