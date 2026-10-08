@@ -1,5 +1,9 @@
 //! Joint real-SDK proof of the accepted M-001 typed knowledge candidate with the submitted M-004 Git persistence
-//! candidate (A-003). Positive M-004 approval is enforced separately by its own review, never by this file: boundaries `kr-paths` r6, `persist-store-m001` r3 and the shared `producer-host` r3.
+//! candidate (A-003). Positive M-004 approval is enforced separately by its own review, never by this file.
+//! Boundaries: `kr-paths` r6, `persist-store-m001` r3 and the shared `producer-host` r3.
+//! The third party of `producer-host` r3 is the M-003 shared host (common decode, dispatch and Ack, caller-held lock
+//! and settlement scope). It is used, not certified: its files are pinned byte for byte at M-003 candidate
+//! 6c08c65c12a5adc295d64f3d03250adb5839f5c9 so the joint cases run under exactly the agreed host.
 //!
 //! Every scenario starts the shipped binary through the real stdio SDK against a disposable independent documentation
 //! repository with the production policy. Faults come only from repository hooks and repository configuration. The
@@ -89,14 +93,38 @@ const M004_PINS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Exact provider assembly: the checkout under test holds the accepted M-001 bytes and the submitted M-004 bytes,
-/// byte for byte. This asserts byte identity only, not that M-004 is accepted.
+/// Shared M-003 host files used under `producer-host` r3 with the sha256 of their bytes at M-003 candidate
+/// 6c08c65c12a5adc295d64f3d03250adb5839f5c9: the process entry, tool registry and dispatcher (`src/main.rs`,
+/// `src/tools/mod.rs`), the common closed decode (`src/tools/input.rs`) and the `Ack` plus settlement path
+/// (`src/tools/work.rs`). Each is unchanged in the current common source.
+const M003_HOST_PINS: &[(&str, &str)] = &[
+    (
+        "src/main.rs",
+        "fa0b0351d8073afbf79402961c7b21fff0408078aac4be1ccadcd6dcd0ec7bf9",
+    ),
+    (
+        "src/tools/mod.rs",
+        "f3cc82d42e22aee807d8a9dd560eac2c1c6126b71407a32456556cda9ffc0bee",
+    ),
+    (
+        "src/tools/input.rs",
+        "f83b63c8da690ec0152b85e0f83d494cf55331160ad50ed2ce2bc2e698882f27",
+    ),
+    (
+        "src/tools/work.rs",
+        "96cecc76035a49d04fd72940b3dd3005ef5a4c52f98ac90b80fdf98f8347ce19",
+    ),
+];
+
+/// Exact provider assembly: the checkout under test holds the accepted M-001 bytes, the submitted M-004 bytes and the
+/// M-003 shared host bytes used under `producer-host` r3, byte for byte. This asserts byte identity only, not that
+/// M-004 is accepted or that M-003 is certified.
 ///
 /// Fails on the first owned file whose sha256 differs from its pin, so a drifted or edited provider is never joined.
 #[test]
 fn provider_assembly_holds_the_submitted_provider_bytes() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    for (relative, expected) in M001_PINS.iter().chain(M004_PINS) {
+    for (relative, expected) in M001_PINS.iter().chain(M004_PINS).chain(M003_HOST_PINS) {
         let bytes = std::fs::read(root.join(relative)).unwrap();
         assert_eq!(
             &sha256_hex(&bytes),
