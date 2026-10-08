@@ -375,6 +375,27 @@ impl Run<'_> {
                 if current.state == DocState::Managed {
                     return Err(self.stop("metadata_mismatch", why.to_owned(), Some(&a.id)));
                 }
+                // Contract revision 8: a Replace of a Managed document may be adopted only while the
+                // observed record is still the frozen source's own, at the frozen base revision. A
+                // missing, foreign or already advanced record is never adopted over.
+                if a.kind == ActionKind::Replace
+                    && let Some(source) = source_of(&self.body, &a).filter(|s| s.managed)
+                {
+                    let owned = current.record.as_ref().is_some_and(|r| {
+                        Some(&r.id) == source.doc_id.as_ref()
+                            && Some(r.revision) == source.record_revision
+                    });
+                    if !owned {
+                        return Err(self.stop(
+                            "metadata_mismatch",
+                            format!(
+                                "{}: the record is not the frozen source's own at its base revision.",
+                                a.path
+                            ),
+                            Some(&a.id),
+                        ));
+                    }
+                }
                 DocOp::Adopt {
                     path: a.path.clone(),
                     purpose: a.purpose.clone(),

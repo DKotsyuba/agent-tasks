@@ -1130,6 +1130,57 @@ fn body_first_partial_resumes_through_the_oracle() {
     assert_eq!(rec.apply.as_ref().unwrap().attempts, 2);
 }
 
+/// Contract revision 8: the roll-forward adopt of an interrupted Managed Replace needs the observed record
+/// to be the frozen source's own at the frozen base revision. A record edited meanwhile is never adopted
+/// over: the action blocks `metadata_mismatch` and no adopt is issued.
+#[test]
+fn managed_replace_adopt_requires_the_frozen_record_revision() {
+    let env = world();
+    propose(&env, "key-0096-aa", &replace_a(&env)).unwrap();
+    accept(&env, "CP-001", "rev1").unwrap();
+    env.inject(Inject::AfterBody);
+    assert_eq!(code(run_apply(&env, "CP-001")), "partial_publication");
+    env.retry_all();
+    env.bump_record("docs/a.md");
+    let resumed = run_apply(&env, "CP-001");
+    let out = super::read_cp(env.store(), "CP-001").unwrap().value;
+    assert_ne!(out.state, CpState::Applied, "{resumed:?}");
+    assert!(
+        !env.doc_ops().iter().any(|o| o == "adopt docs/a.md"),
+        "{:?}",
+        env.doc_ops()
+    );
+    assert_eq!(
+        resumed.as_ref().err().map(|e| e.code),
+        Some("metadata_mismatch"),
+        "{resumed:?}"
+    );
+}
+
+/// The same guard for identity: a record carrying another DOC identifier than the frozen source's is
+/// never adopted over, and no adopt is issued.
+#[test]
+fn managed_replace_adopt_requires_the_frozen_record_identity() {
+    let env = world();
+    propose(&env, "key-0097-aa", &replace_a(&env)).unwrap();
+    accept(&env, "CP-001", "rev1").unwrap();
+    env.inject(Inject::AfterBody);
+    assert_eq!(code(run_apply(&env, "CP-001")), "partial_publication");
+    env.retry_all();
+    env.swap_record_identity("docs/a.md", "DOC-099");
+    let resumed = run_apply(&env, "CP-001");
+    assert_eq!(
+        resumed.as_ref().err().map(|e| e.code),
+        Some("metadata_mismatch"),
+        "{resumed:?}"
+    );
+    assert!(
+        !env.doc_ops().iter().any(|o| o == "adopt docs/a.md"),
+        "{:?}",
+        env.doc_ops()
+    );
+}
+
 /// Equal bytes without attestation are unknown, never ownership: a byte identical native copy blocks.
 #[test]
 fn equal_bytes_without_attestation_block() {

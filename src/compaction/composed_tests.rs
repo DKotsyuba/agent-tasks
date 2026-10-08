@@ -557,6 +557,39 @@ fn body_first_partial_resumes_through_the_real_oracle() {
     );
 }
 
+/// Contract revision 8 on the real providers: after the interrupted Managed Replace is committed by the
+/// explicit Retry, a native edit that advanced the DOC record's revision means the observed record is no
+/// longer the frozen source's own at its base revision, so the resume refuses and adopts nothing.
+#[test]
+fn managed_replace_resume_refuses_an_advanced_record_revision() {
+    let repo = Repo::new();
+    repo.seed("docs/a.md", A_BODY);
+    repo.propose("key-real-0031", replace_a).unwrap();
+    repo.accept("CP-001").unwrap();
+    let (first, _) = repo.apply(
+        "CP-001",
+        vec![fault("put", "documents/DOC-001.yaml", "io", false)],
+    );
+    assert_eq!(code(&first), "partial_publication", "{first:?}");
+    assert_eq!(repo.retry_pending().outcome, GitOutcome::Committed);
+    let record =
+        std::fs::read_to_string(repo.fx.dir.path().join("documents/DOC-001.yaml")).unwrap();
+    assert!(record.contains("revision: 1\n"), "{record}");
+    std::fs::write(
+        repo.fx.dir.path().join("documents/DOC-001.yaml"),
+        record.replace("revision: 1\n", "revision: 2\n"),
+    )
+    .unwrap();
+    let (second, _) = repo.apply("CP-001", vec![]);
+    assert_eq!(code(&second), "metadata_mismatch", "{second:?}");
+    assert_ne!(repo.cp("CP-001").state, CpState::Applied);
+    let after = std::fs::read_to_string(repo.fx.dir.path().join("documents/DOC-001.yaml")).unwrap();
+    assert!(
+        after.contains("revision: 2\n"),
+        "nothing adopted over the edited record: {after}"
+    );
+}
+
 /// Interrupted move: the destination and moved record exist but the source removal failed. The held
 /// intent of the first call is not committed, so the second call may finish the removal only through
 /// the oracle-proven resume, and the original source stays recoverable until then.

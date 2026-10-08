@@ -197,6 +197,19 @@ impl FakeEnv {
             d.revision += 1;
         }
     }
+    /// Re-key the DOC record of a managed path to another identifier, as a foreign record swap would.
+    pub fn swap_record_identity(&self, path: &str, new_id: &str) {
+        let mut w = self.w.borrow_mut();
+        let key = w
+            .docs
+            .iter()
+            .find(|(_, d)| d.path == path && !d.retired)
+            .map(|(k, _)| k.clone());
+        if let Some(mut d) = key.and_then(|k| w.docs.remove(&k)) {
+            d.id = new_id.to_owned();
+            w.docs.insert(new_id.to_owned(), d);
+        }
+    }
     /// Begin one handler call (one atomic intent).
     pub fn start_call(&self) {
         let mut w = self.w.borrow_mut();
