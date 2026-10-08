@@ -1329,5 +1329,36 @@ mod tests {
         assert!(super::super::own_temp_name(".notes.md.tmp-12-3"));
         assert!(!super::super::own_temp_name(".foreign.swp"));
         assert!(!super::super::own_temp_name(".x.tmp-a-3"));
+        // Absent is complete; a dangling link, a link to a directory or a plain file at a home
+        // is unknown coverage and refuses (inventory and allocation) instead of reading as absent.
+        assert!(store.kind_inventory("knowledge", "K-").unwrap().complete);
+        #[cfg(unix)]
+        for (home, prefix) in [
+            ("knowledge", "K-"),
+            ("documents", "DOC-"),
+            ("modules", "M-"),
+        ] {
+            let target = if home == "documents" {
+                root.join("decisions")
+            } else {
+                "nowhere".into()
+            };
+            let link = root.join(home);
+            if home == "modules" {
+                std::fs::remove_dir_all(&link).unwrap();
+            }
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert_eq!(
+                store.kind_inventory(home, prefix).err().unwrap().code,
+                "file_type"
+            );
+            assert_eq!(store.allocation_version().is_err(), home == "modules");
+            std::fs::remove_file(&link).unwrap();
+        }
+        std::fs::write(root.join("knowledge"), b"").unwrap();
+        assert_eq!(
+            store.kind_inventory("knowledge", "K-").err().unwrap().code,
+            "file_type"
+        );
     }
 }
