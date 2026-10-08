@@ -1,5 +1,5 @@
-//! Joint real-SDK proof of the accepted M-001 typed knowledge candidate with the accepted M-004 Git persistence
-//! candidate (A-003): boundaries `kr-paths` r6, `persist-store-m001` r3 and the shared `producer-host` r3.
+//! Joint real-SDK proof of the accepted M-001 typed knowledge candidate with the submitted M-004 Git persistence
+//! candidate (A-003). Positive M-004 approval is enforced separately by its own review, never by this file: boundaries `kr-paths` r6, `persist-store-m001` r3 and the shared `producer-host` r3.
 //!
 //! Every scenario starts the shipped binary through the real stdio SDK against a disposable independent documentation
 //! repository with the production policy. Faults come only from repository hooks and repository configuration. The
@@ -33,11 +33,11 @@ const M001_PINS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Owned M-004 files with the sha256 of their accepted bytes at candidate 7d6797dfb47824ff202a7f9265bf9e08f399d582.
+/// Owned M-004 files with the sha256 of their submitted bytes at candidate a4c0cbaf7ef88cd69a6dfc22eeabce28dfa79f10.
 const M004_PINS: &[(&str, &str)] = &[
     (
         "src/persist/engine.rs",
-        "513389bc27db840db0417994c2063f9a5f27e58691bf3c952bd974caae456983",
+        "869a1167791242464bd698628e54072831d3c5f1741bd2e74a4b6a6f4d2bfa45",
     ),
     (
         "src/persist/git.rs",
@@ -77,11 +77,11 @@ const M004_PINS: &[(&str, &str)] = &[
     ),
     (
         "src/persist/tests.rs",
-        "5deeba63f520d8a8b1b3c11e973981e3c31c2d9e6cdcb8c6ad2fdc1a0408a69c",
+        "ce3cab82d71a307dab1a235103333de25bbe3de7dffdb9f8a64df28b1e4e2620",
     ),
     (
         "src/persist/verify.rs",
-        "88cfd05d6cf243cf468c59f131c732351877234c9270b7c32ec0eda787d2ad85",
+        "e24c735033db24b02dbe7cad2c37e9c08d3905e3289327a1c6cbcae63dcbbf89",
     ),
     (
         "src/tools/recovery_ops.rs",
@@ -89,18 +89,19 @@ const M004_PINS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Exact provider assembly: the checkout under test holds the accepted bytes of both candidates, byte for byte.
+/// Exact provider assembly: the checkout under test holds the accepted M-001 bytes and the submitted M-004 bytes,
+/// byte for byte. This asserts byte identity only, not that M-004 is accepted.
 ///
 /// Fails on the first owned file whose sha256 differs from its pin, so a drifted or edited provider is never joined.
 #[test]
-fn provider_assembly_holds_the_accepted_candidate_bytes() {
+fn provider_assembly_holds_the_submitted_provider_bytes() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for (relative, expected) in M001_PINS.iter().chain(M004_PINS) {
         let bytes = std::fs::read(root.join(relative)).unwrap();
         assert_eq!(
             &sha256_hex(&bytes),
             expected,
-            "{relative} is not the accepted candidate byte"
+            "{relative} is not the pinned provider byte"
         );
     }
 }
