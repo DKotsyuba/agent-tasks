@@ -185,10 +185,8 @@ async fn full_composition_survives_compaction_restart_and_clone() {
         "successful mutations leave no staged files"
     );
 
-    let guide = format!(
-        "# Field guide\n\n## Decisions\nD-001 records the reservation requirement and links this guide.\n\n## Operations\nRB-001 and CL-001 describe the reservation recovery checks.\n"
-    );
-    save(&project, "docs/guide.md", &guide, false).await;
+    let guide = "# Field guide\n\n## Decisions\nD-001 records the reservation requirement and links this guide.\n\n## Operations\nRB-001 and CL-001 describe the reservation recovery checks.\n";
+    save(&project, "docs/guide.md", guide, false).await;
     let decision = knowledge(
         &project,
         json!({

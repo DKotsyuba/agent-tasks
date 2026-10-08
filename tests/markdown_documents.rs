@@ -1,7 +1,7 @@
 //! Real-binary qualification of managed Markdown through `document_work` and the document read routes
 //! (M-006 criterion 3; `md-documents` r3, `documents-and-references` r3, `doc-reference` r2).
 //!
-//! Matrix rows D1 to D11 of docs/contracts/knowledge-qualification.md. Documents cross the real stdio channel as
+//! Matrix rows D1 to D12 of docs/contracts/knowledge-qualification.md. Documents cross the real stdio channel as
 //! JSON strings; reads are reassembled only from the explicit framing line and its length-delimited payload, then
 //! compared with the native bytes on disk. Exhaustive page-budget sweeps belong to the document module tests: this
 //! suite uses representative sizes at the boundaries and bounded deadlines. No test is ignored.
@@ -541,6 +541,73 @@ async fn d11_ordinary_relocate_interruption_keeps_the_identity() {
         "the DOC id follows the destination: {moved}"
     );
     assert!(!project.root.join("docs/from.md").exists());
+}
+
+/// D12: an ordinary relocate reports the references it actually leaves dangling, with complete coverage: a Markdown
+/// link and a stored Decision detail that name the old path are listed, while a mention by DOC identifier follows its
+/// file and is not.
+#[tokio::test]
+async fn d12_relocate_reports_the_references_it_leaves_dangling() {
+    let project = Project::register().await;
+    save(&project, "docs/old.md", "# Old\n\n## Part\ntext\n", false).await;
+    let managed = project
+        .call("get_context", json!({"ref":"docs/old.md"}), false)
+        .await;
+    let id = managed
+        .split_whitespace()
+        .find(|w| w.starts_with("DOC-"))
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .to_owned()
+        })
+        .unwrap();
+    save(
+        &project,
+        "docs/by-path.md",
+        "# By path\n\nSee [part](old.md#part).\n",
+        false,
+    )
+    .await;
+    save(
+        &project,
+        "docs/by-id.md",
+        &format!("# By id\n\nSee {id}.\n"),
+        false,
+    )
+    .await;
+    let decision = support::knowledge(
+        &project,
+        json!({"op":"create_decision","title":"Keep the old design","question":"Where does it live?","decision":"In the old document","rationale":"It exists","detail":"docs/old.md"}),
+        false,
+    )
+    .await;
+    let decision = support::target(&decision);
+    let to_version = project.version("docs/new.md").await;
+    let reply = doc(
+        &project,
+        json!({"op":"relocate","ref":"docs/old.md","to":"docs/new.md","to_version":to_version}),
+        false,
+    )
+    .await;
+    assert!(
+        reply.contains("2 left dangling.") && !reply.contains("coverage incomplete"),
+        "the move reports exactly the two introduced dangling references with complete coverage: {reply}"
+    );
+    for source in ["docs/by-path.md", decision.as_str()] {
+        assert!(
+            reply.contains(&format!("Dangling: {source} -> docs/old.md")),
+            "{source} is named as left dangling: {reply}"
+        );
+    }
+    assert!(
+        !reply.contains("Dangling: docs/by-id.md"),
+        "a mention by DOC identifier is not dangling: {reply}"
+    );
+    let moved = project.call("get_context", json!({"ref":id}), false).await;
+    assert!(
+        moved.contains("docs/new.md") && !project.root.join("docs/old.md").exists(),
+        "the DOC identifier still resolves, now to the destination: {moved}"
+    );
 }
 
 /// A body that imitates the reply's own framing: look-alike framing, `Next` and snapshot lines, CRLF line ends, and two
