@@ -46,7 +46,9 @@ Retained-read implementation mutants of the unchanged C7b case, run by an indepe
 | `start` included in the candidate snapshot (`records.rs:1444`) | an unchanged continuation reports stale |
 | `limit` accepted for proposal content (`records.rs:111`) | `limit=5` is accepted instead of refused |
 
-`src/compaction/read.rs` is byte identical at the later assembly 166a9a3 and the three `records.rs` patches still apply there with a 28 line offset; the quoting of stored prose (6c08c65) rewrote the shared `fact` helper after the mutants ran, so the two history mutants (reason, revision selector) have not been re-run on 166a9a3 and are not claimed there.
+`src/compaction/read.rs` is byte identical at the later assembly 166a9a3, so the digest and live-bytes mutants carry over unchanged, and the `start` and `limit` mutants apply with only a line offset. The quoting of stored prose (6c08c65) rewrote the shared `fact` helper after the mutants ran, so the two history mutants were run again on assembly 0d34580 by an independent helper (evidence directory `/private/tmp/e001-retained-controls-c7b-20261008`, `REPORT.md` and `manifest.tsv`) with the same fixed test (`b5352d57…d3b`), baseline `records.rs` sha256 `f7f0755da3b7113990a9daa5e62e45c8502c3e75b50f8785aecd32abe3522290` and baseline binary sha256 `b315900031318a84ebd1d42e23f29aaecc6c51ec16dc12fb8d8d683bbe299d52`: baseline C7b passed; omitting the retained action reason failed `tests/compaction_flows.rs:421` (exit 101); ignoring the selected history revision failed `tests/compaction_flows.rs:429` (exit 101); each exact reverse patch restored the source hash and C7b passed again.
+
+Whole common gate on assembly 0d34580: `cargo xtask check` (fmt, all-features Clippy, all tests, rustdoc, contract drift) completed with exit 0 in Root's raw log `/private/tmp/e001-common-0d34580-full-gate.log`: 372 unit tests and the SDK suites `auto_git` 18, `boundary_controls` 5, `catalog_surface` 8, `compaction_flows` 9, `core_protocol` 11 with 1 ignored, `full_composition` 2, `host_protocol` 2, `host_surface` 3, `integration_m001_m004` 4, `knowledge_lifecycle` 11, `markdown_documents` 14, `persistent_clients` 2, `protocol` 5, `search_quality` 3, `skills_check` 2 and `support_selftest` 6 passed. An earlier controlled run that stopped at a stale `integration_m001_m004` pin is history and is not used as a gate result. This is a source gate on one debug build; it is not a packaged payload, installation, CI or publication result.
 
 ## Epic E-001 implementation-mutation controls observed (source-only, 2026-10-08)
 
@@ -65,7 +67,7 @@ On the combined source with the E-001 qualification tests, eight deliberate impl
 
 These controls bind to the source and tests of the tree that Root signs; they record exact boundary observations, not a certificate. The lexical corpus run on the same source measured 62 expected hits at rank 1 and six expected misses detected, with no defect.
 
-## Epic E-001 release qualification plan (planned, none of it run)
+## Epic E-001 release qualification plan (source part observed on assembly 0d34580; payload, install, CI and publication pending)
 
 The baseline observations above are source-only. A release with the full E-001 functionality needs every item below on one exact candidate; a missing item is reported as missing, never replaced by a substitute or inferred from an earlier source check.
 
@@ -77,6 +79,13 @@ The baseline observations above are source-only. A release with the full E-001 f
 6. Supply chain and publication: `cargo deny` after an explicit fetch, no stub tool, CI source and payload jobs, annotated tag, release approval and immutable asset verification as the existing artifact gates require. This worker neither pushes nor publishes.
 7. Skills and clients: the three canonical skills pass the structural validator, and client copy bytes are compared with the component source after installation; links are never assumed to prove equality.
 8. Observations: AT-002 (punctuation round trip), AT-003 (field-named errors) and AT-004 (Epic child counts) are retested on the candidate; Agent Run dependency observations stay attributed to Agent Run.
+
+Status after the source gate of assembly 0d34580 (nothing below is claimed for a payload, an installation or a publication):
+
+- Items 1 to 4 and 7 (validator only) have source evidence on that assembly: the whole `cargo xtask check` exit 0, the SDK families above with no ignored marker except the core broker-receipt case, the six retained-read mutants (the two history ones re-run on 0d34580, the other four carried over as stated above; the eight mutants of the earlier table were observed on older source and are history), the lexical corpus assertions of `search_quality` (62 expected hits at rank 1 and six expected misses were measured on the earlier source) and `skills_check`. Recording the Module `boundary_evidence` for `kr-operations` r7 and `registered-tool-surface` r5 against the final candidate is a separate tracker step.
+- Item 5 (packaged artifact: payload bytes and manifest, `MCP_TEST_BINARY` families against the payload, disposable self-install, MCP Inspector) is pending.
+- Item 6 (`cargo deny` after fetch, CI source and payload jobs, annotated tag, release approval, immutable asset verification) is pending.
+- Item 7 client copy bytes after installation and item 8 observations AT-002, AT-003 and AT-004 on the final candidate are pending beyond the SDK cases that already cover AT-003 and AT-004 (`over_long_list_refusal_names_the_field_and_limit`, `epic_status_keeps_honest_child_counts`).
 
 ## Patch 0.9.1 — source checks on 2026-10-06
 
