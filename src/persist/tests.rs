@@ -1698,6 +1698,161 @@ fn a_batched_commit_keeps_odd_names_head_modes_and_a_removal() {
     );
 }
 
+/// A tiny batch cap forces several flushes: every staged blob still equals Git's id of the published
+/// bytes, the order follows the input, removals stay removals and no private copy survives.
+#[test]
+fn staging_across_several_batches_keeps_every_blob_exact() {
+    let f = GitFixture::new();
+    let (store, _guard) = call(&f);
+    std::fs::create_dir_all(f.dir.path().join(".git/agent-tasks")).unwrap();
+    let names: Vec<String> = (0..5).map(|n| format!("f-{n}.bin")).collect();
+    let mut expected = std::collections::BTreeMap::new();
+    for (n, name) in names.iter().enumerate() {
+        let bytes = vec![b'a' + n as u8; 10 + n];
+        create(&store, name, &bytes);
+        expected.insert(name.clone(), Some(journal::sha256_hex(&bytes)));
+    }
+    names
+        .iter()
+        .for_each(|n| assert!(f.dir.path().join(n).is_file()));
+    let gone = "gone.bin".to_owned();
+    expected.insert(gone.clone(), None);
+    let mut paths = names.clone();
+    paths.insert(2, gone.clone());
+    let parent = f.git(&["rev-parse", "HEAD"]);
+    let staged = super::engine::stage_exact_capped(
+        &store,
+        &parent,
+        &paths,
+        &expected,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        24,
+    )
+    .unwrap();
+    assert_eq!(
+        staged.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
+        paths.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    for s in &staged {
+        match &s.oid {
+            None => assert_eq!((s.path.as_str(), s.mode.as_str()), ("gone.bin", "0")),
+            Some(oid) => {
+                assert_eq!(oid, &f.git(&["hash-object", "--no-filters", "--", &s.path]));
+                assert_eq!(s.mode, "100644");
+            }
+        }
+    }
+    let private = f.dir.path().join(".git/agent-tasks");
+    assert!(entries(&private).iter().all(|n| !n.starts_with("blobs.")));
+}
+
+/// Names of the entries directly inside `dir`, sorted.
+fn entries(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The batched blob helper returns exactly the ids Git computes for the same bytes without filters and
+/// removes every private file and directory it created.
+#[test]
+fn batched_blob_ids_equal_git_and_leave_no_private_files() {
+    let f = GitFixture::new();
+    let store = Store::from_root(f.dir.path()).unwrap();
+    let private = f.dir.path().join(".git/agent-tasks");
+    std::fs::create_dir_all(&private).unwrap();
+    let blobs: [&[u8]; 4] = [b"", b"text\n", b"\0\xff binary\r\n", &[b'x'; 70_000]];
+    let ids = super::verify::raw_blob_ids(
+        &store,
+        &blobs,
+        40,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    assert_eq!(ids.len(), blobs.len());
+    for (bytes, id) in blobs.iter().zip(&ids) {
+        let probe = f.dir.path().join("probe.bin");
+        std::fs::write(&probe, bytes).unwrap();
+        assert_eq!(
+            &f.git(&["hash-object", "--no-filters", "--", "probe.bin"]),
+            id
+        );
+        assert_eq!(f.git(&["cat-file", "-s", id]), bytes.len().to_string());
+    }
+    assert!(entries(&private).is_empty(), "{:?}", entries(&private));
+}
+
+/// Anything already at the private name is refused untouched: a foreign directory keeps its sentinel
+/// and a foreign link and its target stay exactly as they were. Nothing is created or deleted.
+#[cfg(unix)]
+#[test]
+fn batched_blob_ids_refuse_a_preexisting_foreign_name_untouched() {
+    let f = GitFixture::new();
+    let store = Store::from_root(f.dir.path()).unwrap();
+    let private = f.dir.path().join(".git/agent-tasks");
+    std::fs::create_dir_all(&private).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let blobs: [&[u8]; 1] = [b"mine"];
+    let foreign = private.join("blobs.fixed");
+    std::fs::create_dir(&foreign).unwrap();
+    std::fs::write(foreign.join("0"), b"foreign sentinel").unwrap();
+    assert!(super::verify::raw_blob_ids_in(&store, "blobs.fixed", &blobs, 40, deadline).is_err());
+    assert_eq!(entries(&foreign), ["0"]);
+    assert_eq!(
+        std::fs::read(foreign.join("0")).unwrap(),
+        b"foreign sentinel"
+    );
+    std::fs::remove_dir_all(&foreign).unwrap();
+    let outside = f.dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("0"), b"outside sentinel").unwrap();
+    std::os::unix::fs::symlink(&outside, &foreign).unwrap();
+    assert!(super::verify::raw_blob_ids_in(&store, "blobs.fixed", &blobs, 40, deadline).is_err());
+    assert!(
+        std::fs::symlink_metadata(&foreign)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(entries(&outside), ["0"]);
+    assert_eq!(
+        std::fs::read(outside.join("0")).unwrap(),
+        b"outside sentinel"
+    );
+}
+
+/// A linked private parent is never followed: nothing is written through it.
+#[cfg(unix)]
+#[test]
+fn batched_blob_ids_never_follow_a_linked_parent() {
+    let f = GitFixture::new();
+    let store = Store::from_root(f.dir.path()).unwrap();
+    let outside = f.dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, f.dir.path().join(".git/agent-tasks")).unwrap();
+    let blobs: [&[u8]; 1] = [b"mine"];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    assert!(super::verify::raw_blob_ids(&store, &blobs, 40, deadline).is_err());
+    assert!(entries(&outside).is_empty());
+}
+
+/// Malformed Git output fails closed and still removes the files and directory this call created: the
+/// wrong id width stands for any output that is not exactly one valid id per blob.
+#[test]
+fn batched_blob_ids_fail_closed_on_a_malformed_answer_and_clean_up() {
+    let f = GitFixture::new();
+    let store = Store::from_root(f.dir.path()).unwrap();
+    let private = f.dir.path().join(".git/agent-tasks");
+    std::fs::create_dir_all(&private).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let blobs: [&[u8]; 2] = [b"one", b"two"];
+    assert!(super::verify::raw_blob_ids(&store, &blobs, 64, deadline).is_err());
+    assert!(entries(&private).is_empty(), "{:?}", entries(&private));
+}
+
 /// A linked worktree or submodule (`.git` is a file) and unmerged paths are refused with their own reasons.
 #[test]
 fn linked_checkouts_and_unmerged_paths_defer() {

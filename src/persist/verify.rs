@@ -74,27 +74,72 @@ pub fn tree_entries<S: AsRef<str>>(
 
 /// Object ids of the exact `blobs`, stored without any filter, from one Git process.
 ///
-/// The bytes are copied to private files inside the Git directory first, so the stored objects are the
-/// caller's verified bytes and never a later native edit of the working file. The returned ids are in
-/// input order. `Err` means nothing can be trusted; the private files are always removed.
-pub fn raw_blob_ids(store: &Store, blobs: &[&[u8]], deadline: Instant) -> Result<Vec<String>, ()> {
-    if blobs.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Git runs inside the root, so the private files are named relative to it and no root name can
-    // break the newline-separated list.
-    let relative = format!(
-        ".git/agent-tasks/blobs.{}-{}",
+/// `oid_len` is the hexadecimal length of this repository's object ids (40 or 64). The bytes are copied
+/// to private files inside the Git directory first, so the stored objects are the caller's verified bytes
+/// and never a later native edit of the working file. The returned ids are in input order. See
+/// [`raw_blob_ids_in`] for the directory discipline; this wrapper only picks a fresh unpredictable name.
+pub fn raw_blob_ids(
+    store: &Store,
+    blobs: &[&[u8]],
+    oid_len: usize,
+    deadline: Instant,
+) -> Result<Vec<String>, ()> {
+    let name = format!(
+        "blobs.{}-{}",
         std::process::id(),
         journal::new_intent_id(store)
     );
-    let dir = store.root.join(&relative);
+    raw_blob_ids_in(store, &name, blobs, oid_len, deadline)
+}
+
+/// [`raw_blob_ids`] with an explicit private directory `name` below `.git/agent-tasks`.
+///
+/// The parent must already be a real directory (a link is refused, never followed). The private
+/// directory is created exclusively: anything already at `name`, including a link or foreign data, is
+/// refused untouched. Every byte file is created exclusively inside it, so no path collision can
+/// overwrite or follow anything. Cleanup removes only the files and the directory this call created, and
+/// only when it created them. The ids must be exactly one lowercase hexadecimal line of `oid_len`
+/// characters per blob in valid UTF-8, from a successful and untruncated Git run; anything else is `Err`.
+pub fn raw_blob_ids_in(
+    store: &Store,
+    name: &str,
+    blobs: &[&[u8]],
+    oid_len: usize,
+    deadline: Instant,
+) -> Result<Vec<String>, ()> {
+    if blobs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let parent = store.root.join(".git/agent-tasks");
+    if !std::fs::symlink_metadata(&parent).is_ok_and(|m| m.is_dir()) {
+        return Err(());
+    }
+    let dir = parent.join(name);
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&dir).map_err(|_| ())?;
+    // From here the directory is ours alone; `created` names every file this call made inside it.
+    let mut created = Vec::new();
     let result = (|| {
-        std::fs::create_dir_all(&dir).map_err(|_| ())?;
         let mut list = String::new();
         for (n, bytes) in blobs.iter().enumerate() {
-            std::fs::write(dir.join(n.to_string()), bytes).map_err(|_| ())?;
-            list.push_str(&format!("{relative}/{n}\n"));
+            let file = dir.join(n.to_string());
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut handle = options.open(&file).map_err(|_| ())?;
+            created.push(file);
+            std::io::Write::write_all(&mut handle, bytes).map_err(|_| ())?;
+            // Git runs inside the root, so the list is relative to it and no root name can break it.
+            list.push_str(&format!(".git/agent-tasks/{name}/{n}\n"));
         }
         let out = git::run(
             &store.root,
@@ -103,15 +148,22 @@ pub fn raw_blob_ids(store: &Store, blobs: &[&[u8]], deadline: Instant) -> Result
             deadline,
         )
         .map_err(|_| ())?;
-        let ids: Vec<String> = out.text().lines().map(str::to_owned).collect();
-        (out.success()
-            && !out.truncated
-            && ids.len() == blobs.len()
-            && ids.iter().all(|id| !id.is_empty()))
-        .then_some(ids)
-        .ok_or(())
+        if !out.success() || out.truncated {
+            return Err(());
+        }
+        let text = String::from_utf8(out.stdout).map_err(|_| ())?;
+        let ids: Vec<&str> = text.strip_suffix('\n').ok_or(())?.split('\n').collect();
+        let valid = |id: &&str| {
+            id.len() == oid_len && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        };
+        (ids.len() == blobs.len() && ids.iter().all(valid))
+            .then(|| ids.into_iter().map(str::to_owned).collect())
+            .ok_or(())
     })();
-    let _ = std::fs::remove_dir_all(&dir);
+    for file in &created {
+        let _ = std::fs::remove_file(file);
+    }
+    let _ = std::fs::remove_dir(&dir);
     result
 }
 

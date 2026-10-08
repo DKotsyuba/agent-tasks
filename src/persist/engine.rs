@@ -476,16 +476,19 @@ fn run_indexed(
 }
 
 /// One path's exact state to stage: raw bytes stored without filters, or a removal.
-struct Staged {
+pub(super) struct Staged {
     /// Owned relative path.
-    path: String,
+    pub(super) path: String,
     /// File mode, kept from HEAD when the path exists there.
-    mode: String,
+    pub(super) mode: String,
     /// Object id of the exact bytes; `None` removes the path.
-    oid: Option<String>,
+    pub(super) oid: Option<String>,
 }
 
-/// Most verified bytes held in memory and copied to private files for one batched blob write.
+/// Most verified bytes one batched blob write holds in memory and copies to private files. A batch is
+/// flushed before a file would cross it, so only a single file larger than the cap forms a batch alone
+/// (at most [`ABSOLUTE_CAP`]); the file just read is held besides the batch, so resident bytes never
+/// exceed this cap plus one maximal file.
 const STAGE_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
 /// Store the exact recorded bytes of every path as raw blobs and describe the index entries to write.
@@ -502,12 +505,24 @@ fn stage_exact(
     expected: &BTreeMap<String, Option<String>>,
     deadline: Instant,
 ) -> Result<Vec<Staged>, ()> {
+    stage_exact_capped(store, parent, paths, expected, deadline, STAGE_BATCH_BYTES)
+}
+
+/// [`stage_exact`] with an explicit batch byte cap, so tests can force several flushes with tiny files.
+pub(super) fn stage_exact_capped(
+    store: &Store,
+    parent: &str,
+    paths: &[String],
+    expected: &BTreeMap<String, Option<String>>,
+    deadline: Instant,
+    cap: usize,
+) -> Result<Vec<Staged>, ()> {
     let mut oids: Vec<Option<String>> = vec![None; paths.len()];
     let mut batch: Vec<(usize, Vec<u8>)> = Vec::new();
     let mut size = 0usize;
     let flush = |batch: &mut Vec<(usize, Vec<u8>)>, oids: &mut Vec<Option<String>>| {
         let blobs: Vec<&[u8]> = batch.iter().map(|(_, b)| b.as_slice()).collect();
-        let ids = super::verify::raw_blob_ids(store, &blobs, deadline)?;
+        let ids = super::verify::raw_blob_ids(store, &blobs, parent.len(), deadline)?;
         for ((at, _), id) in batch.iter().zip(ids) {
             oids[*at] = Some(id);
         }
@@ -520,12 +535,12 @@ fn stage_exact(
         match (want, found) {
             (None, None) => (),
             (Some(digest), Some(file)) if journal::sha256_hex(&file.bytes) == *digest => {
-                size += file.bytes.len();
-                batch.push((at, file.bytes));
-                if size >= STAGE_BATCH_BYTES {
+                if !batch.is_empty() && size + file.bytes.len() > cap {
                     flush(&mut batch, &mut oids)?;
                     size = 0;
                 }
+                size += file.bytes.len();
+                batch.push((at, file.bytes));
             }
             _ => return Err(()),
         }
