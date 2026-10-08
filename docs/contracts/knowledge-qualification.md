@@ -182,10 +182,10 @@ Installed and client copies of these skills are not inventoried here. Whether a 
 
 | Observation | Retest | Status |
 |---|---|---|
-| AT-001 Epic context shows Module-only guidance | `get_context ref=E-001`: no `review_module` or "Report the module outcome"; `review_work` and `verify_criterion` named | open, M-003 |
-| AT-002 save produces an unreadable Module | punctuation such as `valid_reference(store,&str)`, colons, quotes and brackets round-trips through plan, record and context; tags, anchors and aliases still refuse | hotfix e971dac; retest pending in the combined candidate |
-| AT-003 vague eight-value error | an over-long `read_refs` and a wrong field in `plan_work edit_task` each name the field and the limit and echo no value, on a real stdio call | reproduced on 0.9.2; open, M-003 |
-| AT-004 Epic roll-up | `project_status module=E-001` with an unreadable member prints PARTIAL and names it, never zero | open, M-003 |
+| AT-001 Epic context shows Module-only guidance | `get_context ref=E-001`: no `review_module` or "Report the module outcome"; `review_work` and `verify_criterion` named | retested and fixed: `host_protocol::epic_guidance_and_roll_up_over_real_stdio` (real stdio) and the in-crate `scoped_guidance_names_the_right_review_route` pass in the whole `cargo xtask check` on signed source 7920a7c |
+| AT-002 save produces an unreadable Module | punctuation such as `valid_reference(store,&str)`, colons, quotes and brackets round-trips through plan, record and context; tags, anchors and aliases still refuse | hotfix e971dac; retested in crate on 7920a7c (`yaml_canonical_prose_round_trips_through_the_read_gate`, `yaml_router_contract_prose_survives_restart_and_next_write`, router path with restart and next write); no separate SDK scenario exists, so none is claimed |
+| AT-003 vague eight-value error | an over-long `read_refs` and a wrong field in `plan_work edit_task` each name the field and the limit and echo no value, on a real stdio call | reproduced on 0.9.2; retested and fixed: `catalog_surface::over_long_list_refusal_names_the_field_and_limit`, `wrong_field_name_is_named_on_a_real_call` and `host_protocol::validation_errors_name_the_field_not_the_value` pass on 7920a7c |
+| AT-004 Epic roll-up | `project_status module=E-001` with an unreadable member prints PARTIAL and names it, never zero | retested and fixed: `catalog_surface::epic_status_keeps_honest_child_counts` and the in-crate `epic_scope_rolls_up_members_and_names_the_unreadable` pass on 7920a7c |
 | AR-001 to AR-004 | dependency observations, not retested here | open, Agent Run |
 
 ## 12 Waits and ownership
