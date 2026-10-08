@@ -15,7 +15,7 @@ use crate::{
         self, EventClass, GitReceipt,
         recover::{Action, PreserveItem, Report, recover},
     },
-    store::{self, Error, LockGuard, Result, Store},
+    store::{Error, LockGuard, Result, Store},
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -186,24 +186,26 @@ fn pending_lines(store: &Store, limit: usize) -> Vec<String> {
         .collect()
 }
 
-/// Keep unknown and held facts visible on a refusal: the message names up to four, the ledger the rest.
+/// Preserve recovery preconditions on a refusal without changing files or Git.
+///
+/// `store` is the locked request root; `error` keeps its classified failure and `effects` receives
+/// the exact current Pending Version and up to sixteen complete pending identities, including the
+/// first four repeated in the message. Ledger copies survive the presenter's message budget.
+/// Stale errors also carry the fresh observation, but keep their original explanation.
 fn refuse(store: &Store, error: Error, effects: &mut Vec<String>) -> Error {
     let all = pending_lines(store, MAX_REFS);
+    effects.push(format!(
+        "Pending Version: {}",
+        persist::pending_version(store)
+    ));
+    effects.extend(all.iter().map(|l| format!("Still pending: {l}.")));
     if all.is_empty() || error.code == "stale" {
         return error;
     }
-    effects.extend(
-        all.iter()
-            .skip(ERROR_REFS)
-            .map(|l| format!("Still pending: {l}.")),
-    );
     let named: Vec<_> = all.iter().take(ERROR_REFS).cloned().collect();
     Error::new(
         error.code,
-        store::safe(
-            &format!("{} Pending: {}.", error.message, named.join("; ")),
-            400,
-        ),
+        format!("{} Pending: {}.", error.message, named.join("; ")),
     )
 }
 
@@ -495,5 +497,72 @@ mod tests {
         assert_eq!(error.code, "recovery_blocked");
         assert!(error.message.contains("Pending: PG-"), "{}", error.message);
         assert_eq!(f.git(&["rev-list", "--count", "HEAD"]), before);
+    }
+
+    /// Retry cannot restore an overwritten held counter and returns exact recovery preconditions.
+    #[test]
+    fn superseded_retry_names_the_skipped_path_and_current_pending_version() {
+        let f = GitFixture::new();
+        let (store, guard) = call(&f);
+        create(&store, "counter.yaml", b"c1");
+        let intent = settle_with(&store, &guard, EventOutcome::Partial, false).pending[0]
+            .intent
+            .clone();
+        drop(guard);
+        let (next, guard) = call(&f);
+        next.publish_with(
+            Publish {
+                relative: "counter.yaml",
+                bytes: b"c2",
+                observed: Some(b"c1"),
+                cap: RECORD_CAP,
+                operation: None,
+                attest: Attest::Optional,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            settle_with(&next, &guard, EventOutcome::Success, false).outcome,
+            persist::GitOutcome::Committed
+        );
+        let version = persist::pending_version(&next);
+        let before = f.git(&["rev-parse", "HEAD"]);
+        let mut effects = Vec::new();
+        let error = execute_locked(
+            &next,
+            &guard,
+            &common(version.clone()),
+            RecoveryOp::Retry {
+                intents: vec![intent.clone()],
+            },
+            &mut effects,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "recovery_blocked");
+        assert!(
+            error
+                .message
+                .contains("Skipped all 1 superseded path(s); first: counter.yaml"),
+            "{}",
+            error.message
+        );
+        assert!(
+            effects.contains(&format!("Pending Version: {version}")),
+            "{effects:?}"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|line| line.contains(&intent) && line.contains("Held")),
+            "{effects:?}"
+        );
+        assert_eq!(f.git(&["rev-parse", "HEAD"]), before);
+        assert_eq!(
+            std::fs::read(f.dir.path().join("counter.yaml")).unwrap(),
+            b"c2"
+        );
+        assert_eq!(persist::pending_version(&next), version);
     }
 }

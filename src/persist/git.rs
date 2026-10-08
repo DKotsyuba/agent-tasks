@@ -5,6 +5,7 @@
 //! signing, disables lazy fetching and prompts, caps stdout and stderr while draining both so a full
 //! pipe cannot stall the child, enforces one deadline and kills the child's process group on expiry.
 //! Raw stderr is never returned to callers as text; they classify exit status and fixed markers.
+use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     path::Path,
@@ -19,7 +20,8 @@ pub const STDOUT_CAP: usize = 1024 * 1024;
 pub const STDERR_CAP: usize = 64 * 1024;
 /// Deadline for one ordinary command.
 pub const COMMAND_TIME: Duration = Duration::from_secs(10);
-/// Deadline for one whole settlement.
+/// Public maximum for settlement and reply preparation. Callers reserve half [`COMMAND_TIME`]
+/// for the wire reply; post-write verification stays inside the remaining Git deadline.
 pub const SETTLEMENT_TIME: Duration = Duration::from_secs(30);
 
 /// Captured result of one command that ran to completion.
@@ -28,6 +30,9 @@ pub struct Output {
     pub code: Option<i32>,
     /// Captured stdout, at most [`STDOUT_CAP`] bytes.
     pub stdout: Vec<u8>,
+    /// Private fingerprint of the complete stdout stream, including bytes beyond the retained cap.
+    /// `None` means the reader failed; it never certifies a prefix as a complete snapshot.
+    pub stdout_digest: Option<[u8; 32]>,
     /// Captured stderr, at most [`STDERR_CAP`] bytes; only for fixed-marker classification.
     pub stderr: Vec<u8>,
     /// Whether either stream exceeded its cap and was cut.
@@ -69,15 +74,22 @@ pub fn set_test_environment(variables: Vec<(String, String)>) {
     TEST_ENVIRONMENT.with(|env| *env.borrow_mut() = variables);
 }
 
-/// Drain `source` into a buffer of at most `cap` bytes, discarding the rest; returns bytes and a cut flag.
-fn capture(mut source: impl Read, cap: usize) -> (Vec<u8>, bool) {
+/// Drain `source`, retaining at most `cap` bytes and hashing the entire stream with fixed-size state.
+///
+/// Returns the retained prefix, its truncation flag and the complete SHA-256; a read failure makes
+/// the digest absent. Callers never display the digest or source bytes as diagnostic text. The
+/// command's shared deadline bounds capture; excess bytes increase neither retained memory nor hash state.
+fn capture(mut source: impl Read, cap: usize) -> (Vec<u8>, bool, Option<[u8; 32]>) {
     let mut kept = Vec::new();
     let mut buffer = [0u8; 8192];
     let mut cut = false;
+    let mut digest = Sha256::new();
     loop {
         match source.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => return (kept, cut, Some(digest.finalize().into())),
+            Err(_) => return (kept, cut, None),
             Ok(n) => {
+                digest.update(&buffer[..n]);
                 let room = cap.saturating_sub(kept.len());
                 if n > room {
                     cut = true;
@@ -86,7 +98,31 @@ fn capture(mut source: impl Read, cap: usize) -> (Vec<u8>, bool) {
             }
         }
     }
-    (kept, cut)
+}
+
+/// Prefix truncation preserves the complete private digest; a real reader failure supplies no digest.
+#[cfg(all(test, unix))]
+#[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Isolated reader assertions over disposable data"
+)]
+fn capture_digest_is_complete_only_after_eof() {
+    let bytes = vec![b'x'; STDOUT_CAP + 1];
+    let (kept, truncated, digest) = capture(std::io::Cursor::new(&bytes), 16);
+    let expected: [u8; 32] = Sha256::digest(&bytes).into();
+    assert_eq!(kept.len(), 16);
+    assert!(truncated);
+    assert!(
+        digest == Some(expected),
+        "the fingerprint covers bytes beyond the retained prefix"
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let (_, _, failed) = capture(std::fs::File::open(directory.path()).unwrap(), 16);
+    assert!(
+        failed.is_none(),
+        "a read failure cannot certify a partial stream"
+    );
 }
 
 /// Run `git` with `args` inside `root`, optionally feeding `stdin`, until `deadline`.
@@ -106,7 +142,11 @@ pub fn run(
     run_env(root, args, stdin, deadline, &[])
 }
 
-/// Like [`run`] with extra environment variables, such as `GIT_INDEX_FILE` for a temporary index.
+/// Like [`run`] with `extra` environment overrides, such as `GIT_INDEX_FILE` for a temporary index.
+///
+/// The deadline covers process execution and draining both capped output streams. A hook descendant
+/// retaining a pipe is killed with the process group when capture times out, even if Git has exited.
+/// No stream gets more than five seconds or the remaining command budget, whichever is shorter.
 ///
 /// # Errors
 /// The same as [`run`].
@@ -202,15 +242,33 @@ pub fn run_env(
             }
         }
     };
-    let (stdout, cut_out) = out_rx
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| RunError::Io)?;
-    let (stderr, cut_err) = err_rx
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| RunError::Io)?;
+    let ((stdout, cut_out, stdout_digest), (stderr, cut_err, _)) = out_rx
+        .recv_timeout(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(5)),
+        )
+        .and_then(|out| {
+            err_rx
+                .recv_timeout(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_secs(5)),
+                )
+                .map(|err| (out, err))
+        })
+        .map_err(|_| {
+            kill_group(pid);
+            if Instant::now() >= deadline {
+                RunError::Timeout
+            } else {
+                RunError::Io
+            }
+        })?;
     Ok(Output {
         code: status.code(),
         stdout,
+        stdout_digest,
         stderr,
         truncated: cut_out || cut_err,
     })

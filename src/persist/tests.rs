@@ -254,7 +254,7 @@ fn foreign_staging_on_the_current_path_defers_this_call_only() {
     assert_eq!(f.git(&["ls-files", "modules/"]), "modules/M-001.yaml");
 }
 
-/// Unrelated staged and dirty files keep their state while the call commits only its own files.
+/// Unchanged foreign staging and dirty files survive and do not count as newly observed hook edits.
 #[test]
 fn unrelated_staging_and_dirty_files_are_preserved() {
     let f = GitFixture::new();
@@ -270,6 +270,10 @@ fn unrelated_staging_and_dirty_files_are_preserved() {
     create(&store, "modules/M-001.yaml", b"mine");
     let receipt = commit_now(&store, &guard);
     assert_eq!(receipt.outcome, GitOutcome::Committed);
+    assert!(
+        !receipt.attention.contains(&Attention::HookChangedWorktree),
+        "{receipt:?}"
+    );
     assert_eq!(f.git(&["diff", "--cached", "--name-only"]), "staged.md");
     assert_eq!(f.git(&["diff", "--name-only"]), "dirty.md");
     assert_eq!(
@@ -538,6 +542,132 @@ fn a_hook_that_changes_the_worktree_is_reported() {
     );
 }
 
+/// Hook edits outside the selection are reported while existing foreign edits and staging survive.
+#[cfg(unix)]
+#[test]
+fn a_hook_that_changes_a_neighbor_is_reported() {
+    let f = GitFixture::new();
+    for path in ["neighbor.md", "staged.md"] {
+        std::fs::write(f.dir.path().join(path), "base\n").unwrap();
+    }
+    f.git(&["add", "--", "neighbor.md", "staged.md"]);
+    f.git(&["commit", "--quiet", "-m", "fixture neighbors"]);
+    std::fs::write(f.dir.path().join("neighbor.md"), "native\n").unwrap();
+    std::fs::write(f.dir.path().join("staged.md"), "staged\n").unwrap();
+    f.git(&["add", "--", "staged.md"]);
+    hook(&f, "pre-commit", "echo hook >> neighbor.md");
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", b"mine");
+    let receipt = commit_now(&store, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert!(receipt.attention.contains(&Attention::HookChangedWorktree));
+    assert_eq!(
+        std::fs::read(f.dir.path().join("neighbor.md")).unwrap(),
+        b"native\nhook\n"
+    );
+    assert_eq!(f.git(&["show", "HEAD:neighbor.md"]), "base");
+    assert_eq!(f.git(&["diff", "--cached", "--name-only"]), "staged.md");
+    assert_eq!(
+        f.git(&["show", "--name-only", "--format=", "HEAD"]),
+        "doc.md"
+    );
+}
+
+/// Unavailable inspection prevents a write beforehand or keeps a landed attempt unknown afterward.
+#[cfg(unix)]
+#[test]
+fn incomplete_worktree_inspection_never_claims_a_clean_commit() {
+    for after in [false, true] {
+        let f = GitFixture::new();
+        let before = commits(&f);
+        let (store, guard) = call(&f);
+        create(&store, "doc.md", b"mine");
+        super::engine::fail_worktree_read(if after { 2 } else { 1 });
+        let receipt = commit_now(&store, &guard);
+        assert_eq!(commits(&f), before + usize::from(after));
+        assert_eq!(
+            receipt.outcome,
+            if after {
+                GitOutcome::Unknown
+            } else {
+                GitOutcome::Deferred
+            },
+            "{receipt:?}"
+        );
+        assert!(
+            !receipt.attention.contains(&Attention::HookChangedWorktree),
+            "no complete comparison proves a hook edit"
+        );
+        let (journal, _) = journal::load(&store).unwrap();
+        assert_eq!(
+            journal.intents.last().unwrap().committing_from.is_some(),
+            after
+        );
+        if after {
+            let id = journal.intents.last().unwrap().id.clone();
+            let version = super::pending_version(&store);
+            super::recover::recover(
+                &store,
+                &guard,
+                &version,
+                super::recover::Action::Reconcile(vec![id.clone()]),
+            )
+            .unwrap();
+            let version = super::pending_version(&store);
+            let retried = super::recover::recover(
+                &store,
+                &guard,
+                &version,
+                super::recover::Action::Retry(vec![id]),
+            );
+            assert_eq!(retried.err().unwrap().code, "recovery_blocked");
+            let (journal, _) = journal::load(&store).unwrap();
+            assert!(journal.intents.last().unwrap().committed.is_some());
+            assert_eq!(
+                commits(&f),
+                before + 1,
+                "reconciliation never duplicates a landed commit"
+            );
+        }
+    }
+}
+
+/// A valid maximal body replacement exceeds the retained diff cap but its complete digest stays usable.
+#[test]
+fn maximal_body_replacement_uses_a_complete_bounded_worktree_digest() {
+    let f = GitFixture::new();
+    let old = vec![b'a'; RECORD_CAP];
+    let new = vec![b'b'; RECORD_CAP];
+    let (store, guard) = call(&f);
+    create(&store, "doc.md", &old);
+    assert_eq!(commit_now(&store, &guard).outcome, GitOutcome::Committed);
+    drop(guard);
+    let (next, guard) = call(&f);
+    replace(&next, "doc.md", &new, &old);
+    let diff = super::git::run(
+        f.dir.path(),
+        &["diff", "--no-ext-diff", "--no-textconv", "--binary", "--"],
+        None,
+        std::time::Instant::now() + super::git::COMMAND_TIME,
+    )
+    .unwrap();
+    assert!(
+        diff.truncated,
+        "old plus new plus framing exceeds the retained cap"
+    );
+    assert_eq!(diff.stdout.len(), super::git::STDOUT_CAP);
+    assert!(
+        diff.stdout_digest.is_some(),
+        "the complete stream still has a private digest"
+    );
+    let before = commits(&f);
+    let receipt = commit_now(&next, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert!(!receipt.attention.contains(&Attention::HookChangedWorktree));
+    assert_eq!(commits(&f), before + 1);
+    assert!(std::fs::read(f.dir.path().join("doc.md")).unwrap() == new);
+}
+
 /// A successful commit whose verification HEAD is temporarily unreadable keeps its attempt
 /// unknown, so a later available read can reconcile the existing commit without duplicating it.
 #[cfg(unix)]
@@ -589,6 +719,37 @@ fn a_signing_failure_defers_without_touching_the_index() {
     );
     assert_eq!(commits(&f), before);
     assert_eq!(f.git(&["diff", "--cached", "--name-only"]), "");
+}
+
+/// A Git alias whose child retains the output pipes cannot extend the command's deadline.
+#[cfg(unix)]
+#[test]
+fn git_output_capture_respects_the_remaining_deadline() {
+    let f = GitFixture::new();
+    let started = std::time::Instant::now();
+    let result = super::git::run(
+        f.dir.path(),
+        &[
+            "-c",
+            "alias.hold=!touch .git/pipe-child; sleep 60 &",
+            "hold",
+        ],
+        None,
+        started + std::time::Duration::from_secs(1),
+    );
+    assert!(
+        f.dir.path().join(".git/pipe-child").exists(),
+        "the child must have run before the deadline"
+    );
+    assert!(matches!(result, Err(super::git::RunError::Timeout)));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "output capture cannot add five seconds per pipe"
+    );
+    assert!(
+        super::git::SETTLEMENT_TIME - super::git::COMMAND_TIME / 2
+            < std::time::Duration::from_secs(30)
+    );
 }
 
 /// A stuck hook hits the deadline: outcome unknown, files saved, and a later settlement neither

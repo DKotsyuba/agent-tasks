@@ -23,12 +23,20 @@ use std::{
 std::thread_local! {
     /// One-shot read failure after a real successful commit, isolated to the test thread.
     static UNAVAILABLE_VERIFICATION_HEAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Countdown to one unavailable worktree read; zero disables this test-only fault.
+    static UNAVAILABLE_WORKTREE_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Make only the next post-commit HEAD verification unavailable in this test thread.
 #[cfg(test)]
 pub(super) fn fail_next_verification_head() {
     UNAVAILABLE_VERIFICATION_HEAD.with(|fault| fault.set(true));
+}
+
+/// Fail the `nth` upcoming worktree inspection in this test thread; zero disables the one-shot fault.
+#[cfg(test)]
+pub(super) fn fail_worktree_read(nth: usize) {
+    UNAVAILABLE_WORKTREE_READ.with(|fault| fault.set(nth));
 }
 
 /// Serialized commit message budget: whole intents only, never a truncated trailer.
@@ -529,13 +537,53 @@ fn index_info(staged: &[Staged], oid_len: usize) -> Vec<u8> {
         .collect()
 }
 
+/// Capture tracked worktree edits against the real index without changing it or invoking diff drivers.
+///
+/// The private SHA-256 includes pre-existing foreign edits so unchanged edits compare equal across
+/// a commit. Untracked paths are outside this snapshot; selected paths have separate digest checks.
+/// The complete stream is hashed even beyond the retained output cap, so valid maximal own edits
+/// remain eligible. Returns `None` on command, timeout or reader failure, never a prefix comparison.
+/// `deadline` bounds this read, including Git's per-command limit; no diff text or digest is exposed.
+fn worktree_diff(store: &Store, deadline: Instant) -> Option<[u8; 32]> {
+    #[cfg(test)]
+    if UNAVAILABLE_WORKTREE_READ.with(|fault| {
+        let remaining = fault.get();
+        fault.set(remaining.saturating_sub(1));
+        remaining == 1
+    }) {
+        return None;
+    }
+    git::run(
+        &store.root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "--no-renames",
+            "--ignore-submodules=all",
+            "--",
+        ],
+        None,
+        deadline,
+    )
+    .ok()
+    .filter(|o| o.success())
+    .and_then(|o| o.stdout_digest)
+}
+
 /// Commit exactly `paths` with `message` through a temporary index, then refresh only those paths in the
 /// real index. The user's configuration, hooks and signing apply; nothing is forced.
 ///
 /// The commit stages the exact recorded bytes (no clean filters) and is certified only when its parent,
 /// changed set, trailers and every path's object id equal what was staged. An unreadable HEAD after
 /// writing returns [`Attempt::Unknown`] and retains reconciliation evidence; a readable but mismatched
-/// commit returns [`Attempt::Unverified`], never as landed.
+/// commit returns [`Attempt::Unverified`], never as landed. `parent` is the attached HEAD the
+/// attempt must build on; `expected` maps every owned path to its exact digest or absence.
+/// Inspection uses the caller's deadline with bounded post-write verification. A bounded snapshot
+/// against the unchanged real index detects edits to tracked neighboring files without mistaking
+/// pre-existing foreign edits for hook changes. Unavailable pre-inspection prevents a commit;
+/// unavailable post-inspection returns `Unknown` for explicit reconciliation, never a clean claim.
 pub fn commit_paths(
     store: &Store,
     parent: &str,
@@ -587,6 +635,10 @@ pub fn commit_paths(
         cleanup(&index);
         return Attempt::NotCompleted;
     }
+    let Some(before_worktree) = worktree_diff(store, deadline) else {
+        cleanup(&index);
+        return Attempt::NotCompleted;
+    };
     let result = run_indexed(
         store,
         &index,
@@ -595,8 +647,9 @@ pub fn commit_paths(
         deadline,
     );
     cleanup(&index);
-    // The commit deadline may be spent by a stuck hook; the verification reads get their own short one.
-    let verify = Instant::now() + std::time::Duration::from_secs(5);
+    // Verification gets at most half a command budget and never extends the aggregate deadline.
+    // If the commit spent that budget, keep the attempt unknown for later reconciliation.
+    let verify = deadline.min(Instant::now() + git::COMMAND_TIME / 2);
     let head = git::read_text(
         &store.root,
         &["rev-parse", "--verify", "-q", "HEAD"],
@@ -620,11 +673,17 @@ pub fn commit_paths(
     if head.is_none() {
         return Attempt::Unknown;
     }
-    let deadline = deadline.max(verify);
+    let Some(after_worktree) = worktree_diff(store, verify) else {
+        return Attempt::Unknown;
+    };
+    let deadline = verify;
     let Some(new) = head.filter(|h| h != parent) else {
         return Attempt::NotCompleted;
     };
     let mut attention = Vec::new();
+    if before_worktree != after_worktree {
+        attention.push(Attention::HookChangedWorktree);
+    }
     let mut proven = true;
     if git::read_text(
         &store.root,
@@ -864,13 +923,15 @@ fn stamp(store: &Store, intent: &str, event: &Event, outcome: IntentOutcome) -> 
 ///
 /// `guard` proves the root write lock for this store is held; settlement never takes it. The
 /// receipt's outcome, commit and paths are derived only from this call's own publications and intent.
+/// Half [`git::COMMAND_TIME`] is reserved from the shared maximum for receipt rendering and the
+/// wire reply. All Git work, including post-write verification, stays inside the remaining cutoff.
 pub fn settle(store: &Store, guard: &LockGuard, event: &Event, policy: &dyn Policy) -> GitReceipt {
     settle_by(
         store,
         guard,
         event,
         policy,
-        Instant::now() + git::SETTLEMENT_TIME,
+        Instant::now() + git::SETTLEMENT_TIME - git::COMMAND_TIME / 2,
     )
 }
 

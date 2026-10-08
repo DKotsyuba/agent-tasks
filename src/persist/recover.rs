@@ -80,11 +80,17 @@ pub const MAX_INTENTS: usize = 16;
 /// Most paths one preservation may name.
 pub const MAX_PATHS: usize = 32;
 
-/// Run one recovery action under the caller's root lock.
+/// Run the explicit `action` for `store` under its caller-owned root `guard`, without business replay.
+///
+/// `expected_version` is the exact pending observation; stale state refuses before effects. The
+/// report carries the resulting pending version and receipt. Half the command budget is reserved
+/// from the shared settlement maximum for receipt rendering and the wire reply; verification and
+/// output draining stay inside the remaining deadline. Unconfirmed commits remain recoverable.
 ///
 /// # Errors
 /// `not_locked`, `stale` (the pending snapshot changed), `invalid_data` (limits or unknown names),
-/// `recovery_blocked` and `preserve_blocked` (nothing was committed; the message names pending facts).
+/// `recovery_blocked` and `preserve_blocked` for refusal or unknown commit proof. An unknown attempt
+/// may have landed; reconcile it before retrying. Messages retain pending facts.
 pub fn recover(
     store: &Store,
     guard: &LockGuard,
@@ -96,7 +102,7 @@ pub fn recover(
         guard,
         expected_version,
         action,
-        Instant::now() + super::git::SETTLEMENT_TIME,
+        Instant::now() + super::git::SETTLEMENT_TIME - super::git::COMMAND_TIME / 2,
     )
 }
 
@@ -250,7 +256,11 @@ fn adopt(store: &Store, ids: &[String], lines: &mut Vec<String>) -> Result<()> {
 /// Commit the named intents as one composition through the engine rules.
 ///
 /// The whole connected chain must be named: a recovery that would split paths shared with an unnamed
-/// intent is refused, naming the rest. If only part of the named set can land, the report says so.
+/// intent is refused, naming the rest. `ids` identifies previously validated open intents in the
+/// locked `store`; `deadline` bounds Git, and `receipt` plus `lines` receive only this recovery's facts.
+/// Superseded entries are skipped and reported, never restored or certified as completed. If every
+/// named entry is superseded, refuse without changing Git or the journal and name the first path.
+/// Partial selection is reported; unknown outcomes require reconciliation before another attempt.
 fn retry(
     store: &Store,
     ids: &[String],
@@ -267,6 +277,38 @@ fn retry(
                 "Intents sharing files with the named ones must be named too: {}. A split chain is never committed.",
                 named.join(", ")
             ),
+        ));
+    }
+    let (journal, _) = journal::load(store).map_err(|_| {
+        Error::new(
+            "recovery_blocked",
+            "The pending journal is unavailable; nothing was committed.",
+        )
+    })?;
+    let entries: Vec<_> = journal
+        .intents
+        .iter()
+        .filter(|i| ids.contains(&i.id) && i.committed.is_none())
+        .flat_map(|i| &i.entries)
+        .collect();
+    let skipped: Vec<_> = entries
+        .iter()
+        .filter(|e| e.superseded_by.is_some())
+        .collect();
+    if !skipped.is_empty() {
+        if skipped.len() == entries.len() {
+            return Err(Error::new(
+                "recovery_blocked",
+                format!(
+                    "Skipped all {} superseded path(s); first: {}. Nothing was committed; held work stays pending. Use release to stop tracking it.",
+                    skipped.len(),
+                    skipped[0].path
+                ),
+            ));
+        }
+        lines.push(format!(
+            "Skipped {} superseded path(s); kept their committed successors.",
+            skipped.len()
         ));
     }
     let event = Event {
@@ -454,7 +496,8 @@ fn preserve_core(
 ///
 /// Allowed for unattested and untracked files because the caller is the explicit authorization; the
 /// commit trailers mark the intent adopted and carry the request's operation identity. Never uses the
-/// policy and never defers: the caller needs the proof.
+/// policy and never defers: the caller needs the proof. Like [`recover`], its Git cutoff reserves
+/// half the shared command budget for the caller's receipt and wire reply.
 ///
 /// # Errors
 /// `not_locked`, `stale` (a file's bytes changed or vanished), `invalid_data` (limits) and
@@ -474,7 +517,7 @@ pub fn preserve(
         store,
         request.paths,
         request.operation,
-        Instant::now() + super::git::SETTLEMENT_TIME,
+        Instant::now() + super::git::SETTLEMENT_TIME - super::git::COMMAND_TIME / 2,
         &mut GitReceipt::saved_only(),
     )
 }
