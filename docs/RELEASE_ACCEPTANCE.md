@@ -35,7 +35,18 @@ Each suite ran separately through the Rust SDK stdio client on the frozen debug 
 
 C7b reconstructs revision 1 after revision 2 on the shipped binary: the history of all revisions, of revision 1 alone and of revision 2 alone, the revision 1 review labeled historical, and the staged candidate (BOM, CRLF, fenced heading, non-BMP text, over 20000 bytes) byte for byte over every 8192-byte page for both revisions. It also checks the refusals of `registered-tool-surface` r5 section 15.2 by field, continuation going stale after a record change, no change of a retained byte by an edit or delete of the live document, `invalid_data` for a flipped, truncated or removed staged file with no repair, and a byte identical tree across every read. The Markdown family gained D12 (relocation reference attention) in the same assembly; its pre-fix control failed on the parent of the fix commit and passed after it.
 
-Retained-read implementation mutants for the C7b case are recorded below once run on the signed source; none is claimed before that.
+Retained-read implementation mutants of the unchanged C7b case, run by an independent helper on assembly 00ed3a7 (evidence directory `/private/tmp/e001-retained-mutations-20261008`, `REPORT.md` and `manifest.tsv` with the sha256 of every binary, patch and the fixed test `b5352d57f923bd652c13e48b5699fe0c4d67f5835453525cfc4c8760c5804d3b`). The baseline and all six restored builds passed C7b; every mutant compiled, failed C7b with exit 101 on the named assertion, and no assertion or setup changed.
+
+| Mutant (production location at 00ed3a7) | Failing C7b assertion |
+|---|---|
+| retained action reason omitted from history (`src/tools/records.rs:1222`) | full history lacks the revision 1 reason |
+| history revision selector ignored (`records.rs:1051`) | revision 1 alone shows a revision 2 fact |
+| live document bytes substituted for a retained Replace candidate (`src/compaction/read.rs:251`) | replacement bytes differ from the stored staged candidate |
+| staged digest check skipped, size checks kept (`read.rs:201`) | a flipped equal-length staged file is read instead of refused |
+| `start` included in the candidate snapshot (`records.rs:1444`) | an unchanged continuation reports stale |
+| `limit` accepted for proposal content (`records.rs:111`) | `limit=5` is accepted instead of refused |
+
+`src/compaction/read.rs` is byte identical at the later assembly 166a9a3 and the three `records.rs` patches still apply there with a 28 line offset; the quoting of stored prose (6c08c65) rewrote the shared `fact` helper after the mutants ran, so the two history mutants (reason, revision selector) have not been re-run on 166a9a3 and are not claimed there.
 
 ## Epic E-001 implementation-mutation controls observed (source-only, 2026-10-08)
 
