@@ -265,15 +265,20 @@ impl Drop for LockGuard {
 }
 
 /// Root identity held through a request; tools never accept arbitrary relative paths.
+/// Ordinary Stores read fresh; read views share one immutable work scan and cannot acquire write locks.
 #[derive(Clone)]
 pub struct Store {
     /// Canonical existing root or canonical parent plus one absent final directory name.
     pub root: PathBuf,
     /// Request-local ledger and lock token shared by clones of this Store.
     pub(crate) state: std::sync::Arc<RequestState>,
+    /// Lazy immutable work scope, present only for one read call and its read-only clones.
+    /// Incomplete scans retain fresh fallback reads; write handlers never carry this scope.
+    read_scope: Option<std::sync::Arc<std::sync::OnceLock<Result<Scan>>>>,
 }
 
 /// Exact observed record and its whole-file version; no stale field-level patches.
+#[derive(Clone)]
 pub struct Snapshot<T> {
     /// Parsed validated content.
     pub value: T,
@@ -294,6 +299,7 @@ pub struct Inventory {
 }
 
 /// Aggregate read retaining healthy files and named unreadable rows.
+#[derive(Clone)]
 pub struct Scan {
     /// Healthy parsed modules in numeric order.
     pub modules: Vec<Snapshot<Module>>,
@@ -593,8 +599,16 @@ fn read_tree(bytes: &[u8]) -> Result<serde_yaml_ng::Value> {
     Ok(value)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// Decode attempts on this test thread, including failures; isolates bounded-read assertions.
+    pub(crate) static DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Decode the closed YAML subset, rejecting duplicates before typed deserialization.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    #[cfg(test)]
+    DECODE_COUNT.with(|count| count.set(count.get() + 1));
     serde_yaml_ng::from_value(read_tree(bytes)?)
         .map_err(|_| invalid("Invalid fields, types or missing required schema data."))
 }
@@ -619,6 +633,7 @@ pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 
 impl Store {
     /// Resolve an absolute existing root or one missing final child without creating it.
+    /// The returned Store has no semantic read snapshot; all write validations read fresh facts.
     pub fn from_root(root: &Path) -> Result<Self> {
         if !root.is_absolute() {
             return Err(Error::new(
@@ -629,6 +644,7 @@ impl Store {
         Ok(Self {
             root: prospective(root)?,
             state: Default::default(),
+            read_scope: None,
         })
     }
 
@@ -708,8 +724,20 @@ impl Store {
     }
 
     /// Read one module, not an aggregate; corrupt siblings cannot hide healthy context.
+    /// Complete read views reuse validated records and exact snapshot-bound dependency versions.
+    /// Incomplete views and ordinary writable Stores retain fresh selected reads and original errors.
     pub fn module(&self, id: &str) -> Result<Snapshot<Module>> {
         let relative = model::work_path(id).map_err(invalid)?;
+        if let Some(scan) = self.read_scan().ok().flatten().filter(|s| s.complete) {
+            let mut snapshot = scan
+                .modules
+                .iter()
+                .find(|m| m.value.id == id)
+                .cloned()
+                .ok_or_else(|| Error::new("not_found", "Module does not exist."))?;
+            snapshot.version = self.work_version(&snapshot.value, &snapshot.bytes)?;
+            return Ok(snapshot);
+        }
         let mut snapshot = self
             .snapshot(&relative, Module::validate)?
             .ok_or_else(|| Error::new("not_found", "Module does not exist."))?;
@@ -723,6 +751,8 @@ impl Store {
     /// Bind Epic/Atomic writes and read snapshots to direct and transitive integration observations.
     /// Missing/malformed dependencies remain digest inputs, while unknown work blocks acceptance.
     /// Reads are bounded by the shared aggregate byte cap; no file is migrated or repaired.
+    /// Complete read views use captured bytes/hashes with the identical ordering and visited guard;
+    /// writable Stores always reread dependencies, so native drift still refuses a later write.
     pub fn work_version(&self, value: &Module, bytes: &[u8]) -> Result<String> {
         let own = self.version(&model::work_path(&value.id).map_err(invalid)?, Some(bytes));
         if value.modules.is_empty()
@@ -763,7 +793,7 @@ impl Store {
     }
 
     /// Add a canonical dependency and standalone Atomic participants to a bounded digest.
-    /// Kind restrictions prevent cycles: Epic -> Module/Atomic and Atomic -> Module only.
+    /// The visited set terminates reciprocal contract/dependency cycles; each ID consumes budget once.
     fn dependency_digest(
         &self,
         id: &str,
@@ -776,6 +806,21 @@ impl Store {
         }
         let relative = model::work_path(id).map_err(invalid)?;
         digest.update(id.as_bytes());
+        if let Some(scan) = self.read_scan().ok().flatten().filter(|s| s.complete) {
+            if let Some(snapshot) = scan.modules.iter().find(|m| m.value.id == id) {
+                if snapshot.bytes.len() > RECORD_CAP.min(*remaining) {
+                    digest.update(b"capacity");
+                    digest.update(b"Record exceeds its read cap.");
+                } else {
+                    digest.update(snapshot.version.as_bytes());
+                    *remaining = remaining.saturating_sub(snapshot.bytes.len());
+                    self.related_digest(&snapshot.value, digest, remaining, visited)?;
+                }
+            } else {
+                digest.update(self.version(&relative, None).as_bytes());
+            }
+            return Ok(());
+        }
         let path = match self.path(&relative) {
             Ok(path) => path,
             Err(e) => {
@@ -794,30 +839,7 @@ impl Store {
                             m.validate().map_err(invalid)?;
                             Ok(m)
                         }) {
-                            Ok(m) => {
-                                for related in m
-                                    .participants
-                                    .iter()
-                                    .chain(&m.modules)
-                                    .chain(&m.atomic_members)
-                                {
-                                    self.dependency_digest(related, digest, remaining, visited)?;
-                                }
-                                if let Some(w) = &m.workflow {
-                                    for related in
-                                        w.dependencies.iter().map(|d| &d.reference).chain(
-                                            w.contracts
-                                                .iter()
-                                                .flat_map(|c| c.provides.iter().chain(&c.consumes))
-                                                .map(|c| &c.peer),
-                                        )
-                                    {
-                                        self.dependency_digest(
-                                            related, digest, remaining, visited,
-                                        )?;
-                                    }
-                                }
-                            }
+                            Ok(m) => self.related_digest(&m, digest, remaining, visited)?,
                             Err(e) => digest.update(e.code.as_bytes()),
                         }
                     }
@@ -827,6 +849,37 @@ impl Store {
             Err(e) => {
                 digest.update(e.code.as_bytes());
                 digest.update(e.message.as_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    /// Traverse one validated record's members, participants, waits and contract peers in stored order.
+    /// Both fresh write digests and captured read digests share this exact algorithm. The caller
+    /// owns the digest, remaining byte cap and visited-ID set; dependency_digest bounds cycles/errors.
+    fn related_digest(
+        &self,
+        m: &Module,
+        digest: &mut Sha256,
+        remaining: &mut usize,
+        visited: &mut std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        for related in m
+            .participants
+            .iter()
+            .chain(&m.modules)
+            .chain(&m.atomic_members)
+        {
+            self.dependency_digest(related, digest, remaining, visited)?;
+        }
+        if let Some(w) = &m.workflow {
+            for related in w.dependencies.iter().map(|d| &d.reference).chain(
+                w.contracts
+                    .iter()
+                    .flat_map(|c| c.provides.iter().chain(&c.consumes))
+                    .map(|c| &c.peer),
+            ) {
+                self.dependency_digest(related, digest, remaining, visited)?;
             }
         }
         Ok(())
@@ -1465,7 +1518,23 @@ impl Store {
     }
 
     /// Find an authoritative Epic parent; malformed ownership refuses rather than guessing standalone.
+    /// Complete read views use captured membership; incomplete scope retains the fresh Epic-only
+    /// inventory/error policy, so a corrupt unrelated Module cannot hide healthy parent context.
     pub fn parent(&self, id: &str) -> Result<Option<Module>> {
+        if let Some(scan) = self.read_scan().ok().flatten().filter(|s| s.complete) {
+            return Ok(scan
+                .modules
+                .iter()
+                .find(|m| {
+                    m.value.id.starts_with("E-")
+                        && m.value
+                            .modules
+                            .iter()
+                            .chain(&m.value.atomic_members)
+                            .any(|member| member == id)
+                })
+                .map(|m| m.value.clone()));
+        }
         let inventory = self.kind_inventory("epics", "E-")?;
         if !inventory.complete {
             return Err(invalid("Epic ownership inventory is incomplete."));
@@ -1636,10 +1705,45 @@ impl Store {
     }
 
     /// Return healthy records, named omissions and a snapshot over exactly scanned data.
+    /// Complete read views project their captured records with the identical selected-scan digest;
+    /// incomplete views retain the original selected-scan coverage/cap behavior and no repair.
     /// ponytail: bounded O(n) file scan; add an index only after measured scan cost matters.
     pub fn scan(&self, module: Option<&str>) -> Result<Scan> {
-        let inventory = if let Some(id) = module {
+        if let Some(id) = module {
             model::work_number(id).map_err(invalid)?;
+        }
+        if module.is_none()
+            && let Some(scan) = self.read_scan()?
+        {
+            return Ok(scan.clone());
+        }
+        if let Some(scan) = self.read_scan().ok().flatten().filter(|s| s.complete) {
+            let Some(id) = module else {
+                return Ok(scan.clone());
+            };
+            let mut selected = Scan {
+                modules: Vec::new(),
+                unreadable: Vec::new(),
+                warnings: Vec::new(),
+                complete: true,
+                version: String::new(),
+            };
+            let mut digest = Sha256::new();
+            digest.update(self.root.as_os_str().as_encoded_bytes());
+            digest.update(id.as_bytes());
+            if let Some(snapshot) = scan.modules.iter().find(|m| m.value.id == id) {
+                digest.update(snapshot.version.as_bytes());
+                selected.modules.push(snapshot.clone());
+            } else {
+                selected.complete = false;
+                selected.unreadable.push(format!("{id}: missing record."));
+                digest.update(b"missing");
+                digest.update(selected.unreadable[0].as_bytes());
+            }
+            selected.version = format!("{:x}", digest.finalize());
+            return Ok(selected);
+        }
+        let inventory = if let Some(id) = module {
             Inventory {
                 ids: vec![id.into()],
                 warnings: Vec::new(),
@@ -1764,7 +1868,14 @@ impl Store {
     }
 
     /// Explicit init prepares only the final root and owned directories; all effects are disclosed.
+    /// Read views refuse with read_only before creating anything or recording effects.
     pub fn prepare(&self, effects: &mut Vec<String>) -> Result<()> {
+        if self.read_scope.is_some() {
+            return Err(Error::new(
+                "read_only",
+                "A read snapshot cannot prepare storage.",
+            ));
+        }
         if !self.root.exists() {
             fs::create_dir(&self.root)
                 .map_err(|_| Error::new("io", "Cannot create the configured final root."))?;
@@ -1794,12 +1905,19 @@ impl Store {
 
     /// Lock one validated relative coordination file; readers never create it.
     /// Writers create mode-0600 only in an existing parent; contention refuses immediately.
+    /// Read views refuse write locks before opening/creating a coordination file.
     pub fn file_lock(
         &self,
         relative: &str,
         write: bool,
         effects: &mut Vec<String>,
     ) -> Result<Option<LockGuard>> {
+        if write && self.read_scope.is_some() {
+            return Err(Error::new(
+                "read_only",
+                "A read snapshot cannot acquire a write lock.",
+            ));
+        }
         let path = self.path(relative)?;
         let file = if write {
             if !path.parent().is_some_and(Path::is_dir) {
@@ -1851,6 +1969,7 @@ impl Store {
     ///
     /// The canonical bytes must pass the exact read gate and decode back to `T` before anything is
     /// created, backed up or replaced; otherwise `encoding_unreadable` is returned with no effect.
+    /// Read views refuse with read_only before encoding, backup creation or publication.
     pub fn save<T: Serialize + DeserializeOwned>(
         &self,
         relative: &str,
@@ -1859,6 +1978,12 @@ impl Store {
         terminal: bool,
         effects: &mut Vec<String>,
     ) -> Result<String> {
+        if self.read_scope.is_some() {
+            return Err(Error::new(
+                "read_only",
+                "A read snapshot cannot save records.",
+            ));
+        }
         let bytes = encode(value)?;
         decode::<T>(&bytes).map_err(|_| {
             Error::new(
@@ -2071,10 +2196,52 @@ pub struct ContractFacts {
     pub gaps: Vec<String>,
 }
 impl Store {
+    /// Pin a lazy validated work scan for one read call under its existing root read guard.
+    /// Clones remain read-only even after that guard drops; write locks and legacy writes refuse.
+    /// A separate lock/publication state prevents a writable sibling's guard from authorizing this view.
+    /// Complete scans serve work, ownership and identical byte-version digests without decoding again.
+    /// Incomplete/failed scans keep original fresh work reads, preserving healthy selected context,
+    /// filename validation and unknown/cap coverage; canonical contract checks still refuse unknown scope.
+    pub(crate) fn for_work_read(mut self) -> Self {
+        self.read_scope = Some(Default::default());
+        self.state = Default::default();
+        self
+    }
+
+    /// Return this read view's immutable work scan, lazily capturing through an uncached Store.
+    /// Ordinary writable Stores return None. The root guard remains the caller's responsibility;
+    /// inventory/read errors are retained once, without source diagnostics or any filesystem writes.
+    fn read_scan(&self) -> Result<Option<&Scan>> {
+        self.read_scope
+            .as_ref()
+            .map(|scope| {
+                scope
+                    .get_or_init(|| {
+                        let fresh = Self {
+                            root: self.root.clone(),
+                            state: Default::default(),
+                            read_scope: None,
+                        };
+                        fresh.scan(None)
+                    })
+                    .as_ref()
+                    .map_err(|e| Error::new(e.code, e.message.clone()))
+            })
+            .transpose()
+    }
+
     /// Resolve one canonical boundary without inferring a wait or treating ready=true as agreement.
+    /// Locked read views reuse their immutable validated scope; writes scan fresh on each lookup.
+    /// Invalid IDs, incomplete scope or absent/ambiguous providers refuse with a safe domain error.
     pub fn contract_facts(&self, id: &str) -> Result<ContractFacts> {
         model::text(id, 64).map_err(invalid)?;
-        let scan = self.scan(None)?;
+        let fresh;
+        let scan = if let Some(scan) = self.read_scan()? {
+            scan
+        } else {
+            fresh = self.scan(None)?;
+            &fresh
+        };
         if !scan.complete {
             return Err(invalid(
                 "Contract scope has unreadable/incomplete Module facts.",
@@ -2175,6 +2342,8 @@ impl Store {
             .collect()
     }
     /// Check all exact affected-party confirmations; old lead history remains an agreed Module fact.
+    /// Locked read views use validated parties from the same contract scan without write versions.
+    /// Ordinary/write Stores retain fresh party reads; missing or unreadable facts produce named gaps.
     pub fn agreement_gaps(&self, m: &Module) -> Vec<String> {
         let mut gaps = Vec::new();
         if m.core().is_some()
@@ -2205,15 +2374,32 @@ impl Store {
                 Ok(f) => {
                     gaps.extend(f.gaps);
                     for party in &f.parties {
-                        match self.module(party) {
-                            Ok(p) => {
-                                let agreed = p.value.core().is_some_and(|c| {
-                                    c.agreements.iter().rev().any(|a| {
-                                        a.contract_id == id
-                                            && a.revision == f.revision
-                                            && a.snapshot == f.snapshot
+                        let matches = |p: &Module| {
+                            p.core().is_some_and(|c| {
+                                c.agreements.iter().rev().any(|a| {
+                                    a.contract_id == id
+                                        && a.revision == f.revision
+                                        && a.snapshot == f.snapshot
+                                })
+                            })
+                        };
+                        let agreed = if self.read_scope.is_some() {
+                            self.read_scan().and_then(|scan| {
+                                let scan =
+                                    scan.ok_or_else(|| invalid("Read scope is unavailable."))?;
+                                scan.modules
+                                    .iter()
+                                    .find(|p| p.value.id == *party)
+                                    .map(|p| matches(&p.value))
+                                    .ok_or_else(|| {
+                                        Error::new("not_found", "Module does not exist.")
                                     })
-                                });
+                            })
+                        } else {
+                            self.module(party).map(|p| matches(&p.value))
+                        };
+                        match agreed {
+                            Ok(agreed) => {
                                 if !agreed {
                                     gaps.push(format!("{party}: actual lead agreement missing for {id} revision {}.",f.revision));
                                 }

@@ -147,9 +147,12 @@ fn diagnostics(value: &mut Page, snapshot: &Snapshot<Module>) {
 
 /// Read a requested Project/Epic/Module/child view with snapshot-bound bounded pagination.
 /// Integration is Project/Epic-only; absent core preserves legacy facts and unknown prerequisites remain named.
+/// Complete work/ownership/version reads share one immutable scan under this call's read lock.
+/// Incomplete work retains named coverage and fresh fallbacks; later calls and all writes read fresh.
 pub fn context(config: &Config, args: ContextArgs, templates: &Templates) -> Result<String> {
     let store = config.resolve(&args.project)?;
     let _lock = store.lock(false, &mut Vec::new())?;
+    let store = store.for_work_read();
     let kind = args
         .reference
         .as_deref()
@@ -2164,9 +2167,12 @@ pub(super) fn verdict(value: Verdict) -> &'static str {
 }
 
 /// Return one owner-ready status: current tracked work and declared actors, no runtime polling.
+/// Complete work/ownership/version reads share one immutable scan under this call's read lock.
+/// Incomplete work retains named coverage and fresh fallbacks; later calls and all writes read fresh.
 pub fn status(config: &Config, args: StatusArgs, templates: &Templates) -> Result<String> {
     let store = config.resolve(&args.project)?;
     let _lock = store.lock(false, &mut Vec::new())?;
+    let store = store.for_work_read();
     let project = store.project()?.ok_or_else(|| {
         Error::new(
             "not_initialized",
@@ -2489,6 +2495,8 @@ fn evidence_fields(
 }
 
 /// Bounded Unicode lowercase all-term search; exact scope snapshot protects continuation.
+/// Complete work/ownership/version reads share one immutable scan under this call's read lock.
+/// Incomplete work retains named coverage and fresh fallbacks; later calls and all writes read fresh.
 pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Result<String> {
     text(&args.query, 256).map_err(store::invalid)?;
     let terms: Vec<_> = args
@@ -2504,6 +2512,7 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
     }
     let store = config.resolve(&args.project)?;
     let _lock = store.lock(false, &mut Vec::new())?;
+    let store = store.for_work_read();
     let project = store.project()?.ok_or_else(|| {
         Error::new(
             "not_initialized",
