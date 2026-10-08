@@ -523,6 +523,265 @@ fn a_rejecting_hook_defers_and_a_later_success_recovers() {
     );
 }
 
+/// Path of the journal file inside the fixture repository.
+fn journal_file(f: &GitFixture) -> std::path::PathBuf {
+    f.dir.path().join(".git/agent-tasks/pending.yaml")
+}
+
+/// Install a pre-commit hook that replaces the journal with `replacement` and then exits with `code`,
+/// modelling a native change to the journal while a commit attempt runs.
+#[cfg(unix)]
+fn swap_journal_hook(f: &GitFixture, replacement: &journal::Journal, code: i32) {
+    std::fs::write(
+        f.dir.path().join(".git/replacement-journal.yaml"),
+        crate::store::encode(replacement).unwrap(),
+    )
+    .unwrap();
+    hook(
+        f,
+        "pre-commit",
+        &format!("cp .git/replacement-journal.yaml .git/agent-tasks/pending.yaml\nexit {code}"),
+    );
+}
+
+/// Three calls on a repository whose hook rejects commits: `A` is published and pending, `B` is a
+/// partial (held, never selected) call and `C` has just published. Returns `C`'s store and lock, the
+/// identities in journal order `[A, B, C]` and leaves the rejecting hook installed.
+#[cfg(unix)]
+fn pending_a_held_b_and_open_c(f: &GitFixture) -> (Store, LockGuard, [String; 3]) {
+    hook(f, "pre-commit", "exit 1");
+    let (a, guard) = call(f);
+    create(&a, "modules/M-001.yaml", b"a");
+    commit_now(&a, &guard);
+    drop(guard);
+    let (b, guard) = call(f);
+    create(&b, "modules/M-002.yaml", b"b");
+    settle(&b, &guard, &partial(), production_policy());
+    drop(guard);
+    let (c, guard) = call(f);
+    create(&c, "modules/M-003.yaml", b"c");
+    let ids: Vec<String> = journal::load(&c)
+        .unwrap()
+        .0
+        .intents
+        .iter()
+        .map(|i| i.id.clone())
+        .collect();
+    (c, guard, ids.try_into().unwrap())
+}
+
+/// The journal exactly as the engine saves it just before the commit attempt of `commit_now(c)`: the
+/// open call is stamped as the successful work event and the selected rows (`selected`) carry the
+/// attempt's parent. A native writer that only reorders or drops rows produces rows equal to these.
+#[cfg(unix)]
+fn saved_image(f: &GitFixture, c: &Store, open_call: &str, selected: &[&str]) -> journal::Journal {
+    let parent = f.git(&["rev-parse", "HEAD"]);
+    let mut image = journal::load(c).unwrap().0;
+    for intent in &mut image.intents {
+        if intent.id == open_call {
+            intent.class = Some(EventClass::Work.name().to_owned());
+            intent.refs = success().refs;
+            intent.outcome = IntentOutcome::Success;
+        }
+        if selected.contains(&intent.id.as_str()) {
+            intent.committing_from = Some(parent.clone());
+        }
+    }
+    image
+}
+
+/// A journal that disappears while a rejected attempt runs never panics settlement: the saved bytes
+/// stay, the receipt stays deferred, the call's files are reported untracked instead of pending, and
+/// the native deletion is not undone by recreating a journal.
+#[cfg(unix)]
+#[test]
+fn a_journal_removed_during_a_rejected_attempt_keeps_the_saved_bytes() {
+    let f = GitFixture::new();
+    hook(
+        &f,
+        "pre-commit",
+        "rm -f .git/agent-tasks/pending.yaml\nexit 1",
+    );
+    let (first, guard) = call(&f);
+    create(&first, "modules/M-001.yaml", b"one");
+    let before = commits(&f);
+    let receipt = commit_now(&first, &guard);
+    assert_eq!(
+        (receipt.outcome, receipt.reason),
+        (GitOutcome::Deferred, Some(Reason::CommitNotCompleted)),
+        "{receipt:?}"
+    );
+    assert_eq!(receipt.untracked, ["modules/M-001.yaml"], "{receipt:?}");
+    assert!(receipt.attention.contains(&Attention::UntrackedMutation));
+    assert!(
+        receipt.pending.is_empty(),
+        "no intent is retained: {receipt:?}"
+    );
+    assert_eq!(commits(&f), before, "a rejected attempt commits nothing");
+    assert_eq!(
+        std::fs::read(f.dir.path().join("modules/M-001.yaml")).unwrap(),
+        b"one"
+    );
+    assert!(
+        !journal_file(&f).exists(),
+        "the native deletion is not undone"
+    );
+}
+
+/// A journal that disappears while an accepted attempt runs still reports the verified commit, flags
+/// the lost tracking and does not recreate the journal.
+#[cfg(unix)]
+#[test]
+fn a_journal_removed_during_a_landed_attempt_reports_the_commit() {
+    let f = GitFixture::new();
+    hook(&f, "pre-commit", "rm -f .git/agent-tasks/pending.yaml");
+    let (first, guard) = call(&f);
+    create(&first, "modules/M-001.yaml", b"one");
+    let before = commits(&f);
+    let receipt = commit_now(&first, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert_eq!(
+        receipt.commit.as_deref(),
+        Some(f.git(&["rev-parse", "HEAD"]).as_str())
+    );
+    assert!(
+        receipt.attention.contains(&Attention::UntrackedMutation),
+        "{receipt:?}"
+    );
+    assert!(receipt.pending.is_empty(), "{receipt:?}");
+    assert_eq!(commits(&f), before + 1);
+    assert_eq!(f.git(&["show", "HEAD:modules/M-001.yaml"]), "one");
+    assert!(
+        !journal_file(&f).exists(),
+        "the native deletion is not undone"
+    );
+}
+
+/// A journal reordered during an accepted attempt is updated by identity: the held call in the front
+/// row is never marked committed in place of the selected ones.
+#[cfg(unix)]
+#[test]
+fn a_reordered_journal_is_updated_by_identity_never_by_position() {
+    let f = GitFixture::new();
+    let (c, guard, [a_id, b_id, c_id]) = pending_a_held_b_and_open_c(&f);
+    let mut reordered = saved_image(&f, &c, &c_id, &[&a_id, &c_id]);
+    reordered.intents.swap(0, 1);
+    swap_journal_hook(&f, &reordered, 0);
+    let receipt = commit_now(&c, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    let head = f.git(&["rev-parse", "HEAD"]);
+    let after = journal::load(&c).unwrap().0;
+    assert_eq!(
+        after
+            .intents
+            .iter()
+            .map(|i| i.id.clone())
+            .collect::<Vec<_>>(),
+        [b_id.clone(), a_id.clone(), c_id.clone()],
+        "the native order is kept"
+    );
+    for intent in &after.intents {
+        let expected = (intent.id != b_id).then_some(head.clone());
+        assert_eq!(intent.committed, expected, "{}", intent.id);
+    }
+    assert_eq!(
+        f.git(&["ls-tree", "--name-only", "HEAD", "modules/"]),
+        "modules/M-001.yaml\nmodules/M-003.yaml"
+    );
+}
+
+/// A journal that lost selected rows during a rejected attempt keeps exactly the rows it has: the
+/// surviving selected call is cleared by identity, nothing is recreated and the receipt stays truthful.
+#[cfg(unix)]
+#[test]
+fn a_journal_missing_selected_rows_is_not_recreated_after_a_rejected_attempt() {
+    let f = GitFixture::new();
+    let (c, guard, [a_id, _, c_id]) = pending_a_held_b_and_open_c(&f);
+    let mut shrunk = saved_image(&f, &c, &c_id, &[&a_id, &c_id]);
+    shrunk.intents.retain(|i| i.id == c_id);
+    swap_journal_hook(&f, &shrunk, 1);
+    let receipt = commit_now(&c, &guard);
+    assert_eq!(
+        (receipt.outcome, receipt.reason),
+        (GitOutcome::Deferred, Some(Reason::CommitNotCompleted)),
+        "{receipt:?}"
+    );
+    assert!(
+        receipt.untracked.is_empty(),
+        "this call's intent survived: {receipt:?}"
+    );
+    let after = journal::load(&c).unwrap().0;
+    assert_eq!(after.intents.len(), 1, "the lost rows are not recreated");
+    assert_eq!(after.intents[0].id, c_id);
+    assert!(after.intents[0].committing_from.is_none());
+    assert_eq!(
+        receipt
+            .pending
+            .iter()
+            .map(|p| p.intent.clone())
+            .collect::<Vec<_>>(),
+        [c_id]
+    );
+}
+
+/// A native writer that keeps an intent's identity but changes its content during the attempt owns
+/// that row: an accepted commit is still reported with degraded tracking, and the journal bytes are
+/// left exactly as the writer made them.
+#[cfg(unix)]
+#[test]
+fn a_same_identity_row_changed_natively_is_never_overwritten_after_a_landed_attempt() {
+    let f = GitFixture::new();
+    let (c, guard, [_, _, c_id]) = pending_a_held_b_and_open_c(&f);
+    let mut foreign = journal::load(&c).unwrap().0;
+    for intent in foreign.intents.iter_mut().filter(|i| i.id == c_id) {
+        intent.refs = vec!["M-999".into()];
+    }
+    swap_journal_hook(&f, &foreign, 0);
+    let receipt = commit_now(&c, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert_eq!(
+        receipt.commit.as_deref(),
+        Some(f.git(&["rev-parse", "HEAD"]).as_str())
+    );
+    assert!(
+        receipt.attention.contains(&Attention::UntrackedMutation),
+        "{receipt:?}"
+    );
+    assert_eq!(
+        std::fs::read(journal_file(&f)).unwrap(),
+        crate::store::encode(&foreign).unwrap(),
+        "the native rows are not overwritten"
+    );
+}
+
+/// The same native rewrite during a rejected attempt: nothing landed, the journal is untouched and the
+/// call's files are reported untracked rather than certified as retained.
+#[cfg(unix)]
+#[test]
+fn a_same_identity_row_changed_natively_is_never_overwritten_after_a_rejected_attempt() {
+    let f = GitFixture::new();
+    let (c, guard, [_, _, c_id]) = pending_a_held_b_and_open_c(&f);
+    let mut foreign = journal::load(&c).unwrap().0;
+    for intent in foreign.intents.iter_mut().filter(|i| i.id == c_id) {
+        intent.refs = vec!["M-999".into()];
+    }
+    swap_journal_hook(&f, &foreign, 1);
+    let before = commits(&f);
+    let receipt = commit_now(&c, &guard);
+    assert_eq!(
+        (receipt.outcome, receipt.reason),
+        (GitOutcome::Deferred, Some(Reason::CommitNotCompleted)),
+        "{receipt:?}"
+    );
+    assert_eq!(receipt.untracked, ["modules/M-003.yaml"], "{receipt:?}");
+    assert_eq!(commits(&f), before);
+    assert_eq!(
+        std::fs::read(journal_file(&f)).unwrap(),
+        crate::store::encode(&foreign).unwrap(),
+        "the native rows are not overwritten"
+    );
+}
+
 /// A hook that rewrites the worktree is reported, never reset or silently accepted.
 #[cfg(unix)]
 #[test]
@@ -1370,6 +1629,72 @@ fn a_removal_commits_as_a_deletion() {
     assert_eq!(
         f.git(&["show", "--name-status", "--format=", "HEAD"]),
         "D\tdoc.md"
+    );
+}
+
+/// One batched staging keeps every file's exact bytes, literal odd names and the mode HEAD already has,
+/// together with a removal in the same commit, and leaves no private copy behind.
+#[cfg(unix)]
+#[test]
+fn a_batched_commit_keeps_odd_names_head_modes_and_a_removal() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = GitFixture::new();
+    std::fs::write(f.dir.path().join("run.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::write(f.dir.path().join("gone.md"), "gone").unwrap();
+    std::fs::set_permissions(
+        f.dir.path().join("run.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    f.git(&["add", "--", "run.sh", "gone.md"]);
+    f.git(&["commit", "--quiet", "-m", "fixture executable"]);
+    std::fs::create_dir_all(f.dir.path().join("notes")).unwrap();
+    let (store, guard) = call(&f);
+    replace(
+        &store,
+        "run.sh",
+        b"#!/bin/sh\necho changed\n",
+        b"#!/bin/sh\n",
+    );
+    store
+        .remove(
+            crate::store::Remove {
+                relative: "gone.md",
+                observed: b"gone",
+                cap: RECORD_CAP,
+                operation: None,
+                attest: Attest::Optional,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+    let odd = ["notes/a b.md", "notes/[x]*.md", "notes/caf\u{e9} \"q\".md"];
+    for (n, name) in odd.iter().enumerate() {
+        create(&store, name, format!("odd {n}\n").as_bytes());
+    }
+    let receipt = commit_now(&store, &guard);
+    assert_eq!(receipt.outcome, GitOutcome::Committed, "{receipt:?}");
+    assert!(receipt.attention.is_empty(), "{receipt:?}");
+    assert!(
+        f.git(&["ls-tree", "HEAD", "run.sh"])
+            .starts_with("100755 blob")
+    );
+    assert_eq!(f.git(&["show", "HEAD:run.sh"]), "#!/bin/sh\necho changed");
+    assert_eq!(f.git(&["ls-files", "gone.md"]), "");
+    for (n, name) in odd.iter().enumerate() {
+        assert_eq!(
+            f.git(&["show", &format!("HEAD:{name}")]),
+            format!("odd {n}")
+        );
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(f.dir.path().join(".git/agent-tasks"))
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with("blobs.") || n.starts_with("index."))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "private staging copies remain: {leftovers:?}"
     );
 }
 

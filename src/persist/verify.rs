@@ -30,32 +30,89 @@ pub fn tree_entry(
     path: &str,
     deadline: Instant,
 ) -> Result<Option<(String, String)>, ()> {
-    let out = git::run(
-        &store.root,
-        &["ls-tree", "-z", commit, "--", path],
-        None,
-        deadline,
-    )
-    .map_err(|_| ())?;
+    Ok(tree_entries(store, commit, &[path], deadline)?.remove(path))
+}
+
+/// Mode and object id of every listed path that `commit` holds, from one Git process.
+///
+/// A path the commit does not hold is simply absent from the map. `Err` means Git could not answer,
+/// the output was cut, or a named path is not a blob; it is never the same as absent. One process for
+/// the whole set keeps a retry over many pending intents linear instead of one spawn per path.
+pub fn tree_entries<S: AsRef<str>>(
+    store: &Store,
+    commit: &str,
+    paths: &[S],
+    deadline: Instant,
+) -> Result<std::collections::BTreeMap<String, (String, String)>, ()> {
+    let mut found = std::collections::BTreeMap::new();
+    if paths.is_empty() {
+        return Ok(found);
+    }
+    let mut args = vec!["ls-tree", "-z", commit, "--"];
+    args.extend(paths.iter().map(AsRef::as_ref));
+    let out = git::run(&store.root, &args, None, deadline).map_err(|_| ())?;
     if !out.success() || out.truncated {
         return Err(());
     }
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let Some(record) = text.split('\0').find(|r| !r.is_empty()) else {
-        return Ok(None);
-    };
-    let (meta, name) = record.split_once('\t').ok_or(())?;
-    if name != path {
-        return Ok(None);
+    for record in text.split('\0').filter(|r| !r.is_empty()) {
+        let (meta, name) = record.split_once('\t').ok_or(())?;
+        if !paths.iter().any(|p| p.as_ref() == name) {
+            continue;
+        }
+        let mut fields = meta.split(' ');
+        let mode = fields.next().ok_or(())?;
+        let kind = fields.next().ok_or(())?;
+        let oid = fields.next().ok_or(())?;
+        if kind != "blob" {
+            return Err(());
+        }
+        found.insert(name.to_owned(), (mode.to_owned(), oid.to_owned()));
     }
-    let mut fields = meta.split(' ');
-    let mode = fields.next().ok_or(())?;
-    let kind = fields.next().ok_or(())?;
-    let oid = fields.next().ok_or(())?;
-    if kind != "blob" {
-        return Err(());
+    Ok(found)
+}
+
+/// Object ids of the exact `blobs`, stored without any filter, from one Git process.
+///
+/// The bytes are copied to private files inside the Git directory first, so the stored objects are the
+/// caller's verified bytes and never a later native edit of the working file. The returned ids are in
+/// input order. `Err` means nothing can be trusted; the private files are always removed.
+pub fn raw_blob_ids(store: &Store, blobs: &[&[u8]], deadline: Instant) -> Result<Vec<String>, ()> {
+    if blobs.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(Some((mode.to_owned(), oid.to_owned())))
+    // Git runs inside the root, so the private files are named relative to it and no root name can
+    // break the newline-separated list.
+    let relative = format!(
+        ".git/agent-tasks/blobs.{}-{}",
+        std::process::id(),
+        journal::new_intent_id(store)
+    );
+    let dir = store.root.join(&relative);
+    let result = (|| {
+        std::fs::create_dir_all(&dir).map_err(|_| ())?;
+        let mut list = String::new();
+        for (n, bytes) in blobs.iter().enumerate() {
+            std::fs::write(dir.join(n.to_string()), bytes).map_err(|_| ())?;
+            list.push_str(&format!("{relative}/{n}\n"));
+        }
+        let out = git::run(
+            &store.root,
+            &["hash-object", "-w", "--no-filters", "--stdin-paths"],
+            Some(list.as_bytes()),
+            deadline,
+        )
+        .map_err(|_| ())?;
+        let ids: Vec<String> = out.text().lines().map(str::to_owned).collect();
+        (out.success()
+            && !out.truncated
+            && ids.len() == blobs.len()
+            && ids.iter().all(|id| !id.is_empty()))
+        .then_some(ids)
+        .ok_or(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 /// Whether the committed bytes of `path` have SHA-256 `digest` (`None` means the path must be absent).

@@ -485,10 +485,16 @@ struct Staged {
     oid: Option<String>,
 }
 
+/// Most verified bytes held in memory and copied to private files for one batched blob write.
+const STAGE_BATCH_BYTES: usize = 16 * 1024 * 1024;
+
 /// Store the exact recorded bytes of every path as raw blobs and describe the index entries to write.
 ///
 /// Each file is read, compared with the recorded digest and hashed from the same bytes, so a late
-/// native edit or a clean filter can never change what is committed. `Err` means nothing can be staged.
+/// native edit or a clean filter can never change what is committed. Blobs are written and modes read
+/// in a constant number of Git processes (blobs in batches bounded by [`STAGE_BATCH_BYTES`]), so a
+/// retry over many pending intents stays linear in the bytes. Output order follows `paths`. `Err`
+/// means nothing can be staged.
 fn stage_exact(
     store: &Store,
     parent: &str,
@@ -496,33 +502,56 @@ fn stage_exact(
     expected: &BTreeMap<String, Option<String>>,
     deadline: Instant,
 ) -> Result<Vec<Staged>, ()> {
-    let mut staged = Vec::new();
-    for path in paths {
+    let mut oids: Vec<Option<String>> = vec![None; paths.len()];
+    let mut batch: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut size = 0usize;
+    let flush = |batch: &mut Vec<(usize, Vec<u8>)>, oids: &mut Vec<Option<String>>| {
+        let blobs: Vec<&[u8]> = batch.iter().map(|(_, b)| b.as_slice()).collect();
+        let ids = super::verify::raw_blob_ids(store, &blobs, deadline)?;
+        for ((at, _), id) in batch.iter().zip(ids) {
+            oids[*at] = Some(id);
+        }
+        batch.clear();
+        Ok::<(), ()>(())
+    };
+    for (at, path) in paths.iter().enumerate() {
         let want = expected.get(path).ok_or(())?;
         let found = store.read_exact(path, ABSOLUTE_CAP).map_err(|_| ())?;
         match (want, found) {
-            (None, None) => staged.push(Staged {
-                path: path.clone(),
-                mode: "0".into(),
-                oid: None,
-            }),
+            (None, None) => (),
             (Some(digest), Some(file)) if journal::sha256_hex(&file.bytes) == *digest => {
-                let mode = match super::verify::tree_entry(store, parent, path, deadline)? {
-                    Some((mode, _)) => mode,
-                    None => "100644".to_owned(),
-                };
-                let oid =
-                    super::verify::raw_blob_id(store, &file.bytes, true, deadline).ok_or(())?;
-                staged.push(Staged {
-                    path: path.clone(),
-                    mode,
-                    oid: Some(oid),
-                });
+                size += file.bytes.len();
+                batch.push((at, file.bytes));
+                if size >= STAGE_BATCH_BYTES {
+                    flush(&mut batch, &mut oids)?;
+                    size = 0;
+                }
             }
             _ => return Err(()),
         }
     }
-    Ok(staged)
+    flush(&mut batch, &mut oids)?;
+    let names: Vec<&str> = paths
+        .iter()
+        .zip(&oids)
+        .filter(|(_, oid)| oid.is_some())
+        .map(|(path, _)| path.as_str())
+        .collect();
+    let modes = super::verify::tree_entries(store, parent, &names, deadline)?;
+    Ok(paths
+        .iter()
+        .zip(oids)
+        .map(|(path, oid)| Staged {
+            mode: match &oid {
+                None => "0".into(),
+                Some(_) => modes
+                    .get(path)
+                    .map_or_else(|| "100644".to_owned(), |(mode, _)| mode.clone()),
+            },
+            path: path.clone(),
+            oid,
+        })
+        .collect())
 }
 
 /// `update-index --index-info -z` input for the staged paths.
@@ -716,9 +745,11 @@ pub fn commit_paths(
     if !changed.as_ref().is_some_and(|c| c.is_subset(&wanted)) {
         proven = false;
     }
+    let names: Vec<&str> = staged.iter().map(|s| s.path.as_str()).collect();
+    let committed = super::verify::tree_entries(store, &new, &names, deadline);
     for s in &staged {
-        match super::verify::tree_entry(store, &new, &s.path, deadline) {
-            Ok(entry) if entry.as_ref().map(|(_, oid)| oid) == s.oid.as_ref() => (),
+        match &committed {
+            Ok(entries) if entries.get(&s.path).map(|(_, oid)| oid) == s.oid.as_ref() => {}
             _ => proven = false,
         }
         if file_sha(store, &s.path).ok().as_ref() != expected.get(&s.path) {
@@ -1128,6 +1159,15 @@ fn apply_barrier(
 }
 
 /// Select, commit and verify, then fill the call-scoped part of `receipt`.
+///
+/// `current` is the intent of the calling request (empty for a recovery that names intents through
+/// `forced`). The journal is saved with the attempt's `committing_from` marker before Git runs and is
+/// reloaded afterwards, because a hook or a native writer may have changed it meanwhile. Only rows found
+/// by identity that still equal the saved image are updated; reordered rows are therefore harmless,
+/// while missing or rewritten rows are left exactly as found and never recreated. A verified landed
+/// commit is always reported as such, with [`Attention::UntrackedMutation`] when this call's own row is
+/// no longer ours; a rejected attempt in that state reports this call's paths untracked instead of
+/// pending. Nothing here lets lost journal tracking change a Git outcome or replay business work.
 pub fn run_engine(
     store: &Store,
     current: &str,
@@ -1307,11 +1347,31 @@ pub fn run_engine(
         receipt.outcome = GitOutcome::Unknown;
         return;
     };
+    // The reloaded journal may no longer be the one that was saved before the attempt: a hook or a
+    // native edit can remove, replace, reorder, shrink or rewrite rows. A row is ours to update only
+    // when it is found by identity AND still equals the image saved just before the attempt; anything
+    // else belongs to the native writer and is left exactly as found, never indexed by an old position,
+    // recreated or overwritten. A journal with no such row is not written at all.
+    let chosen_ids: BTreeSet<&String> = chosen.iter().map(|n| &journal.intents[*n].id).collect();
+    let saved: BTreeMap<&str, &Intent> =
+        journal.intents.iter().map(|i| (i.id.as_str(), i)).collect();
+    let intact: BTreeSet<String> = after
+        .intents
+        .iter()
+        .filter(|i| saved.get(i.id.as_str()) == Some(i))
+        .map(|i| i.id.clone())
+        .collect();
+    let retained = chosen_ids.iter().filter(|id| intact.contains(**id)).count();
+    let current_lost = !current.is_empty() && !intact.contains(current);
     match attempt {
         Attempt::Landed(commit, attention) => {
-            for n in &chosen {
-                after.intents[*n].committed = Some(commit.clone());
-                after.intents[*n].committing_from = None;
+            for intent in after
+                .intents
+                .iter_mut()
+                .filter(|i| chosen_ids.contains(&i.id) && intact.contains(&i.id))
+            {
+                intent.committed = Some(commit.clone());
+                intent.committing_from = None;
             }
             // Each committed path now holds the last chosen image; older open writes to it are superseded.
             let mut winners: BTreeMap<&str, (String, String)> = BTreeMap::new();
@@ -1330,7 +1390,11 @@ pub fn run_engine(
                     );
                 }
             }
-            for intent in after.intents.iter_mut().filter(|i| i.committed.is_none()) {
+            for intent in after
+                .intents
+                .iter_mut()
+                .filter(|i| i.committed.is_none() && intact.contains(&i.id))
+            {
                 for entry in &mut intent.entries {
                     if entry.superseded_by.is_none()
                         && let Some((id, digest)) = winners.get(entry.path.as_str())
@@ -1339,9 +1403,12 @@ pub fn run_engine(
                     }
                 }
             }
-            let _ = journal::save(store, &after, observed.as_deref());
-            let chosen_ids: BTreeSet<&String> =
-                chosen.iter().map(|n| &journal.intents[*n].id).collect();
+            if retained > 0 {
+                let _ = journal::save(store, &after, observed.as_deref());
+            }
+            if current_lost && !receipt.attention.contains(&Attention::UntrackedMutation) {
+                receipt.attention.push(Attention::UntrackedMutation);
+            }
             let all_named = recovering && forced.iter().all(|id| chosen_ids.contains(id));
             let mine =
                 all_named || (!recovering && this_index.is_some_and(|n| chosen.contains(&n)));
@@ -1388,17 +1455,39 @@ pub fn run_engine(
             receipt.attention.push(Attention::UnknownPending);
         }
         Attempt::NotCompleted => {
-            for n in &chosen {
-                after.intents[*n].committing_from = None;
+            for intent in after
+                .intents
+                .iter_mut()
+                .filter(|i| chosen_ids.contains(&i.id) && intact.contains(&i.id))
+            {
+                intent.committing_from = None;
             }
+            let mut touched = retained > 0;
             for (id, outcome, adopted) in &originals {
-                if let Some(i) = after.intents.iter_mut().find(|i| i.id == *id) {
+                if let Some(i) = after
+                    .intents
+                    .iter_mut()
+                    .find(|i| i.id == *id && intact.contains(&i.id))
+                {
                     i.outcome = *outcome;
                     i.adopted = *adopted;
+                    touched = true;
                 }
             }
-            let _ = journal::save(store, &after, observed.as_deref());
+            if touched {
+                let _ = journal::save(store, &after, observed.as_deref());
+            }
             receipt.reason = Some(Reason::CommitNotCompleted);
+            // This call's journal entry vanished during the attempt: its saved files now have no
+            // provenance, so they are reported untracked instead of pending.
+            if current_lost {
+                receipt.untracked = receipt.paths.iter().take(16).cloned().collect();
+                if !receipt.untracked.is_empty()
+                    && !receipt.attention.contains(&Attention::UntrackedMutation)
+                {
+                    receipt.attention.push(Attention::UntrackedMutation);
+                }
+            }
         }
         Attempt::Unknown => {
             receipt.outcome = GitOutcome::Unknown;
