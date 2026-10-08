@@ -1,6 +1,6 @@
 # Registered tool surface, dispatch seam and read presentation — planning contract
 
-Status: planning artifact, semantic revision 3 of `registered-tool-surface` (provider M-003, consumer M-006). It supersedes the earlier semantic revisions after the owner and root decisions on automatic commits, work writes, recovery, read schemas and the independent final review (explicit recovery acknowledgement exception, real no-op rule, partial outcome after publications). The immutable tracker reference revision is distinct from this heading: each tracker entry pins the actual committed bytes and gets a higher revision when this file is signed. Nothing here is implemented: every Rust item is a signature to be written. [architecture.md](../architecture.md) stays the truth for implemented behavior. M-003 is the only owner of `src/main.rs` module declarations, `src/tools/mod.rs`, `src/tools/input.rs`, `src/tools/read.rs`, the dispatcher and acknowledgement parts of `src/tools/work.rs`, the response templates and the exported `schemas/tools.json`. Producers never edit those files. Revision numbers belong to this provider.
+Status: semantic revision 5 of `registered-tool-surface` (provider M-003, consumer M-006) for root signing; the tracker entry for the signed bytes of this file is revision 5. It keeps every rule of revision 4 and adds section 15, the retained compaction reads (full retained proposal history and exact earlier candidate bodies through the existing `get_context`), with the matching rows in sections 7 and 12 and refreshed pins in section 1. The mutation seam is unchanged, so `producer-host` stays at revision 3. M-005 has accepted and root has signed the provider seam of section 15.5 as `compaction-operations` revision 7; M-006 as consumer and M-003 as provider confirm this revision before any code is written. Nothing in section 15 is implemented. [architecture.md](../architecture.md) stays the truth for implemented behavior. The immutable tracker reference revision is distinct from this heading: each tracker entry pins the actual committed bytes and gets a higher revision when this file is signed. M-003 is the only owner of `src/main.rs` module declarations, `src/tools/mod.rs`, `src/tools/input.rs`, `src/tools/read.rs`, the dispatcher and acknowledgement parts of `src/tools/work.rs`, the response templates and the exported `schemas/tools.json`. Producers never edit those files. Revision numbers belong to this provider.
 
 ## 1 Pinned consumptions
 
@@ -8,12 +8,12 @@ Each is a provider-owned, signed and committed artifact; the consumer pins the c
 
 | Boundary | Provider | Current pinned revision | Reference (commit path sha256) |
 |---|---|---|---|
-| `kr-model-read` | M-001 | 5 | `commit 485137330f11a9ab05088801309f66c2c6e17d5b path docs/contracts/knowledge-records.md sha256 49833aaa21fe571683670fc78ba9150af49aacc5adb7384438780e0a07268841` |
-| `md-documents` | M-002 | 2 | `commit ea3a17fd4169f4c254ecd1f082a85c5f51d801da path docs/contracts/markdown-references.md sha256 e9808e8336df412a3219c8858435977e0ef966c19db6b7479609119b2f99f94c` |
-| `persist-git-m003` | M-004 | 2 | `commit 2193a35a5465c0f88486807263e65c58cead4ad9 path docs/contracts/publication-git.md sha256 7fd00805e4394ca5e6416e43c636ecb58be857da5151b9568aed9ca0edae6862` |
-| `compaction-operations` | M-005 | 3 | `commit 256f77c8b9013d66e77d40213d1d5357810e261b path docs/contracts/compaction.md sha256 e24fd79d2e9fd0198d791683309d36e2a98ee2d1b5ee06989a8c4444e4bd89a6` |
+| `kr-model-read` | M-001 | 7 | `commit 241b19f647ed701eed124cab4cd1c9560b081d4d path docs/contracts/knowledge-records.md sha256 156f4c9d5a0beb307e2d9e1120ff556ce1a3c2d328ce03f915baea2a601ec0e8` |
+| `md-documents` | M-002 | 3 | `commit 64d9bd863abe5302527cd9603b36032d4578dfdc path docs/contracts/markdown-references.md sha256 3ae837cb839150f6d722ec2a54bf60de09fe4fded531f41a9e142c54891935bb` |
+| `persist-git-m003` | M-004 | 4 | `commit eaa02c833f590c8b34410069918fbc97bd369786 path docs/contracts/publication-git.md sha256 0816759e9c2df1500f45829b0ecd509d045f387049e7455fc7f9df5257727b89` |
+| `compaction-operations` | M-005 | 7 | `commit 686dab8bfc98b043587142884378ff3b3250dff3 path docs/contracts/compaction.md sha256 84a41e40c0c3ef1a70584a3e11a81899ffe16543ffcc2f1935ff12bc7d73d3a8` |
 
-The M-005 artifact is signed and matches revision 3. Review requested changes to its move and removal handling will later produce a higher input revision (r4); until the provider publishes it the signed r3 stays the current pin and is not an uncommitted proposal. No source interface is guessed from a staged or future text.
+The pins above are the published, root signed artifacts. `compaction-operations` revision 7 adds the retained revision and staged candidate read helper that section 15 consumes; revision 6 is superseded for this consumer. No source interface is guessed from a staged or future text.
 
 Provided here: `registered-tool-surface` to M-006 and `producer-host` to M-001, M-002, M-004 and M-005, all pinning this file by commit, path and sha256 once root signs it. Placeholder or staged references are never published as agreed.
 
@@ -125,20 +125,22 @@ Sequencing without coding waits. Immediately after the Epic is frozen M-003 comm
 | D-001, RB-001, RS-001 | `knowledge::load`; summary, `view=history` (retained revisions, uses), `view=references` |
 | CL-001, CL-001/I-001 | checklist summary with item facts and events; an item ref shows that item; `view=references` |
 | DOC-001, `README.md`, `docs/x.md` | `documents::observe` through `Ref::parse`; summary with state and outline, `view=content` exact pages, `view=references` |
-| CP-001 | `compaction::read_cp`; summary, `view=tasks` lists actions and sections, `view=review` |
+| CP-001 | `compaction::read_cp`; summary, `view=tasks` lists actions and sections of the current revision, `view=review`, `view=references`; revision 5 adds `view=history` (every retained revision, review and reviewer recovery fact) and `view=content` (one exact staged candidate), see section 15 |
 
 Exact `ContextArgs` schema after this contract. Existing fields keep their meaning: `project`, `ref`, `view`, `start`, `limit`, `version`, `review_index`.
 
 | Field | Type | Rule |
 |---|---|---|
-| `view` | enum | existing values plus `content` (documents only), `history` (D, RB, RS only), `references` (D, RB, RS, CL, DOC, CP); any other pairing refuses naming `view` |
+| `view` | enum | existing values plus `content` (documents and, from revision 5, compaction proposals), `history` (D, RB, RS and, from revision 5, CP), `references` (D, RB, RS, CL, DOC, CP); any other pairing refuses naming `view` |
+| `revision` | integer, 1 or more | revision 5: compaction `view=history` (optional, selects one retained revision) and `view=content` (required); any other use refuses naming `revision` |
+| `action` | string, 1 to 8 bytes | revision 5: compaction `view=content` only and required there; names one action id, provider grammar `A-01` to `A-32`, possibly sparse; any other use refuses naming `action` |
 | `ordinal` | integer, 0 or more | document `view=content` only; exactly one of `ordinal`, `heading`, `preamble` may select a part; none selects the whole document |
 | `heading` | string, 1 to 256 bytes | same; the heading text, case sensitive |
 | `occurrence` | integer, 1 or more | only with `heading`; required when the text is ambiguous (`ambiguous_section` names the count) |
 | `level` | integer 1 to 6 | only with `heading` |
 | `preamble` | boolean | document `view=content` only; true selects the preamble |
-| `start` | integer, 0 or more | unchanged row offset for every view except document `view=content`, where it is a raw byte offset on a character boundary (otherwise `invalid_arguments` naming `start`) |
-| `limit` | optional integer 1 to 20 | unchanged for rows (default 20); for document `view=content` any supplied `limit` refuses naming `limit`, because the page size is fixed by the 8192-byte budget. The field becomes optional in the closed struct so absence and supply are distinguishable; the exported default stays 20 |
+| `start` | integer, 0 or more | unchanged row offset for every view except document `view=content`, where it is a raw byte offset on a character boundary (revision 5: also compaction `view=content`, a raw byte offset into the staged candidate) (otherwise `invalid_arguments` naming `start`) |
+| `limit` | optional integer 1 to 20 | unchanged for rows (default 20); for document `view=content` and, from revision 5, compaction `view=content` any supplied `limit` refuses naming `limit`, because the page size is fixed by the 8192-byte budget. The field becomes optional in the closed struct so absence and supply are distinguishable; the exported default stays 20 |
 
 A selector field used with another ref kind or view refuses naming that field. The existing paging parameters (`start`, `limit`, `version`) keep their meaning for every existing and new row based view; `version` carries the snapshot and is required when `start > 0`. An absent managed path is a successful page showing state Absent and its creation Version. Reads never create files, locks, directories or commits and never repair.
 
@@ -205,6 +207,7 @@ Each is positive, negative and a named implementation mutant that must fail the 
 - Search: kinds and state filters, per source coverage, routes that open the exact hit; scoped `module` calls unchanged; corpus run recorded. Mutant: a source dropped without a coverage line.
 - Epic: a fixture Epic with one unreadable member prints PARTIAL, names it, never zero. Mutants: complete printed; direct counts unlabeled.
 - Errors: AT-003 retest names `read_refs` and the limit without the value, and a wrong field name on `plan_work edit_task` is named, on a real stdio call.
+- Retained compaction reads (revision 5): the controls of section 15.7 for the history projection, the exact earlier candidate pages, misuse refusals by field and the read only tree check, each with a named mutant that fails the same test and restore.
 
 ## 13 Provider alignment against the final published references
 
@@ -222,3 +225,60 @@ The providers' final published references in section 1 govern. This section list
 - The conditions of the commit policy are owned by M-004 under the owner decision; nothing here chooses a threshold.
 - A later M-005 input revision (move and removal handling) will be re-pinned and reconfirmed when published; the current signed pin stays valid until then.
 - Closed by decision: work writes settle (section 5); field errors need no dependency (section 3).
+- Section 15 (retained compaction reads) is implemented only after root signs this revision and M-006 confirms it; the provider revision 7 is already signed.
+
+## 15 Retained compaction reads (revision 5)
+
+Status: the provider seam is accepted by M-005 and root signed as `compaction-operations` revision 7 (section 1); this section is the M-003 consumer side for root signing. Not implemented, and no code is written before M-006 confirms this revision. Observed gap: a compaction record retains every revision body, every review and the staged candidate bytes of every revision (`compaction.md` sections 2 and 5), but the surface of revision 4 can read only the current revision. On the live tree `ContextArgs` has no `revision` field, `records::validate` allows only `summary`, `tasks`, `review` and `references` for a `CP-` ref, and a public call `get_context ref=CP-001 view=history revision=1` is rejected as an unknown field before any body is read. Title level checks do not prove retention. The owner requirement is that the full E-001 functionality includes exact access to an earlier proposal, its reviews and an earlier candidate body.
+
+### 15.1 Rule: no new tool, storage or dependency
+
+The existing `get_context` is extended. Reads stay read only: no lock file, no directory, no repair, no commit, no Git line. No live document content ever substitutes for a missing or corrupt historical byte.
+
+### 15.2 Exact argument rules
+
+`ContextArgs` gains two optional closed fields: `revision` (integer, 1 or more, one based retained revision number) and `action` (string, 1 to 8 bytes; the provider owns the grammar, exactly `A-` followed by two digits from 01 to 32, so identifiers may be sparse and a consumer never infers the set from the action count). The validation owner is M-003 (`records::validate` and the exported schema). For a `CP-` ref:
+
+| Call | Meaning |
+|---|---|
+| `view=history` | every retained revision with its full body, every review, and the separate reviewer recovery history; rows paged by `start`, `limit` (1 to 20) and snapshot `version` |
+| `view=history revision=N` | only revision N, only the reviews of revision N; the reviewer recovery history is omitted and the page says so |
+| `view=content revision=N action=A-01` | the exact hash verified staged Markdown candidate of that action in that revision, as one framed page; both selectors are required |
+
+Refusals, all `invalid_arguments` naming the field, before any read: `revision` or `action` with a ref that is not a `CP-` ref; `action` with any view other than `content`; `revision` with a view other than `history` or `content`; `view=content` without `revision` or without `action`; `revision` equal to 0; `view=content` with `limit`; any document selector (`ordinal`, `heading`, `occurrence`, `level`, `preamble`); `review_index` outside `view=review` (unchanged, still zero based and never repurposed). Other fields keep their meaning. The document selectors stay document only.
+
+### 15.3 History projection (lossless, typed, paged)
+
+M-003 renders the public typed read models, never a storage dump, and every field of every retained struct reaches a row. Row groups in order: (1) record facts (state, current revision, accepted review index and whether that approval is still current, request key, times, apply progress including blocked kind and stored originals); (2) for each selected retained revision in ascending order: header (revision, `current` or `historical`, content hash, author, time, title, staged directory), sources, every action field (id, kind, path, from, base version, purpose, staged digest and length, reason, absorbed targets, state, publication copies), section ledger entries with their dispositions, preservation items; (3) every review in zero based order with revision, content hash, reviewer, verdict, summary, items hash, findings, resolutions, acceptance digests and time; (4) reviewer binding, lost report, predecessors and immersion (omitted with a `revision` selector). A fact longer than 1500 bytes is split into continuation rows at character boundaries with the existing field splitter; nothing is cut. A review of an earlier revision or of a hash that is not the current hash is labeled historical and states the current revision and hash, so historical approval is never shown as current readiness. Enumerations print their provider wire names. The snapshot binds the project, the CP record version, the selector (`all` or the revision) and the view; it excludes `start` and `limit`, so an unchanged record continues and any record change is `stale` with the current snapshot.
+
+### 15.4 Candidate content page
+
+The page reuses template `document_page`, `pages::payload_budget` and `pages::render` and the `md-text-v1` dialect (`markdown::page` over the verified bytes, whole range), with the same exactness: payload delimited by `encoded_len`, total reply at most 8192 bytes, `start` an absolute raw byte offset on a UTF-8 character boundary (otherwise `invalid_arguments` naming `start`), `start` equal to the end gives the empty final page, a missing `version` with `start > 0` is `stale`. Header: heading names the proposal, revision, action, kind and target path; `State:` is `retained revision N of M staged candidate` with `current` or `historical`; `Version:` is the CP record version. Snapshot: `scope_version` over the selection (`get_context:CP-001:content:rN:A-01:md-text-v1`), the CP record version and the verified sha256 of the staged bytes; it excludes `start`. Errors, bounded and naming the field or the relative path: `revision` not retained (the message states the retained range), `action` unknown for that revision, `action` of kind Move or Remove (no staged candidate), `invalid_data` for a missing staged file or a digest or length that does not match the record, and `cp_not_found`. A zero byte candidate is a valid empty final page.
+
+### 15.5 Provider seam from M-005 (`compaction-operations` revision 7, signed)
+
+M-005 owns retained revision and action selection and the hash verified retrieval; there is one verifier. The published text of `compaction.md` section 10a governs; this is the surface M-003 consumes, in `compaction` (re-exported from `src/compaction.rs`), read only, taking no lock:
+
+```rust
+/// Retained revision by one based number; invalid_arguments naming `revision` when it is 0 or not retained.
+pub fn retained_revision(record: &CpRecord, revision: u32) -> store::Result<&RevisionRecord>;
+/// Exact verified staged candidate of one action of one retained revision.
+pub struct StagedCandidate { pub revision: u32, pub action: String, pub kind: ActionKind,
+                             pub path: String, pub sha256: String, pub bytes: Vec<u8> }
+pub fn read_staged(store: &Store, record: &CpRecord, revision: u32, action: &str)
+                   -> store::Result<StagedCandidate>; // no lock, no write, no repair, no live fallback
+```
+
+`read_staged` selects the revision, finds the action (`invalid_arguments` naming `action` when absent), requires a staged digest (Move and Remove refuse naming `action`), reads `stage_path(id, revision, action)` through `Store::bytes`, and refuses `invalid_data` for a missing file, a digest mismatch or a length mismatch. `load_blobs` (apply and revise) calls the same private verifier for the current revision. This extraction preserves every valid revision 6 write, whose recorded length and digest match its staged bytes, and it now also enforces the already recorded `staged_len`, which the earlier `load_blobs` did not check; the contract makes no claim that a record with a malformed recorded length behaves as before. The apply messages stay unchanged. The messages of `read_staged` are `<relative>: staged candidate is missing.` and `<relative>: staged candidate does not match its recorded hash.`, and `retained_revision` states the retained range `1 to <current>`. No `expected` or snapshot parameter, history pager or new error code exists in the provider; row paging, the snapshot token and the page framing are M-003's. `read_cp`, `summaries`, `inventory`, `scan` and every record struct field stay as published; no record is pruned and `cp-inventory` revision 1 is unchanged. M-003 needs no other M-005 function; the history projection uses the public struct fields.
+
+### 15.6 Ownership, parties and sequence
+
+M-003 owns `ContextArgs`, the exported schema and catalog description, validation, the typed lossless projection, the paging and the page presentation. M-005 owns the helper of 15.5. M-006 owns the public SDK reconstruction (15.7) as consumer of `registered-tool-surface`. Producer-host stays at revision 3 because no mutation seam, `Ack` field or producer handler changes. Sequence: root signed `compaction-operations` revision 7 (done) and M-005 publishes and agrees its provides; M-003 consumes revision 7 with the exact reference of section 1 and agrees; root signs `registered-tool-surface` revision 5 and M-003 publishes the tracker entry with that signed reference; M-006 confirms; only then code. This file names no commit of its own. M-001, M-002 and M-004 are not affected: no knowledge, document or Git surface changes.
+
+### 15.7 Controls (positive, negative, named mutant, restored)
+
+Provider (M-005): revision 2 keeps revision 1 byte identical; `read_staged` returns revision 1 bytes after a revise, a missing blob, a corrupt blob and a length different from the recorded length refuse `invalid_data`, Move, Remove, a non canonical and an absent identifier refuse naming `action`, the verifier is the one `load_blobs` uses. Mutants: select the current revision instead of the named one; skip the digest check; fall back to the live document.
+
+M-003 (unit and stdio): after revision 2 the history lists both bodies and the revision 1 review as historical; `revision=1` shows revision 1 only; a structural leaf walk of the serialized retained record proves every leaf value appears in the unselected history. The candidate of revision 1 differs from revision 2 (fixture with BOM, CRLF, fenced headings and non-BMP text), pages concatenate to the exact staged bytes, every reply is at most 8192 bytes, `limit` refuses, a start inside a character names `start`, a record change makes continuation `stale`, and editing or deleting the live document changes no byte of the page. Misuse refuses by field for every row of 15.2. The tree bytes before and after every read are identical. Mutants: history omits a field; `revision` ignored; live document read; digest unchecked; offset inside the snapshot; `limit` accepted.
+
+Public SDK (M-006): the same reconstruction of revision 1 proposal, its reviews and its candidate bytes after revision 2 on the shipped binary with read only tree checks, bounded framing and stale continuation; a title only check is not proof. Strict pages and any candidate over 8192 bytes are never waived.
