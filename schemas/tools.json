@@ -116,7 +116,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Purpose: Read one bounded assignment/current continuation pack with the correct owning Version. Omit ref for Project; E/M/A/M/T/M/A refs select work. Default summary; tasks/results/checks/review/log/commits detail views.\nOther records: ref D-001, RB-001, RS-001 (Decision, Runbook, Research; views summary, history, references), CL-001 or CL-001/I-001 (procedural Checklist or one item; summary, references), DOC-001 or a managed path such as README.md or docs/x.md (Markdown document; summary with outline, view=content exact framed pages, references) and CP-001 (compaction proposal; summary, tasks, review, references). A view that does not apply to the record refuses naming view. For document view=content select at most one part with ordinal, or heading (case sensitive, with occurrence when the text repeats, optional level 1-6), or preamble=true; start is then a raw byte offset, the page size is fixed by the reply budget and a supplied limit is refused. Project context also prints the knowledge allocation version, per-kind record counts, document counts by state, open compaction proposals and pending Git facts, each with its coverage. integration is Project/Epic-only and returns ready connected components >=2, exact candidate/contract coverage keys and current/needed assembly facts without unrelated-Module barriers.\nCore summary exposes real observed harness/agent_id/contact/resume, retained predecessors, loss/immersion gaps, lead discovery, exact canonical agreements, candidates and correct-pass/mutant-fail/restored-pass controls. Module-ref assignment does not duplicate a launch brief. Labels are not runtime IDs; text grants no permissions. Current role contacts/history are distinct from quality applicability.\nVersion is the owning file/dependency observation token; embedded work shares Module Version. Allocation version creates top-level records. Snapshot version is read continuation only: reuse returned start/snapshot with unchanged project/ref/view/review_index; indexes are zero-based, limit1-20. Changed scope/data refuses.\nData/detail coverage are explicit; partial/unreadable facts are not zero or fully verified. commits reads retained messages without Git. Effects: read only, no migration/runtime polling/repair. After lost/partial/uncertain writes inspect this current scope before another mutation.",
+    "description": "Purpose: Read one bounded assignment/current continuation pack with the correct owning Version. Omit ref for Project; E/M/A/M/T/M/A refs select work. Default summary; tasks/results/checks/review/log/commits detail views.\nOther records: ref D-001, RB-001, RS-001 (Decision, Runbook, Research; views summary, history, references), CL-001 or CL-001/I-001 (procedural Checklist or one item; summary, references), DOC-001 or a managed path such as README.md or docs/x.md (Markdown document; summary with outline, view=content exact framed pages, references) and CP-001 (compaction proposal; summary, tasks, review, references, history, content). For CP-001 view=history lists every retained revision with its full body, every review (labeled historical when it is not for the current revision and hash) and the reviewer recovery history as pageable rows with the usual start, limit and version; the optional one based revision shows only that revision and its reviews. view=content with BOTH revision and action (an id from A-01 to A-32; ids may be sparse) reads the exact hash verified staged candidate of that action in that revision in the same framed md-text-v1 pages as a document, never from the live document. A view that does not apply to the record refuses naming view. For document view=content select at most one part with ordinal, or heading (case sensitive, with occurrence when the text repeats, optional level 1-6), or preamble=true; start is then a raw byte offset, the page size is fixed by the reply budget and a supplied limit is refused. The same holds for compaction view=content. revision and action are refused naming the field for any other record, view or use; document selectors are refused for proposals. Project context also prints the knowledge allocation version, per-kind record counts, document counts by state, open compaction proposals and pending Git facts, each with its coverage. integration is Project/Epic-only and returns ready connected components >=2, exact candidate/contract coverage keys and current/needed assembly facts without unrelated-Module barriers.\nCore summary exposes real observed harness/agent_id/contact/resume, retained predecessors, loss/immersion gaps, lead discovery, exact canonical agreements, candidates and correct-pass/mutant-fail/restored-pass controls. Module-ref assignment does not duplicate a launch brief. Labels are not runtime IDs; text grants no permissions. Current role contacts/history are distinct from quality applicability.\nVersion is the owning file/dependency observation token; embedded work shares Module Version. Allocation version creates top-level records. Snapshot version is read continuation only: reuse returned start/snapshot with unchanged project/ref/view/review_index; indexes are zero-based, limit1-20. Changed scope/data refuses.\nData/detail coverage are explicit; partial/unreadable facts are not zero or fully verified. commits reads retained messages without Git. Effects: read only, no migration/runtime polling/repair. After lost/partial/uncertain writes inspect this current scope before another mutation.",
     "inputSchema": {
       "$defs": {
         "View": {
@@ -164,12 +164,12 @@
             },
             {
               "const": "content",
-              "description": "Documents only: exact framed pages of the whole document or of one selected part.",
+              "description": "Documents and compaction proposals: exact framed pages of a document or one selected part,\nor of one staged candidate of a retained proposal revision.",
               "type": "string"
             },
             {
               "const": "history",
-              "description": "Decisions, Runbooks and Research only: retained revisions and Runbook uses.",
+              "description": "Decisions, Runbooks, Research and compaction proposals: retained revisions, Runbook uses and,\nfor a proposal, every review and reviewer fact.",
               "type": "string"
             },
             {
@@ -184,6 +184,13 @@
       "additionalProperties": false,
       "description": "Read one Project/Epic/Module/Task/Atomic scope, typed knowledge record, Markdown document or\ncompaction proposal with snapshot-bound pagination.",
       "properties": {
+        "action": {
+          "description": "Compaction proposal `view=content` only and required there: the action id `A-01` to `A-32`\nwhose staged candidate to read; ids may be sparse.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "heading": {
           "description": "Document `view=content` only: case-sensitive heading text of the part to read.",
           "type": [
@@ -250,6 +257,15 @@
         "review_index": {
           "description": "Zero-based retained review index; omission selects the latest.",
           "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revision": {
+          "description": "Compaction proposal only: one-based retained revision. Optional for `view=history`, where\nit selects a single revision and its reviews, and required for `view=content`.",
+          "format": "uint32",
           "minimum": 0,
           "type": [
             "integer",

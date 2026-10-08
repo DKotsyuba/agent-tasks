@@ -97,9 +97,11 @@ pub enum View {
     Commits,
     /// Current ready connected components, candidate/contract coverage and gaps.
     Integration,
-    /// Documents only: exact framed pages of the whole document or of one selected part.
+    /// Documents and compaction proposals: exact framed pages of a document or one selected part,
+    /// or of one staged candidate of a retained proposal revision.
     Content,
-    /// Decisions, Runbooks and Research only: retained revisions and Runbook uses.
+    /// Decisions, Runbooks, Research and compaction proposals: retained revisions, Runbook uses and,
+    /// for a proposal, every review and reviewer fact.
     History,
     /// Typed records, Checklists, documents and compaction proposals: outgoing and incoming references.
     References,
@@ -141,6 +143,12 @@ pub struct ContextArgs {
     pub level: Option<u8>,
     /// Document `view=content` only: true selects the preamble before the first heading.
     pub preamble: Option<bool>,
+    /// Compaction proposal only: one-based retained revision. Optional for `view=history`, where
+    /// it selects a single revision and its reviews, and required for `view=content`.
+    pub revision: Option<u32>,
+    /// Compaction proposal `view=content` only and required there: the action id `A-01` to `A-32`
+    /// whose staged candidate to read; ids may be sparse.
+    pub action: Option<String>,
 }
 
 impl ContextArgs {
