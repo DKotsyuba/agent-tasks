@@ -827,12 +827,19 @@ fn compaction_context(
             .map_or("unbound", |r| r.agent_id.as_str())
     ));
     let revision = record.revision()?;
+    // Title, hash and author are facts of one revision: a history read that selects a revision
+    // shows that revision's, never the current one's. State and counts stay record facts.
+    let shown = match (args.view, args.revision) {
+        (View::History, Some(number)) => compaction::retained_revision(record, number)?,
+        _ => revision,
+    };
     value.lines.push(format!(
-        "Title: {}; content hash {}; authored by {} at {}.",
-        store::safe(&revision.title, 160),
-        revision.content_hash,
-        store::safe(&revision.author, 100),
-        revision.at
+        "Title of revision {}: {}; content hash {}; authored by {} at {}.",
+        shown.revision,
+        store::safe(&shown.title, 160),
+        shown.content_hash,
+        store::safe(&shown.author, 100),
+        shown.at
     ));
     if let Some(apply) = &record.apply {
         value.lines.push(format!(

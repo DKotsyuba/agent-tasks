@@ -382,10 +382,31 @@ fn history_revision_selector_shows_only_that_revision() {
     assert!(one.contains("Revision 1 (historical)") && !one.contains("Revision 2"));
     assert!(one.contains("Review 0 (HISTORICAL)") && !one.contains("Review 1"));
     assert!(one.contains("omitted for the revision selector"), "{one}");
+    // Revision facts of another revision never leak into a selected view, header included.
+    let record = f.record();
+    let (first, second) = (&record.revisions[0], &record.revisions[1]);
+    assert!(
+        one.contains(&format!("Title of revision 1: \"{}\"", first.title))
+            && one.contains(&first.content_hash),
+        "{one}"
+    );
+    assert!(!one.contains(&second.title), "{one}");
+    // The current hash appears only where a historical review states what is current.
+    assert!(
+        one.lines()
+            .filter(|l| l.contains(&second.content_hash))
+            .all(|l| l.starts_with("Review 0 is not current")),
+        "{one}"
+    );
     assert!(!one.contains("Reviewer predecessor"), "{one}");
     let two = f.rows(json!({"view":"history","revision":2}));
     assert!(two.contains("Revision 2 (current)") && !two.contains("Revision 1"));
     assert!(two.contains("Review 1 (current)") && !two.contains("Review 0"));
+    assert!(
+        two.contains(&format!("Title of revision 2: \"{}\"", second.title))
+            && !two.contains(&first.content_hash),
+        "{two}"
+    );
     assert_ne!(
         field(
             &f.read(json!({"view":"history"})).unwrap(),
