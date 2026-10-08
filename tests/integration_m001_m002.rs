@@ -372,8 +372,8 @@ async fn a3_detail_grammar_accepts_exact_forms_and_refuses_the_rest_without_effe
         assert_eq!(id, format!("D-{:03}", n + 1), "refusals reserved nothing");
         let ctx = project.call("get_context", json!({"ref":id}), false).await;
         assert!(
-            ctx.contains(&format!("Detail: {detail}\n"))
-                || ctx.ends_with(&format!("Detail: {detail}")),
+            ctx.contains(&format!("Detail: {}\n", json!(detail)))
+                || ctx.ends_with(&format!("Detail: {}", json!(detail))),
             "{ctx}"
         );
     }
@@ -575,7 +575,10 @@ async fn a5_partial_and_unknown_coverage_is_named_and_never_counted_as_proof() {
 
     // The valid sibling record keeps resolving through the typed loader while the corrupt one stays named.
     let ctx = project.call("get_context", json!({"ref":d1}), false).await;
-    assert!(ctx.contains("Detail: docs/design.md#section"), "{ctx}");
+    assert!(
+        ctx.contains(&format!("Detail: {}", json!("docs/design.md#section"))),
+        "{ctx}"
+    );
 }
 
 /// A6: allocator corruption and foreign names refuse both consumers by code with no effect, then recover without reuse.
