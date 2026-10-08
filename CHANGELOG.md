@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0
+
 ### Added
 
 - `get_context` reads the full retained history of a compaction proposal (`view=history`, optional one based `revision`) as lossless paged rows, and one hash verified staged candidate (`view=content` with `revision` and `action`) in fixed 8192 byte `md-text-v1` pages with an offset-free snapshot. Misuse of the selectors is refused by field before any read.
