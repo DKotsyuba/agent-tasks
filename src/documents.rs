@@ -2097,7 +2097,10 @@ impl Observation {
 /// Move a document to an absent path, keeping its DOC identity. Order: S1 create the body at `to`,
 /// S2 replace the record (same identifier, new path, revision plus 1), S3 remove the body at `from`.
 /// With an operation identity an interrupted move resumes from the storage oracle (section 7.2 of
-/// the contract); without one the call is strictly the normal start.
+/// the contract); without one the call is strictly the normal start. Every effectful window (the
+/// normal start and the W1 and W2 resumes) returns reference attention for the move in
+/// [`Receipt::references`]: links and record tokens that name the old path are listed as introduced
+/// dangling, while a completed repeat (W3) publishes nothing and reports `Skipped`.
 pub fn relocate(
     scope: &mut Scope<'_>,
     from: &Ref,
@@ -2250,6 +2253,7 @@ pub fn relocate(
             let (Some(bytes), State::Unmanaged) = (bytes, leftover.state) else {
                 return Err(stale(&leftover.version));
             };
+            let references = move_references(port, &leftover, to);
             port.del(Del {
                 rel: leftover_path.as_str(),
                 observed: &bytes,
@@ -2258,7 +2262,9 @@ pub fn relocate(
                 required: true,
             })
             .map_err(|e| fail(scope, n0, "remove source body", true, hint, e))?;
-            move_receipt(port, n0, &src, &dst, to, true)
+            let mut receipt = move_receipt(port, n0, &src, &dst, to, true)?;
+            receipt.references = references;
+            Ok(receipt)
         }
         (_, true) => {
             let leftover = match from {
@@ -2293,6 +2299,7 @@ fn finish_move(
 ) -> Result<Receipt> {
     let port = scope.port;
     let (op, required) = (scope.operation, scope.required());
+    let references = move_references(port, src, to);
     let mut record_done = false;
     if let Some(r) = &src.record {
         let mut record = r.record.clone();
@@ -2326,7 +2333,28 @@ fn finish_move(
     })
     .map_err(|e| fail(scope, n0, "remove source body", true, hint, e))?;
     let dst = observe_after(port, src.id.as_deref(), to)?;
-    move_receipt(port, n0, src, &dst, to, true)
+    let mut receipt = move_receipt(port, n0, src, &dst, to, true)?;
+    receipt.references = references;
+    Ok(receipt)
+}
+
+/// Reference attention for moving the file of `src` to `to` (section 9 of the contract): the
+/// integrity preview with the move applied, so a link by the old path (including a record detail
+/// reference) is reported as introduced dangling while a link by DOC identifier follows its file.
+/// Computed before the first removal of the move so the pre-change graph is intact; a failed check
+/// is reported as unknown and never stops the move.
+fn move_references(port: &dyn Port, src: &Observation, to: &DocPath) -> ReferenceCheck {
+    let moves = [(src.path.clone(), to.clone())];
+    references::preview(
+        port,
+        &references::Overlay {
+            put: &[],
+            remove: &[],
+            moves: &moves,
+        },
+        src.outline.as_ref(),
+        src.outline.as_ref(),
+    )
 }
 
 /// Receipt of a move from the final observation.

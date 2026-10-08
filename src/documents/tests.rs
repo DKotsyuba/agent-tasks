@@ -776,6 +776,7 @@ fn relocate_identity_resume_windows() {
         let (dir, st) = root();
         let f = Fake::new(&st);
         let (src, basis, expected_to) = prepared(&f);
+        native(&dir, "docs/linker.md", b"[old](old.md)\n");
         let to = DocPath::parse("docs/new/moved.md").unwrap();
         let op_id = opid("move:1");
         let op = &op_id;
@@ -815,6 +816,13 @@ fn relocate_identity_resume_windows() {
             (r.id.as_deref(), r.state_after),
             (Some("DOC-001"), State::Managed),
             "window {window}"
+        );
+        // The resumed move reports the link it leaves dangling, like the normal start.
+        assert!(
+            matches!(&r.references, ReferenceCheck::Checked { introduced_dangling, .. }
+                if introduced_dangling.iter().any(|d| d.source.id_or_path == "docs/linker.md")),
+            "window {window}: {:?}",
+            r.references
         );
         assert_eq!(allocator_bytes(&dir), reserved, "resume never reserves");
         assert!(!dir.path().join("docs/old.md").exists());
@@ -1544,5 +1552,73 @@ fn incoming_treats_identity_and_path_as_one_document() {
     assert_eq!(
         by(&Target::Knowledge("DOC-001".into())),
         vec![("docs/linker.md".to_owned(), Via::BareId)]
+    );
+}
+
+/// An ordinary move reports the references it leaves dangling: a Markdown link and a record token
+/// that name the old path, while a link by DOC identifier follows its file and is not dangling.
+#[test]
+fn relocate_reports_references_left_dangling() {
+    let (dir, st) = root();
+    let f = Fake::new(&st);
+    let project = crate::model::Project {
+        schema_version: 1,
+        title: "Fixture".into(),
+        purpose: "See docs/design.md#section for the design".into(),
+        remote: None,
+        created_at: crate::store::now(),
+        updated_at: crate::store::now(),
+    };
+    st.save("project.yaml", &project, None, false, &mut Vec::new())
+        .unwrap();
+    save_at(
+        &f,
+        None,
+        "docs/design.md",
+        b"# Design\n\n## Section\ntext\n",
+        Some("Design"),
+    )
+    .unwrap();
+    native(
+        &dir,
+        "docs/linker.md",
+        b"[s](design.md#section) and DOC-001\n",
+    );
+    let src = obs(&f, "docs/design.md");
+    let basis = src.move_basis().unwrap();
+    let to = DocPath::parse("docs/moved.md").unwrap();
+    let expected_to = absent_version(&f, &to);
+    let r = relocate(
+        &mut Scope {
+            port: &f,
+            operation: None,
+        },
+        &Ref::Path(src.path.clone()),
+        &to,
+        &basis,
+        &expected_to,
+        None,
+    )
+    .unwrap();
+    let ReferenceCheck::Checked {
+        introduced_dangling,
+        complete,
+        ..
+    } = &r.references
+    else {
+        panic!("a move must be checked: {:?}", r.references);
+    };
+    let mut sources: Vec<_> = introduced_dangling
+        .iter()
+        .map(|d| d.source.id_or_path.as_str())
+        .collect();
+    sources.sort();
+    assert_eq!(sources, vec!["docs/linker.md", "project.yaml"]);
+    assert!(complete);
+    // The identifier mention is not among the dangling references.
+    assert!(
+        introduced_dangling
+            .iter()
+            .all(|d| d.target.canonical() != "DOC-001")
     );
 }
