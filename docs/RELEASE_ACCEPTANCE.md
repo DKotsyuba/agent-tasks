@@ -19,7 +19,23 @@ Observed on the baseline:
 
 Gate: `cargo xtask check` (fmt, all-features clippy, all tests, rustdoc, contract drift) passed with exit 0 on the source and tests of this checkpoint: 63 unit tests, 11 core scenarios plus 1 ignored receipt test, 5 helper self-tests and the qualification crates (their baseline-runnable tests passed; every producer-dependent test is ignored with its reason). This is a source-only baseline result.
 
-Not run: every scenario that needs `knowledge_work`, `document_work`, `compaction_work`, `git_recovery` or production Git settlement is `#[ignore]`d with its exact reason (typed knowledge 10, documents 13, Git 13, compaction 6, catalog and field errors 3, full search corpus 1). They are written against the pinned artifacts and are not evidence until the combined candidate runs them with `cargo test -- --include-ignored`, together with the implementation-mutation controls of each consumed boundary.
+Superseded: the `#[ignore]` markers that this baseline listed were removed when the providers landed; the only ignored test left in `tests/` is the core broker-receipt case in `core_protocol.rs`. The measured results on the combined candidate follow in the next section; the baseline numbers above stay as history.
+
+## Epic E-001 combined-candidate SDK results (signed assembly 00ed3a7, measured 2026-10-08)
+
+Each suite ran separately through the Rust SDK stdio client on the frozen debug binary `/private/tmp/e001-00ed3a7-mcp` (sha256 `500e6881a8c235baab140c7ca492c2ac179d9bfc6f3f520abdeca222cd40d19c`), scrubbed environment, disposable project. A count includes the one shared helper self-test that every SDK file carries. This is a per-suite record, not the whole gate: `cargo xtask check` on the final source and the packaged payload are still pending (see the plan below).
+
+| Suite | Result | Run |
+|---|---|---|
+| `catalog_surface` | 8 passed | Root, `/private/tmp/e001-core-knowledge-sdk-00ed3a7.log` |
+| `knowledge_lifecycle` | 11 passed | same log |
+| `boundary_controls` (`kr-operations` r7) | 5 passed | same log |
+| `search_quality` | 3 passed, corpus measured | same log |
+| `compaction_flows` (C1 to C14 including C7b retained reads) | 9 passed | Root, `/private/tmp/e001-compaction-complete-sdk-00ed3a7.log` |
+
+C7b reconstructs revision 1 after revision 2 on the shipped binary: the history of all revisions, of revision 1 alone and of revision 2 alone, the revision 1 review labeled historical, and the staged candidate (BOM, CRLF, fenced heading, non-BMP text, over 20000 bytes) byte for byte over every 8192-byte page for both revisions. It also checks the refusals of `registered-tool-surface` r5 section 15.2 by field, continuation going stale after a record change, no change of a retained byte by an edit or delete of the live document, `invalid_data` for a flipped, truncated or removed staged file with no repair, and a byte identical tree across every read. The Markdown family gained D12 (relocation reference attention) in the same assembly; its pre-fix control failed on the parent of the fix commit and passed after it.
+
+Retained-read implementation mutants for the C7b case are recorded below once run on the signed source; none is claimed before that.
 
 ## Epic E-001 implementation-mutation controls observed (source-only, 2026-10-08)
 
