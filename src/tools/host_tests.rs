@@ -96,6 +96,30 @@ fn shape_errors_name_fields_not_values() {
         .err()
         .unwrap();
     assert!(variant.contains("Unknown operation"), "{variant}");
+    let nested = input::mutation::<Plan>(
+        json!({"project":"p","version":"v","op":"create_module","title":"t","outcome":"o",
+               "dependencies":[{"ref":"M-001","condition":"hunter2","reason":"r"}]}),
+        false,
+    )
+    .err()
+    .unwrap();
+    assert!(
+        nested.contains("enumerated field in operation \"create_module\"")
+            && !nested.contains("Unknown operation")
+            && !nested.contains("hunter2"),
+        "{nested}"
+    );
+    // The tag alone decides the blame: a valid tag whose payload fails is never an unknown tag.
+    let shape_only = input::mutation::<Plan>(
+        json!({"project":"p","version":"v","op":"create_epic","title":["x"],"outcome":"o","criteria":["c"]}),
+        false,
+    )
+    .err()
+    .unwrap();
+    assert!(
+        shape_only.contains("in operation \"create_epic\""),
+        "{shape_only}"
+    );
     let shape = input::mutation::<Plan>(
         json!({"project":"p","version":"v","op":"create_epic","title":["hunter2"],"outcome":"o","criteria":["c"]}),
         false,

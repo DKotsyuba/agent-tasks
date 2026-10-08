@@ -210,7 +210,7 @@
         },
         "limit": {
           "default": 20,
-          "description": "Maximum displayed rows, 1–20; default 20. Optional so absence and supply stay\ndistinguishable: a supplied limit is refused for document `view=content`, whose page\nsize is fixed by the reply budget.",
+          "description": "Maximum displayed rows, 1–20; default 20. Optional so absence and supply stay\ndistinguishable: a supplied limit is refused for `view=content` of a document or a\ncompaction proposal, whose page size is fixed by the reply budget.",
           "format": "uint",
           "minimum": 0,
           "type": [

@@ -253,18 +253,20 @@ pub fn call(
     let result = (|| -> Result<String> {
         match name {
             "register_project" => {
-                super::projects::register(config, decode_args(args)?, templates, &mut effects)
+                super::projects::register(config, decode_args(name, args)?, templates, &mut effects)
             }
-            "get_project_list" => super::projects::list(config, decode_args(args)?, templates),
+            "get_project_list" => {
+                super::projects::list(config, decode_args(name, args)?, templates)
+            }
             "get_context" => {
-                let args = decode_args(args)?;
+                let args = decode_args(name, args)?;
                 super::read::context(config, args, templates)
             }
-            "project_status" => super::read::status(config, decode_args(args)?, templates),
-            "search" => super::read::search(config, decode_args(args)?, templates),
+            "project_status" => super::read::status(config, decode_args(name, args)?, templates),
+            "search" => super::read::search(config, decode_args(name, args)?, templates),
             "plan_work" => {
                 let (common, operation) =
-                    input::mutation::<Plan>(args, false).map_err(arguments)?;
+                    input::mutation::<Plan>(args, false).map_err(tool_arguments(name))?;
                 validate_common(&common)?;
                 let prepare = matches!(operation, Plan::InitProject { .. });
                 let ack = mutation_scope(
@@ -285,7 +287,8 @@ pub fn call(
                 ))
             }
             "record_work" => {
-                let (common, operation) = input::mutation::<Work>(args, true).map_err(arguments)?;
+                let (common, operation) =
+                    input::mutation::<Work>(args, true).map_err(tool_arguments(name))?;
                 validate_common(&common)?;
                 let ack = mutation_scope(
                     config,
@@ -305,7 +308,7 @@ pub fn call(
                 ))
             }
             "review_module" => {
-                let args: ReviewArgs = decode_args(args)?;
+                let args: ReviewArgs = decode_args(name, args)?;
                 number(&args.module, "M-").map_err(arguments)?;
                 let ack = review_call(config, args, &mut effects, &mut ledger)?;
                 Ok(render_ack(
@@ -317,7 +320,7 @@ pub fn call(
                 ))
             }
             "review_work" => {
-                let a: ReviewWorkArgs = decode_args(args)?;
+                let a: ReviewWorkArgs = decode_args(name, args)?;
                 let args = ReviewArgs {
                     project: a.project,
                     module: a.reference,
@@ -342,7 +345,7 @@ pub fn call(
             "knowledge_work" => {
                 let (common, operation) =
                     input::mutation::<knowledge_ops::KnowledgeOp>(args, false)
-                        .map_err(arguments)?;
+                        .map_err(tool_arguments(name))?;
                 validate_common(&common)?;
                 let ack = mutation_scope(
                     config,
@@ -362,8 +365,8 @@ pub fn call(
                 ))
             }
             "document_work" => {
-                let (common, operation) =
-                    input::mutation::<document_ops::DocumentOp>(args, false).map_err(arguments)?;
+                let (common, operation) = input::mutation::<document_ops::DocumentOp>(args, false)
+                    .map_err(tool_arguments(name))?;
                 validate_common(&common)?;
                 let ack = mutation_scope(
                     config,
@@ -385,7 +388,7 @@ pub fn call(
             "compaction_work" => {
                 let (common, operation) =
                     input::mutation::<compaction_ops::Compaction>(args, false)
-                        .map_err(arguments)?;
+                        .map_err(tool_arguments(name))?;
                 validate_common(&common)?;
                 let class = operation.event_class();
                 let ack = mutation_scope(
@@ -406,8 +409,8 @@ pub fn call(
                 ))
             }
             "git_recovery" => {
-                let (common, operation) =
-                    input::mutation::<recovery_ops::RecoveryOp>(args, false).map_err(arguments)?;
+                let (common, operation) = input::mutation::<recovery_ops::RecoveryOp>(args, false)
+                    .map_err(tool_arguments(name))?;
                 validate_common(&common)?;
                 let ack = mutation_scope(
                     config,
@@ -585,9 +588,21 @@ fn review_call(
     )
 }
 
-/// Closed serde argument decoding; parser source values never enter diagnostics.
-pub fn decode_args<T: serde::de::DeserializeOwned>(args: Value) -> Result<T> {
-    serde_json::from_value(args).map_err(|_| arguments("Unknown field, invalid type, null or missing required argument. Read the tool's input contract."))
+/// Closed serde argument decoding for a tool without an operation tag.
+///
+/// The failure names `tool` and, for an unknown or missing key, that field; parser source values
+/// never enter diagnostics.
+pub fn decode_args<T: serde::de::DeserializeOwned>(tool: &str, args: Value) -> Result<T> {
+    serde_json::from_value(args).map_err(|e| {
+        arguments(format!(
+            "{tool}: {}",
+            input::shape_error(&e, input::Scope::Tool)
+        ))
+    })
+}
+/// Prefix an operation decoding failure with the tool that was called.
+fn tool_arguments(tool: &str) -> impl Fn(String) -> Error + '_ {
+    move |message| arguments(format!("{tool}: {message}"))
 }
 /// Classify semantic/structural arguments without dumping raw inputs.
 fn arguments(message: impl Into<String>) -> Error {
@@ -2179,6 +2194,13 @@ fn record(
             candidate,
             changed_scope,
         } => {
+            // Name the offending result field; the model validator alone states only the rule.
+            input::field("summary", text(&summary, 1024))?;
+            input::field("candidate", optional(&candidate, 256))?;
+            input::field("changed_scope", strings(&changed_scope, 256, false))?;
+            input::field("gaps", strings(&gaps, 256, false))?;
+            input::field("followups", strings(&followups, 256, false))?;
+            input::field("artifacts", strings(&artifacts, 256, false))?;
             running(store, &value, index)?;
             if value.core().is_some()
                 && value.id.starts_with("A-")

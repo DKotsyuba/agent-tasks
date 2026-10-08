@@ -125,8 +125,8 @@ pub struct ContextArgs {
     #[serde(default)]
     pub start: usize,
     /// Maximum displayed rows, 1–20; default 20. Optional so absence and supply stay
-    /// distinguishable: a supplied limit is refused for document `view=content`, whose page
-    /// size is fixed by the reply budget.
+    /// distinguishable: a supplied limit is refused for `view=content` of a document or a
+    /// compaction proposal, whose page size is fixed by the reply budget.
     #[schemars(extend("default" = 20))]
     pub limit: Option<usize>,
     /// Exact snapshot returned by the previous page; mandatory for nonzero offsets.
@@ -803,13 +803,27 @@ fn required_patch<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
     T::deserialize(d).map(Patch::Set)
 }
 
+/// What a decoding failure may say about the operation of the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope<'a> {
+    /// A tool without an `op` tag (reads, status, review): no operation exists to blame.
+    Tool,
+    /// The `op` tag itself is not a variant of the closed operation enum.
+    UnknownOperation,
+    /// The `op` tag is valid; the payload of this operation, named here, failed to decode.
+    Operation(&'a str),
+}
+
 /// Reduce a serde decoding failure to one bounded message that names at most one schema field.
 ///
 /// Unknown-field and missing-field failures name the field (an unknown key is reduced to ASCII
-/// letters, digits and underscores and cut at 64 bytes); an unknown operation says so; every
-/// other failure is one generic shape message because serde exposes no field path without a
-/// new dependency. Supplied values never enter the text.
-pub fn shape_error(error: &serde_json::Error) -> String {
+/// letters, digits and underscores and cut at 64 bytes). An unknown variant is blamed on the
+/// operation only when `scope` says the `op` tag itself is unknown; a bad enumerated value inside
+/// a valid operation names that operation and says the field is unavailable, because serde
+/// exposes no field path without a new dependency. Every other failure is one generic shape
+/// message, naming the valid operation when there is one. Supplied values never enter the text:
+/// the only echoed word is an operation name already proven to be a closed variant.
+pub fn shape_error(error: &serde_json::Error, scope: Scope<'_>) -> String {
     let text = error.to_string();
     let name = |prefix: &str| {
         text.strip_prefix(prefix)
@@ -822,15 +836,27 @@ pub fn shape_error(error: &serde_json::Error) -> String {
             })
             .filter(|clean| !clean.is_empty())
     };
+    let operation = |scope: Scope<'_>| match scope {
+        Scope::Operation(op) => format!(" in operation \"{op}\""),
+        Scope::Tool | Scope::UnknownOperation => String::new(),
+    };
     if let Some(field) = name("unknown field `") {
         format!("Unknown field \"{field}\". Read the tool's input contract.")
     } else if let Some(field) = name("missing field `") {
         format!("Missing required field \"{field}\".")
     } else if text.starts_with("unknown variant") {
-        "Unknown operation. Read the tool's input contract.".into()
+        match scope {
+            Scope::UnknownOperation => "Unknown operation. Read the tool's input contract.".into(),
+            Scope::Tool | Scope::Operation(_) => format!(
+                "Invalid value for an enumerated field{}; field type details are unavailable. Read the tool's input contract.",
+                operation(scope)
+            ),
+        }
     } else {
-        "Invalid argument shape or type; field type details are unavailable. Read the tool's input contract."
-            .into()
+        format!(
+            "Invalid argument shape or type{}; field type details are unavailable. Read the tool's input contract.",
+            operation(scope)
+        )
     }
 }
 
@@ -867,8 +893,27 @@ pub fn mutation<T: serde::de::DeserializeOwned>(
     } else {
         None
     };
-    let operation =
-        serde_json::from_value(Value::Object(args)).map_err(|error| shape_error(&error))?;
+    // The tag is proven valid by decoding it alone: only an unknown tag fails that way, so a later
+    // unknown variant belongs to a nested field and never blames a valid operation.
+    let tag = args.get("op").and_then(Value::as_str).map(|op| {
+        let known = serde_json::from_value::<T>(serde_json::json!({ "op": op }))
+            .map_or_else(|e| !e.to_string().starts_with("unknown variant"), |_| true);
+        let clean: String = op
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .take(64)
+            .collect();
+        (known, clean)
+    });
+    let operation = serde_json::from_value(Value::Object(args)).map_err(|error| {
+        shape_error(
+            &error,
+            match &tag {
+                Some((true, op)) => Scope::Operation(op),
+                _ => Scope::UnknownOperation,
+            },
+        )
+    })?;
     Ok((
         Common {
             project,

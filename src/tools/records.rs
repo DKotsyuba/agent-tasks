@@ -150,30 +150,6 @@ pub(super) fn validate(args: &ContextArgs, kind: RefKind) -> Result<()> {
     Ok(())
 }
 
-/// Split one field into rows of at most [`ROW_BYTES`], cut at character boundaries.
-fn push_field(rows: &mut Vec<String>, label: &str, text: &str) {
-    let mut rest = text.trim_end();
-    let mut first = true;
-    loop {
-        let mut end = rest.len().min(ROW_BYTES);
-        while !rest.is_char_boundary(end) {
-            end -= 1;
-        }
-        let (head, tail) = rest.split_at(end);
-        let name = if first {
-            label.to_owned()
-        } else {
-            format!("{label} (continued)")
-        };
-        rows.push(format!("{name}: {}", head.trim_end()));
-        first = false;
-        if tail.is_empty() {
-            break;
-        }
-        rest = tail;
-    }
-}
-
 /// Read one typed knowledge record, a checklist item or a document or proposal and render it.
 ///
 /// Dispatches on the already classified `kind`; `store` is the resolved project and the caller
@@ -307,18 +283,18 @@ fn record_rows(record: &Any, value: &mut Page) {
     match record {
         Any::Decision(r) => {
             let c = &r.content;
-            push_field(rows, "Question", &c.question);
-            push_field(rows, "Decision", &c.decision);
-            push_field(rows, "Rationale", &c.rationale);
+            fact(rows, "Question", &c.question);
+            fact(rows, "Decision", &c.decision);
+            fact(rows, "Rationale", &c.rationale);
             for a in &c.alternatives {
-                push_field(
+                fact(
                     rows,
                     "Alternative",
                     &format!("{} — rejected because {}", a.option, a.rejected_because),
                 );
             }
             for q in &c.open_questions {
-                push_field(
+                fact(
                     rows,
                     if q.needs_owner {
                         "Open question (owner)"
@@ -329,62 +305,66 @@ fn record_rows(record: &Any, value: &mut Page) {
                 );
             }
             if let Some(detail) = &c.detail {
-                push_field(rows, "Detail", detail);
+                fact(rows, "Detail", detail);
             }
         }
         Any::Research(r) => {
             let c = &r.content;
-            push_field(rows, "Question", &c.question);
+            fact(rows, "Question", &c.question);
             for x in &c.conclusions {
-                push_field(rows, &format!("Conclusion [{:?}]", x.basis), &x.statement);
+                fact(rows, &format!("Conclusion [{:?}]", x.basis), &x.statement);
             }
             for e in &c.evidence {
-                push_field(
+                fact(
                     rows,
                     &format!("Evidence [{:?}]", e.basis),
                     &format!("{} — source {}", e.claim, e.source),
                 );
             }
             for l in &c.limitations {
-                push_field(rows, "Limitation", l);
+                fact(rows, "Limitation", l);
             }
-            push_field(rows, "Applicability", &c.applicability);
+            fact(rows, "Applicability", &c.applicability);
             if let Some(detail) = &c.detail {
-                push_field(rows, "Detail", detail);
+                fact(rows, "Detail", detail);
             }
         }
         Any::Runbook(r) => {
             let c = &r.content;
-            push_field(rows, "Purpose", &c.purpose);
+            fact(rows, "Purpose", &c.purpose);
             for p in &c.prerequisites {
-                push_field(rows, "Prerequisite", p);
+                fact(rows, "Prerequisite", p);
             }
             for i in &c.inputs {
-                push_field(
+                fact(
                     rows,
                     &format!(
                         "Input {}{}",
-                        i.name,
+                        quote(&i.name),
                         if i.required { " (required)" } else { "" }
                     ),
                     &i.description,
                 );
             }
             for (n, s) in c.steps.iter().enumerate() {
-                push_field(rows, &format!("Step {} {}", n + 1, s.title), &s.description);
+                fact(
+                    rows,
+                    &format!("Step {} {}", n + 1, quote(&s.title)),
+                    &s.description,
+                );
                 if let Some(command) = &s.command {
-                    push_field(rows, "  Command (never executed by a read)", command);
+                    fact(rows, "  Command (never executed by a read)", command);
                 }
-                push_field(rows, "  Expected", &s.expected);
+                fact(rows, "  Expected", &s.expected);
                 if let Some(recovery) = &s.recovery {
-                    push_field(rows, "  Recovery", recovery);
+                    fact(rows, "  Recovery", recovery);
                 }
             }
             for p in &c.pitfalls {
-                push_field(rows, "Pitfall", p);
+                fact(rows, "Pitfall", p);
             }
             if let Some(detail) = &c.detail {
-                push_field(rows, "Detail", detail);
+                fact(rows, "Detail", detail);
             }
             rows.push(format!(
                 "Uses: {} recorded; use evidence is tied to the revision it names. Open view=history.",
@@ -392,16 +372,16 @@ fn record_rows(record: &Any, value: &mut Page) {
             ));
         }
         Any::Checklist(c) => {
-            push_field(rows, "Purpose", &c.content.purpose);
+            fact(rows, "Purpose", &c.content.purpose);
             for i in &c.content.items {
                 let state = match i.state {
                     knowledge::ItemState::Open => "open",
                     knowledge::ItemState::Done => "done",
                     knowledge::ItemState::Canceled => "canceled",
                 };
-                push_field(rows, &format!("{} [{state}]", i.id), &i.text);
+                fact(rows, &format!("{} [{state}]", i.id), &i.text);
                 if let Some(r) = &i.resolution {
-                    push_field(rows, "  Resolution", &r.text);
+                    fact(rows, "  Resolution", &r.text);
                 }
             }
             rows.push(format!(
@@ -433,17 +413,17 @@ fn item_rows(record: &Any, item: &str, value: &mut Page) -> Result<()> {
         .iter()
         .find(|i| i.id == item)
         .ok_or_else(|| Error::new("not_found", format!("{item}: no such checklist item.")))?;
-    push_field(
+    fact(
         &mut value.rows,
         &format!("{} [{:?}]", found.id, found.state),
         &found.text,
     );
     if let Some(r) = &found.resolution {
-        push_field(&mut value.rows, "Resolution", &r.text);
+        fact(&mut value.rows, "Resolution", &r.text);
         value.rows.push(format!(
             "Resolved at {} by {}.",
             r.at,
-            r.by.as_deref().unwrap_or("unknown")
+            quote(r.by.as_deref().unwrap_or("unknown"))
         ));
     }
     Ok(())
@@ -455,37 +435,46 @@ fn history_rows(record: &Any, value: &mut Page) {
     match record {
         Any::Decision(r) => {
             for h in r.history.iter().rev() {
-                rows.push(format!(
-                    "Revision {} at {} by {}: {}",
-                    h.revision,
-                    h.at,
-                    h.by.as_deref().unwrap_or("unknown"),
-                    store::safe(&h.content.decision, 300)
-                ));
+                fact(
+                    rows,
+                    &format!(
+                        "Revision {} at {} by {}",
+                        h.revision,
+                        h.at,
+                        quote(h.by.as_deref().unwrap_or("unknown"))
+                    ),
+                    &h.content.decision,
+                );
             }
             evicted(rows, r.evicted.len());
         }
         Any::Research(r) => {
             for h in r.history.iter().rev() {
-                rows.push(format!(
-                    "Revision {} at {} by {}: {}",
-                    h.revision,
-                    h.at,
-                    h.by.as_deref().unwrap_or("unknown"),
-                    store::safe(&h.content.question, 300)
-                ));
+                fact(
+                    rows,
+                    &format!(
+                        "Revision {} at {} by {}",
+                        h.revision,
+                        h.at,
+                        quote(h.by.as_deref().unwrap_or("unknown"))
+                    ),
+                    &h.content.question,
+                );
             }
             evicted(rows, r.evicted.len());
         }
         Any::Runbook(r) => {
             for h in r.history.iter().rev() {
-                rows.push(format!(
-                    "Revision {} at {} by {}: {}",
-                    h.revision,
-                    h.at,
-                    h.by.as_deref().unwrap_or("unknown"),
-                    store::safe(&h.content.purpose, 300)
-                ));
+                fact(
+                    rows,
+                    &format!(
+                        "Revision {} at {} by {}",
+                        h.revision,
+                        h.at,
+                        quote(h.by.as_deref().unwrap_or("unknown"))
+                    ),
+                    &h.content.purpose,
+                );
             }
             evicted(rows, r.evicted.len());
             for u in r.uses.iter().rev() {
@@ -517,16 +506,16 @@ fn history_rows(record: &Any, value: &mut Page) {
         }
         Any::Checklist(c) => {
             for e in c.events.iter().rev() {
-                rows.push(format!(
-                    "{} at {} by {}{}",
+                let head = format!(
+                    "{} at {} by {}",
                     e.action,
                     e.at,
-                    e.by.as_deref().unwrap_or("unknown"),
-                    e.note
-                        .as_deref()
-                        .map(|n| format!(": {}", store::safe(n, 200)))
-                        .unwrap_or_default()
-                ));
+                    quote(e.by.as_deref().unwrap_or("unknown"))
+                );
+                match e.note.as_deref() {
+                    Some(note) => fact(rows, &head, note),
+                    None => rows.push(format!("{head}.")),
+                }
             }
         }
     }
@@ -824,7 +813,7 @@ fn compaction_context(
         record
             .reviewer
             .as_ref()
-            .map_or("unbound", |r| r.agent_id.as_str())
+            .map_or("unbound".to_owned(), |r| { store::safe(&r.agent_id, 128) })
     ));
     let revision = record.revision()?;
     // Title, hash and author are facts of one revision: a history read that selects a revision
@@ -959,30 +948,69 @@ fn cp_reviews(record: &CpRecord, index: Option<usize>, value: &mut Page) -> Resu
     Ok(())
 }
 
-/// Append one fact as rows of at most [`ROW_BYTES`] of text, cut only at character boundaries.
-///
-/// Unlike [`push_field`] nothing is trimmed, so concatenating the continuation rows restores the
-/// exact text; the retained proposal history uses it so no fact is ever cut or altered.
-fn fact(rows: &mut Vec<String>, label: &str, text: &str) {
-    let mut rest = text;
-    let mut first = true;
-    loop {
-        let mut end = rest.len().min(ROW_BYTES);
-        while !rest.is_char_boundary(end) {
-            end -= 1;
-        }
-        let (head, tail) = rest.split_at(end);
-        if first {
-            rows.push(format!("{label}: {head}"));
-        } else {
-            rows.push(format!("{label} (continued): {head}"));
-        }
-        first = false;
-        if tail.is_empty() {
-            break;
-        }
-        rest = tail;
+/// Whether `c` must never reach a reply as itself: controls, line and paragraph separators and
+/// the invisible or bidirectional formatting characters that can reorder or hide neighbouring text.
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{61c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
+}
+
+/// Append the escaped form of `c` to `out`: `\\`, `\"`, `\n`, `\r`, `\t` and `\u{hex}` for every
+/// [`hidden`] character; everything else, including leading and trailing blanks, is kept as is.
+fn escape_into(c: char, out: &mut String) {
+    match c {
+        '\\' => out.push_str("\\\\"),
+        '"' => out.push_str("\\\""),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        c if hidden(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+        c => out.push(c),
     }
+}
+
+/// Reversible quoted projection of stored text: a double quoted string whose escapes
+/// ([`escape_into`]) leave no raw line break, control or bidirectional character, so stored prose
+/// can never start a structural line, and from which the exact original is recovered.
+fn quote(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    text.chars().for_each(|c| escape_into(c, &mut out));
+    out.push('"');
+    out
+}
+
+/// Append one fact as quoted rows of at most [`ROW_BYTES`] of escaped text each.
+///
+/// Nothing is trimmed, truncated or reordered: the quoted pieces of the `label` and
+/// `label (continued)` rows concatenate to the exact stored text, with leading and trailing
+/// whitespace and every control character preserved as an escape. A piece ends only between
+/// whole characters, never inside an escape. `label` is trusted text or built with [`quote`].
+fn fact(rows: &mut Vec<String>, label: &str, text: &str) {
+    let mut piece = String::new();
+    let mut first = true;
+    let mut flush = |piece: &mut String, rows: &mut Vec<String>| {
+        let name = if first {
+            label.to_owned()
+        } else {
+            format!("{label} (continued)")
+        };
+        rows.push(format!("{name}: \"{piece}\""));
+        piece.clear();
+        first = false;
+    };
+    for c in text.chars() {
+        let before = piece.len();
+        escape_into(c, &mut piece);
+        if piece.len() > ROW_BYTES {
+            let tail = piece.split_off(before);
+            flush(&mut piece, rows);
+            piece = tail;
+        }
+    }
+    flush(&mut piece, rows);
 }
 
 /// Provider wire name of a closed enumeration (`snake_case` as stored), never its Rust name.
@@ -1847,21 +1875,13 @@ impl Sources {
     }
 
     /// Typed knowledge hits over the stable per-kind field labels; currentness is explicit.
-    pub(super) fn knowledge_hits(
-        &self,
-        terms: &[String],
-        filter: StateFilter,
-        hits: &mut Vec<Hit>,
-    ) {
+    pub(super) fn knowledge_hits(&self, terms: &[String], hits: &mut Vec<Hit>) {
         let Some(Ok(scan)) = &self.knowledge else {
             return;
         };
         for (index, record) in scan.records.iter().enumerate() {
             let any = &record.value;
             let current = any.current();
-            if !keeps(filter, current) {
-                continue;
-            }
             let fields = any.search_text();
             let before = hits.len();
             hit(
@@ -1883,15 +1903,12 @@ impl Sources {
     }
 
     /// Markdown hits: path, purpose, headings and body, each located at its section.
-    pub(super) fn document_hits(&self, terms: &[String], filter: StateFilter, hits: &mut Vec<Hit>) {
+    pub(super) fn document_hits(&self, terms: &[String], hits: &mut Vec<Hit>) {
         let Some(Ok(corpus)) = &self.corpus else {
             return;
         };
         for (index, doc) in corpus.docs.iter().enumerate() {
             let current = !matches!(doc.state, State::Retired);
-            if !keeps(filter, current) {
-                continue;
-            }
             let heading_text = doc
                 .headings
                 .iter()
@@ -1934,8 +1951,8 @@ impl Sources {
     }
 }
 
-/// Whether a hit's currentness passes the filter.
-fn keeps(filter: StateFilter, current: bool) -> bool {
+/// Whether a hit's currentness passes the filter; the one predicate every search source shares.
+pub(super) fn keeps(filter: StateFilter, current: bool) -> bool {
     match filter {
         StateFilter::Any => true,
         StateFilter::Current => current,

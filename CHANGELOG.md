@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added
+
+- `get_context` reads the full retained history of a compaction proposal (`view=history`, optional one based `revision`) as lossless paged rows, and one hash verified staged candidate (`view=content` with `revision` and `action`) in fixed 8192 byte `md-text-v1` pages with an offset-free snapshot. Misuse of the selectors is refused by field before any read.
+
+### Changed
+
+- Typed record, checklist and compaction history prose is rendered as quoted, escaped rows that are exact and cannot forge structural lines; long facts continue in `(continued)` rows without trimming or truncation.
+- Argument decoding errors name the tool, and a bad nested enumerated value no longer reports an unknown operation. Oversized `record_work result` fields are named.
+
+### Fixed
+
+- `search state=superseded` no longer returns work records; one state predicate covers work, knowledge and documents.
+- A compaction `view=history revision=N` header shows the title, hash and author of revision N instead of the current revision.
+
 ## 0.9.2
 
 ### Fixed

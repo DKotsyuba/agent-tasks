@@ -2804,8 +2804,11 @@ pub fn search(config: &Config, args: SearchArgs, templates: &Templates) -> Resul
             }
         }
     }
-    sources.knowledge_hits(&terms, filter, &mut hits);
-    sources.document_hits(&terms, filter, &mut hits);
+    sources.knowledge_hits(&terms, &mut hits);
+    sources.document_hits(&terms, &mut hits);
+    // One predicate for every source: work records are never superseded, so they pass `any` and
+    // `current` and are excluded by `superseded`.
+    hits.retain(|h| records::keeps(filter, h.current));
     hits.sort_by(|a, b| {
         b.score
             .cmp(&a.score)

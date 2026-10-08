@@ -1,10 +1,6 @@
-//! Exact document page presentation. A page carries the encoded payload of one raw byte window
+//! Exact page presentation for documents and for retained compaction candidates. A page carries the encoded payload of one raw byte window
 //! inside a length-framed reply so a reader can rebuild the original bytes from the text alone.
 //! The whole reply, header and footer included, never exceeds the 8192 byte response limit.
-#![allow(
-    dead_code,
-    reason = "Document reads call this once the document module is integrated; unit tests exercise it now"
-)]
 use crate::{
     response::Templates,
     store::{Error, Result},
