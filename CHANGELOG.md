@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.1
+
+- Resolve the native temporary-directory alias in test fixtures before passing an observer home, retaining the production symlink protection on macOS CI.
+
 ## 1.0.0
 
 - Replace the legacy work hierarchy and registration workflow with a flat agreed plan and on-demand Git-derived progress estimates.

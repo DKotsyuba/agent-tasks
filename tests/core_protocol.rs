@@ -30,6 +30,8 @@ use std::{
 /// The task sets TMPDIR/TMP/TEMP; CI uses its own isolated runner directory.
 fn scratch() -> std::path::PathBuf {
     std::env::temp_dir()
+        .canonicalize()
+        .expect("native temporary directory exists")
 }
 
 /// Actual SDK connection to an isolated stdio process.

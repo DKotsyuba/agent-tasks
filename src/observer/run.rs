@@ -853,6 +853,8 @@ mod tests {
     /// Root-provided native temporary directory; task and CI own its placement.
     fn scratch() -> std::path::PathBuf {
         std::env::temp_dir()
+            .canonicalize()
+            .expect("native temporary directory exists")
     }
 
     /// Owns a disposable listener path and a bounded scripted server thread.
