@@ -1,4 +1,16 @@
-# Release acceptance for the portable core
+# Release acceptance
+
+## Observer 1.0.0 — native source checks on 2026-10-18
+
+The replacement observer passed 104 deterministic tests, strict source gates and dependency/source audits on macOS 27 arm64. MCP Inspector CLI 2.7.0 with Node 24.4.0 retained all three tools in legacy and modern negotiation, read version 1.0.0 and the saved flat plan/creator; strict discovery reported zero errors and eight documented nullable-type warnings. Native target qualification is aarch64-apple-darwin only.
+
+The minimal progress-summary Agent Run profile passed seven adversarial semantic cases with zero false completions. The actual dedicated Bridge producer delivered a final compact report into the original Codex Desktop chat after one status call and frontend EOF, without owner result retrieval. Full evidence scope and limitations are in [qualification](qualification.md). Exact authenticated CI payload identity, shipped-binary tests, disposable installation and owner activation remain separate release gates below.
+
+Version 1.0.0 removes registration, work hierarchies, manual progress mutation and documentation/knowledge APIs. Legacy data and installed versions are retained; new observer records live separately. Existing frozen runs are not migrated into the new plan model.
+
+## Historical core qualification
+
+The following sections record the retired product's checks and do not describe the observer's current tools or workflow.
 
 ## Qualified scope
 

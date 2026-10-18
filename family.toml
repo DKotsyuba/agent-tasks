@@ -18,7 +18,7 @@ host_adapter = false
 supported_protocol_revisions = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"]
 candidate_targets = ["aarch64-apple-darwin"]
 qualified_targets = ["aarch64-apple-darwin"]
-qualified_hosts = ["mcp-inspector-cli-2.7.0"]
+qualified_hosts = ["MCP Inspector CLI 2.7.0"]
 
 [release]
 enabled = true

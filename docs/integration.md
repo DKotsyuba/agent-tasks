@@ -1,0 +1,17 @@
+# Managed activation integration
+
+Building this checkout does not activate it. Preserve the old server, configuration and data until the owner separately authorizes switching.
+
+At activation, use the canonical managed policy/skill source to import the lightweight entry in skills/agent-tasks/SKILL.md. The old repository orchestrator/module-lead entries are removed. Remove their installed workflow dependencies and old tool caps from roles using this product; direct roots to the lightweight planning/status entry. Do not change unrelated role grants, root bootstrap rules, provider accounts or credentials. An installed old skill must not instruct a new runtime to call get_project_list, record_work or review_work.
+
+Provision profiles/progress-summary.md through the canonical Agent Run role catalog. Its explicit empty searxng cap covers the current known global server; inspect the actual global catalog and narrow any additional global selections for this role only. Do not disable servers globally. Verify effective write/network/native-tool permissions; profile text alone is not qualification.
+
+Supply separate observer settings with the already approved provider/model and the existing Agent Run socket. The role/model must pass the synthetic semantic test and actual status/callback/result flow. The qualification harness can use an already approved read-only role without modifying live policy; that does not qualify an undeployed profile's effective rights.
+
+The initial host target is Codex Desktop. Original per-call MCP context metadata supplies threadId automatically; it also captures the creating plan agent's contact address. Do not use the persistent server environment as the caller. Metadata is a contact/return destination, not independently verified native authority. API callers without host metadata may supply explicit caller_context for status delivery.
+
+For automatic final reports, configure a separate agent-tasks Bridge producer with direct-address permission, kind agent-tasks.status, message/keep_all only, a protected dedicated token, and the intended recipient scope. Never reuse the Agent Run, root or operator credential. The observer's optional [bridge] settings name the existing registration/core sockets, token file, expected producer and trusted host/store mapping. It does not install policy, edit live grants or restart Bridge. This mode submits the analyzer unbound, event-waits through the public API, validates its result and sends the compact body. Native delivery may wake a Desktop turn; there is no UI-only/no-wake capability claim. Without Bridge, the previous bound lifecycle notice and explicit pinned read remain supported.
+
+Before activating, verify the actual final report appears in the original chat after one status call and normal MCP disconnect; verify terminal failure messages, original-destination recovery and uncertain custody without republishing. Fixture custody alone is not native arrival. After publication Bridge owns native delivery; a later observer request reconciles only the original retained event if acknowledgement was lost.
+
+The observer validates schema-bound JSON locally. The Agent Run output_schema API option is intentionally omitted because the live broker supports it only for claude-code, while the configured utility models use OpenCode. Schema and constants are supplied in the task, and local validation remains mandatory.

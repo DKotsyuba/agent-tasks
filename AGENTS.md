@@ -1,32 +1,11 @@
-# agent-tasks — agent instructions
+# Agent Tasks observer — implementation instructions
 
-rust-minijinja-v1 response profile. Read docs/MCP_RESPONSE_STANDARD.md;
-docs/architecture.md is the behavior truth source.
+Use the pinned Rust toolchain, locked prepared dependencies and `cargo xtask check`. Source is Rust; compact text uses trusted embedded MiniJinja. stdout of `mcp` is protocol-only. Keep language-native documentation synchronized with changed declarations.
 
-## Single workflow
+The owner-approved product is an on-demand progress observer. Runtime tools are `plan`, `status` and identity-only `get_status`. Do not restore project registration, Epic/Module/Atomic records, manual completion, bindings, developer reports or special commit-message sections. Save scope only during owner-authorized planning. Developers do not maintain progress.
 
-`cargo xtask check` is the full non-mutating gate.
-Use `cargo xtask add-tool NAME --effect read --response entity|page|ack` to add a typed skeleton.
-Definitions live in src/tools/mod.rs; JSON is an exported snapshot. `contract update` is explicit.
-Generated stubs remain unimplemented and release-blocking until their behavior and tests are reviewed.
+Git collection is read-only. Never checkout, fetch, merge, commit, test or push source while gathering status. Preserve omissions and uncertainty. A draft or commit message alone does not prove implementation; current target content supersedes old ancestry after a revert.
 
-## Invariants
+Persist the exact analysis start intent before submission. Unknown admission replays its original key and caller namespace. Never resume summary analyzers. Validate input identity, plan revision, execution sequence and answer hash before accepting a result. No completion-polling loops. Reuse semantic reports when content is unchanged.
 
-Rust 2024, resolver 3, pinned toolchain, committed application lock, publish=false, shared lints.
-No Python/Node scripting dependencies. No daemon/database without a product requirement.
-Normal MCP text uses strict embedded MiniJinja over small typed views. No raw JSON dumping.
-Preserve execution outcome, exact identifiers, pagination and recovery even when rendering fails.
-stdout of mcp is protocol-only. Secrets never enter responses or diagnostics.
-
-## Delivery and updates
-
-The implemented profile is in-process + local portable files + single-binary-v1.
-Project content is English. Every business call resolves its project alias; no global current project.
-Use get_context before writes, project_status for one overview, review_module for independent acceptance.
-Microfixes may use no tracker. Source/docstrings own code truth; tracked work owns intent and agent reports.
-Keep the full roadmap deferred until measured agent needs justify more capabilities.
-Package locally only after committing source. Release prepare defaults to preview and never pushes.
-The publisher checks qualification, tag/source/run identity, cargo-deny, no stubs and the actual payload.
-Never flip qualification to make a pipeline green. No pruning, service restart or host registration is implicit.
-Template updates are dry-run three-way plans. Resolve conflicts through normal Git review.
-Do not claim native/host tests passed without evidence from those runs.
+No daemon, database, background sampler or automatic paid fallback. One explicitly requested analysis may own a one-shot event-wait continuation for automatic Bridge delivery; it does not observe new development. Freeze the original destination and exact body before publication. Uncertain custody permits original-event status reconciliation only. Preserve the original planner contact from per-request host metadata, never model arguments or persistent server environment. All test/scratch paths follow the current task's project-specific temporary-directory policy. Existing installed state and legacy data are outside source work; no cleanup or installation is implicit. New qualification remains `not_verified` until actual checks justify it.

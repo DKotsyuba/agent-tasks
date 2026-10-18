@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.0.0
+
+- Replace the legacy work hierarchy and registration workflow with a flat agreed plan and on-demand Git-derived progress estimates.
+- Observe parallel worktrees and drafts without developer progress reports; preserve immutable evidence, safe admission replay and bounded report retention.
+- Render compact Russian progress and validate structured model answers locally across Agent Run harnesses.
+- Optionally deliver the final validated report through Bridge after one status call, including recovery without duplicate publication and normal MCP disconnect survival.
+- Capture the original plan creator's Bridge contact automatically from per-request host metadata; retain it across scope revisions and archives.
+- Store observer state separately; preserve existing installed binaries and legacy data. Model/profile/host qualification is separate from local checks.
+
 ## 0.10.0
 
 ### Added
