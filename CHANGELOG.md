@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.2
+
 - Include evidence-based partial readiness in the progress bar, independently of completed outcomes and integration.
 - Preserve unknown readiness as a range, and compare fully estimated snapshots in percentage points.
 - Require nullable model fields explicitly in the output schema while retaining old reports and immutable pending requests.
