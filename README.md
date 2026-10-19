@@ -13,7 +13,7 @@ schema_version = 1
 home = "/absolute/observer-home"
 socket = "/absolute/agent-run-home/api.sock"
 provider = "opencode-zen"
-model = "longcat-2.5-preview-free"
+model = "minimax-m3.1-flash-free"
 profile = "progress-summary"
 
 # Optional owner-report preferences; service replies always remain English:

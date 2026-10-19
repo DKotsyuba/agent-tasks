@@ -133,7 +133,7 @@ impl Config {
             provider: settings.provider.unwrap_or_else(|| "opencode-zen".into()),
             model: settings
                 .model
-                .unwrap_or_else(|| "longcat-2.5-preview-free".into()),
+                .unwrap_or_else(|| "minimax-m3.1-flash-free".into()),
             profile: settings
                 .profile
                 .unwrap_or_else(|| "progress-summary".into()),
