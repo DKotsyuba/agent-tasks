@@ -13,7 +13,7 @@ schema_version = 1
 home = "/absolute/observer-home"
 socket = "/absolute/agent-run-home/api.sock"
 provider = "opencode-zen"
-model = "space-bunny-free"
+model = "longcat-2.5-preview-free"
 profile = "progress-summary"
 
 # Optional owner-report preferences; service replies always remain English:
@@ -35,7 +35,7 @@ The configured route/profile must already be approved and available in Agent Run
 
 The optional `[summary]` table controls report language (`ru` or `en`) and a style `prompt` of at most 4096 UTF-8 bytes. Unknown languages/fields, oversized prompts and unsupported control characters are rejected. Preferences affect model wording and emphasis, never evidence rules, counters or the application-owned bullet layout. The exact preferences are frozen in each analysis and included in cache identity: changing them affects the next fresh status, while pending/pinned reports keep their original preferences.
 
-Reports contain a progress bar, unique observed new-commit count, up to three active outcomes and integration/change totals as bullet items. Commits are deduplicated by SHA across collected branches/worktrees and exclude the saved baseline. If Git collection is incomplete, the count is explicitly a lower bound (`>=N`); drafts never count as commits. Owner text can be localized; technical documentation, model instructions and service messages are English.
+Reports contain a progress bar, unique observed new-commit count, up to three concise outcomes showing local completed work and the remaining condition, and integration/change totals as bullet items. Locally completed sub-blocks remain visible without closing broader outcomes. Oversized changes retain bounded file-level implementation evidence; incomplete excerpts and unknown test applicability stay explicit. Commits are deduplicated by SHA across collected branches/worktrees and exclude the saved baseline. If Git collection is incomplete, the count is explicitly a lower bound (`>=N`); drafts never count as commits. Owner text can be localized; technical documentation, model instructions and service messages are English.
 
 Run `agent-tasks --config /absolute/config.toml mcp`. Standard output contains MCP protocol only. `doctor` and `contract export` do not initialize project data. Observer state is under `home/observer-v1`, separate from legacy data.
 

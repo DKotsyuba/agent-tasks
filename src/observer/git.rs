@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc,
@@ -54,7 +54,11 @@ const STATUS_CAP: usize = 64 * 1024;
 /// Maximum retained untracked path list bytes per worktree.
 const UNTRACKED_LIST_CAP: usize = 8 * 1024;
 /// Maximum retained bytes per eligible new text file.
-const DRAFT_FILE_CAP: usize = 4096;
+const DRAFT_FILE_CAP: usize = 12 * 1024;
+/// Maximum changed files expanded after an aggregate patch exceeds its bound.
+const DIFF_FILE_LIMIT: usize = 6;
+/// Shared per-diff fallback budget; unrelated large files cannot evict every small implementation.
+const DIFF_FILE_BYTES: usize = 24 * 1024;
 /// Maximum eligible new text files ingested per worktree.
 const DRAFT_FILE_LIMIT: usize = 12;
 /// Maximum untracked paths listed per worktree before the list is truncated.
@@ -364,9 +368,7 @@ fn parse_worktrees(raw: &str) -> Vec<(PathBuf, Option<String>)> {
                 head = is_full_sha(value.trim()).then(|| value.trim().to_owned());
             }
         }
-        if let Some(path) = path.filter(|path| !listing.iter().any(|(seen, _)| seen == path))
-            && listing.len() < WORKTREE_LIMIT
-        {
+        if let Some(path) = path.filter(|path| !listing.iter().any(|(seen, _)| seen == path)) {
             listing.push((path, head));
         }
     }
@@ -429,6 +431,17 @@ pub fn collect(
     baseline: Option<&Snapshot>,
     integration_ref: Option<&str>,
 ) -> Result<Snapshot> {
+    collect_focused(repository, baseline, integration_ref, &[])
+}
+
+/// Collect with active worker workdirs prioritized inside this repository; hints grant no new paths.
+/// All normal read, output, race and omission bounds remain in force.
+pub fn collect_focused(
+    repository: &Path,
+    baseline: Option<&Snapshot>,
+    integration_ref: Option<&str>,
+    workdirs: &[PathBuf],
+) -> Result<Snapshot> {
     let mut remaining = TOTAL_CAP;
     collect_until(
         repository,
@@ -437,6 +450,7 @@ pub fn collect(
         Instant::now() + READ_BUDGET,
         &mut remaining,
         None,
+        workdirs,
     )
 }
 
@@ -449,6 +463,7 @@ fn collect_until(
     deadline: Instant,
     remaining: &mut usize,
     probe: Option<&dyn Fn()>,
+    workdirs: &[PathBuf],
 ) -> Result<Snapshot> {
     let identity = resolve_identity(repository, integration_ref, deadline, remaining)?;
     if let Some(base) = baseline
@@ -466,6 +481,8 @@ fn collect_until(
         deadline,
         remaining: *remaining,
         omissions: Vec::new(),
+        focus: workdirs.to_vec(),
+        changed_paths: Vec::new(),
     };
     for round in 0..2 {
         collector.omissions.clear();
@@ -511,6 +528,10 @@ struct Collector {
     remaining: usize,
     /// Explicit partial-coverage facts accumulated in collection order.
     omissions: Vec<String>,
+    /// Canonical active worker paths, used only to order declared Git worktrees.
+    focus: Vec<PathBuf>,
+    /// Safe changed paths retained in discovery order for current-target content checks.
+    changed_paths: Vec<String>,
 }
 
 impl Collector {
@@ -577,6 +598,8 @@ impl Collector {
         self.target_sha = self.require_target_sha()?;
         let (tips, listing, branches) = self.ref_state()?;
         let before = self.fingerprint(&tips, &listing, &branches, &self.target_sha);
+        self.changed_paths.clear();
+        let draft_allowance = self.remaining;
         let mut drafts = Vec::new();
         self.draft_evidence(&listing, baseline, &mut drafts);
         if let Some(probe) = probe {
@@ -585,6 +608,7 @@ impl Collector {
         let mut evidence: Vec<Evidence> = Vec::new();
         self.target_evidence(baseline, &mut evidence);
         self.endpoint_patches(&branches, &listing, &mut evidence);
+        self.target_blobs(&mut evidence);
         if let Some(base) = baseline {
             self.commit_evidence(&tips, base, &mut evidence);
         }
@@ -593,7 +617,19 @@ impl Collector {
         let (end_tips, end_listing, end_branches) = self.ref_state()?;
         let end_target = self.require_target_sha()?;
         let mut end_drafts = Vec::new();
-        self.draft_evidence(&end_listing, baseline, &mut end_drafts);
+        // Validation repeats the same bounded draft allowance, rather than mistaking a spent
+        // collection budget for a content race. These bytes never enter the model input twice.
+        let mut validation = Collector {
+            root: self.root.clone(),
+            target_ref: self.target_ref.clone(),
+            target_sha: end_target.clone(),
+            deadline: self.deadline,
+            remaining: draft_allowance,
+            omissions: Vec::new(),
+            focus: self.focus.clone(),
+            changed_paths: Vec::new(),
+        };
+        validation.draft_evidence(&end_listing, baseline, &mut end_drafts);
         let changed = before
             != self.fingerprint(&end_tips, &end_listing, &end_branches, &end_target)
             || draft_bytes != serde_json::to_vec(&end_drafts)?;
@@ -665,12 +701,25 @@ impl Collector {
     /// Parses `git worktree list --porcelain` through the shared parser, surfacing the
     /// worktree-count bound as an explicit omission when the repository exceeds it.
     fn worktree_listing(&mut self) -> Result<Vec<(PathBuf, Option<String>)>> {
-        let listing = worktree_listing(&self.root.clone(), self.deadline, &mut self.remaining)?;
-        if listing.len() >= WORKTREE_LIMIT {
+        let mut listing = worktree_listing(&self.root.clone(), self.deadline, &mut self.remaining)?;
+        listing.sort_by_key(|(path, _)| {
+            (
+                self.focus.iter().position(|known| known == path).unwrap_or(
+                    if path == &self.root {
+                        self.focus.len()
+                    } else {
+                        usize::MAX
+                    },
+                ),
+                path.clone(),
+            )
+        });
+        if listing.len() > WORKTREE_LIMIT {
             self.omit(format!(
                 "More than {WORKTREE_LIMIT} worktrees exist; excess worktrees were not inspected."
             ));
         }
+        listing.truncate(WORKTREE_LIMIT);
         if listing.is_empty() {
             return Err(Error::new(
                 "git_source",
@@ -680,18 +729,40 @@ impl Collector {
         Ok(listing)
     }
 
-    /// Enumerates local branch heads as (bounded short name, full SHA) pairs, sorted by name;
+    /// Enumerates the most recently committed local branch heads before deterministic tie-breaking;
     /// malformed or excess entries become explicit omissions.
     fn branches(&mut self) -> Result<Vec<(String, String)>> {
-        let raw = self.git(
+        let ordered = self.git(
             &self.root.clone(),
             &[
                 "for-each-ref",
+                "--sort=refname",
+                "--sort=-committerdate",
+                &format!("--count={}", BRANCH_LIMIT + 1),
                 "--format=%(objectname)%00%(refname:short)",
                 "refs/heads",
             ],
             32 * 1024,
-        )?;
+        );
+        let raw = match ordered {
+            Ok(raw) => raw,
+            Err(error) if error.code == "git_source" => {
+                self.omit(
+                    "Branch recency was unavailable; unresolved objects remain partial evidence.",
+                );
+                self.git(
+                    &self.root.clone(),
+                    &[
+                        "for-each-ref",
+                        &format!("--count={}", BRANCH_LIMIT + 1),
+                        "--format=%(objectname)%00%(refname:short)",
+                        "refs/heads",
+                    ],
+                    32 * 1024,
+                )?
+            }
+            Err(error) => return Err(error),
+        };
         let mut branches: Vec<(String, String)> = Vec::new();
         for record in raw.lines() {
             let Some((sha, name)) = record.split_once('\0') else {
@@ -713,7 +784,6 @@ impl Collector {
             }
             branches.push((name.to_owned(), sha.to_owned()));
         }
-        branches.sort();
         Ok(branches)
     }
 
@@ -749,8 +819,7 @@ impl Collector {
                 );
                 if truncated {
                     self.omit(
-                        "Target net-change patch exceeded its bound; only the summary is retained."
-                            .to_owned(),
+                        "Target net-change patch has incomplete per-file coverage.".to_owned(),
                     );
                 }
                 if !text.trim().is_empty() {
@@ -813,9 +882,9 @@ impl Collector {
             .map(|_| sha)
     }
 
-    /// Captures bounded two-dot content diffs `target..tip` for every unique branch and
-    /// detached worktree endpoint; endpoints whose content already matches the target
-    /// produce no entry, which is itself the integrated-content signal.
+    /// Captures candidate changes from each endpoint's merge base, prioritizing active worktrees.
+    /// An older branch lacking newer target files is never presented as deleting those files.
+    /// Ancestor endpoints contribute no new candidate changes, including retained reverted branches.
     fn endpoint_patches(
         &mut self,
         branches: &[(String, String)],
@@ -825,29 +894,47 @@ impl Collector {
         if !self.room() {
             return;
         }
-        let mut endpoints: Vec<(String, String)> = branches.to_vec();
+        let mut endpoints: Vec<(String, String)> = Vec::new();
         for (_, head) in listing {
             if let Some(sha) = head
                 && !endpoints.iter().any(|(_, known)| known == sha)
             {
-                endpoints.push((format!("detached@{}", short(sha)), sha.clone()));
+                let label = branches
+                    .iter()
+                    .find(|(_, tip)| tip == sha)
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| format!("detached@{}", short(sha)));
+                endpoints.push((label, sha.clone()));
             }
         }
+        endpoints.extend_from_slice(branches);
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for (label, sha) in endpoints {
             if sha == self.target_sha || !seen.insert(sha.clone()) || !self.room() {
                 continue;
             }
+            let merge_base = match self.soft(
+                &self.root.clone(),
+                &["merge-base", &self.target_sha.clone(), &sha],
+                128,
+                "Candidate merge base",
+            ) {
+                Soft::Text(base) if is_full_sha(base.trim()) => base.trim().to_owned(),
+                _ => continue,
+            };
+            if merge_base == sha {
+                continue;
+            }
             let (text, truncated) = self.diff_pair(
                 &self.root.clone(),
                 &[],
-                &[&self.target_sha.clone(), &sha],
+                &[&merge_base, &sha],
                 "Endpoint patch",
             );
             let reference = format!("{label}@{sha}");
             if truncated {
                 self.omit(format!(
-                    "Endpoint patch {reference} exceeded its bound; only the change summary is retained."
+                    "Endpoint patch {reference} has incomplete per-file coverage."
                 ));
             }
             if !text.trim().is_empty() {
@@ -905,12 +992,7 @@ impl Collector {
         stat_args.extend(DIFF_EXCLUSIONS.iter().copied());
         let mut patch_args: Vec<&str> = vec!["diff"];
         patch_args.extend(prefix);
-        patch_args.extend([
-            "--patch-with-stat",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-        ]);
+        patch_args.extend(["--patch", "--no-ext-diff", "--no-textconv", "--no-color"]);
         patch_args.extend(range);
         patch_args.extend(["--", "."]);
         patch_args.extend(DIFF_EXCLUSIONS.iter().copied());
@@ -920,9 +1002,123 @@ impl Collector {
             (Soft::Text(stat), Soft::Text(patch)) if !patch.trim().is_empty() => {
                 (format!("{stat}\n{patch}"), false)
             }
-            (Soft::Text(stat), Soft::Overrun) => (stat, true),
+            (Soft::Text(stat), Soft::Overrun) => {
+                let chunks = self.file_patches(directory, prefix, range, what);
+                (format!("{stat}\n{chunks}"), true)
+            }
             (Soft::Text(stat), _) => (stat, false),
             (_, _) => (String::new(), false),
+        }
+    }
+
+    /// Preserve bounded file patches after aggregate overflow, preferring source over docs/locks.
+    /// Literal pathspecs, existing credential exclusions and cumulative budgets remain authoritative.
+    fn file_patches(
+        &mut self,
+        directory: &Path,
+        prefix: &[&str],
+        range: &[&str],
+        what: &str,
+    ) -> String {
+        let mut args = vec![
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-ext-diff",
+            "--no-textconv",
+        ];
+        args.extend(prefix);
+        args.extend(range);
+        args.extend(["--", "."]);
+        args.extend(DIFF_EXCLUSIONS.iter().copied());
+        let Soft::Text(raw) = self.soft(directory, &args, 16 * 1024, "Changed file inventory")
+        else {
+            return String::new();
+        };
+        let mut paths: Vec<&str> = raw
+            .split('\0')
+            .filter(|p| safe_relative(p) && !secret_path(p))
+            .collect();
+        paths.sort_by_key(|path| (source_priority(path), *path));
+        if paths.len() > DIFF_FILE_LIMIT {
+            self.omit(format!(
+                "{what}: per-file coverage includes only {DIFF_FILE_LIMIT} of {} changed files.",
+                paths.len()
+            ));
+        }
+        let mut remaining = DIFF_FILE_BYTES;
+        let mut chunks = Vec::new();
+        for path in paths.into_iter().take(DIFF_FILE_LIMIT) {
+            if !self.room() || remaining < 1024 {
+                self.omit(format!("{what}: per-file patch budget exhausted."));
+                break;
+            }
+            if !self.changed_paths.iter().any(|p| p == path) {
+                self.changed_paths.push(path.to_owned());
+            }
+            let literal = format!(":(literal){path}");
+            let mut args = vec![
+                "diff",
+                "--patch",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+            ];
+            args.extend(prefix);
+            args.extend(range);
+            args.extend(["--", literal.as_str()]);
+            if let Soft::Text(text) = self.soft(
+                directory,
+                &args,
+                PATCH_CAP.min(remaining),
+                &format!("{what}: {path}"),
+            ) {
+                remaining = remaining.saturating_sub(text.len());
+                chunks.push(text);
+            }
+        }
+        chunks.join("\n")
+    }
+
+    /// Observe actual current target blobs for candidate paths; absence is not proof of deletion.
+    /// Oversized, binary or unavailable blobs remain explicit unknown evidence.
+    fn target_blobs(&mut self, evidence: &mut Vec<Evidence>) {
+        for path in self.changed_paths.clone().into_iter().take(8) {
+            if !self.room() {
+                break;
+            }
+            let object = format!("{}:{path}", self.target_sha);
+            let literal = format!(":(literal){path}");
+            let present = self.git(
+                &self.root.clone(),
+                &[
+                    "ls-tree",
+                    "--name-only",
+                    &self.target_sha.clone(),
+                    "--",
+                    &literal,
+                ],
+                2048,
+            );
+            if matches!(&present, Ok(names) if names.trim().is_empty()) {
+                continue;
+            }
+            if let Soft::Text(text) = self.soft(
+                &self.root.clone(),
+                &["show", &object],
+                DRAFT_FILE_CAP,
+                "Current target file",
+            ) && !text.contains('\0')
+                && !text.trim().is_empty()
+            {
+                push(
+                    evidence,
+                    "target_blob",
+                    &self.root.display().to_string(),
+                    &format!("{}@{}:{path}", self.target_ref, self.target_sha),
+                    &text,
+                );
+            }
         }
     }
 
@@ -1136,7 +1332,7 @@ impl Collector {
         let (text, truncated) = self.diff_pair(path, prefix, &[], "Draft patch");
         if truncated {
             self.omit(format!(
-                "Draft patch {tag}!{locator} exceeded its bound; only the change summary is retained."
+                "Draft patch {tag}!{locator} has incomplete per-file coverage."
             ));
         }
         if text.trim().is_empty() {
@@ -1185,8 +1381,15 @@ impl Collector {
     }
 
     /// Reads one bounded eligible untracked file. Symlinks, credential-named paths, binaries,
-    /// non-UTF-8 content and size-bound excess are refused with an omission, never ingested.
+    /// non-UTF-8 content are refused. Oversized text retains labeled head/tail excerpts with
+    /// explicit omissions; retained file text consumes the same cumulative evidence budget.
     fn draft_file(&mut self, worktree: &Path, relative: &str) -> Option<String> {
+        if safe_relative(relative)
+            && !secret_path(relative)
+            && !self.changed_paths.iter().any(|path| path == relative)
+        {
+            self.changed_paths.push(relative.to_owned());
+        }
         if secret_path(relative) {
             self.omit(format!(
                 "Draft file {relative} matches credential patterns and was not read."
@@ -1218,22 +1421,54 @@ impl Collector {
             ));
             return None;
         }
-        let Ok(file) = std::fs::File::open(&canonical) else {
+        let limit = DRAFT_FILE_CAP.min(self.remaining.saturating_sub(256));
+        if limit < 1024 {
+            self.omit("Draft content budget exhausted.");
+            return None;
+        }
+        let Ok(mut file) = std::fs::File::open(&canonical) else {
             return None;
         };
         let mut bytes = Vec::new();
         if file
-            .take((DRAFT_FILE_CAP + 1) as u64)
+            .by_ref()
+            .take((limit + 1) as u64)
             .read_to_end(&mut bytes)
             .is_err()
         {
             return None;
         }
-        if bytes.len() > DRAFT_FILE_CAP {
-            self.omit(format!(
-                "Draft file {relative} exceeded its size bound and was skipped."
-            ));
-            return None;
+        if bytes.len() > limit {
+            self.omit(format!("Draft file {relative} exceeded its size bound; only labeled head/tail excerpts are retained."));
+            let half = limit / 2;
+            let head = &bytes[..half];
+            let head = match std::str::from_utf8(head) {
+                Ok(text) => text,
+                Err(error) if error.error_len().is_none() => {
+                    std::str::from_utf8(&head[..error.valid_up_to()]).ok()?
+                }
+                Err(_) => return None,
+            };
+            let mut tail = Vec::new();
+            if file.seek(SeekFrom::End(-(half as i64))).is_err()
+                || file.take(half as u64).read_to_end(&mut tail).is_err()
+            {
+                return None;
+            }
+            let tail = tail
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|at| &tail[at + 1..])
+                .unwrap_or(&[]);
+            if bytes.contains(&0) || tail.contains(&0) {
+                return None;
+            }
+            let tail = std::str::from_utf8(tail).ok()?;
+            let excerpt = format!(
+                "[Partial draft: file head; middle content omitted]\n{head}\n[Partial draft: file tail]\n{tail}"
+            );
+            self.remaining = self.remaining.saturating_sub(excerpt.len());
+            return Some(excerpt);
         }
         if bytes.contains(&0) {
             self.omit(format!(
@@ -1242,7 +1477,10 @@ impl Collector {
             return None;
         }
         match String::from_utf8(bytes) {
-            Ok(text) => Some(text),
+            Ok(text) => {
+                self.remaining = self.remaining.saturating_sub(text.len());
+                Some(text)
+            }
             Err(_) => {
                 self.omit(format!(
                     "Draft file {relative} is not valid UTF-8 and was skipped."
@@ -1262,6 +1500,27 @@ enum Soft {
     Overrun,
     /// The command failed or was unavailable; the omission carries the stable code.
     Failed,
+}
+
+/// Accept one literal repository-relative path without control characters or parent traversal.
+fn safe_relative(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= TEXT_CAP
+        && !Path::new(path).is_absolute()
+        && !Path::new(path)
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        && !path.chars().any(char::is_control)
+}
+
+/// Prefer implementation source, then tests, then other files during bounded fallback collection.
+fn source_priority(path: &str) -> u8 {
+    match Path::new(path).extension().and_then(|v| v.to_str()) {
+        Some("rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "java" | "c" | "h" | "cpp") => {
+            u8::from(path.contains("test"))
+        }
+        _ => 2,
+    }
 }
 
 /// Appends one evidence entry with the stable `<kind>:<reference>` citation id.
@@ -1717,6 +1976,121 @@ mod tests {
         fixture_git(root, &["rev-parse", "HEAD"])
     }
 
+    /// An oversized aggregate diff still preserves the changed implementation in smaller files.
+    #[test]
+    fn large_diff_retains_per_file_implementation() {
+        let temp = fixture();
+        let baseline = collect(temp.path(), None, None).unwrap();
+        std::fs::create_dir_all(temp.path().join("docs")).unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(
+            temp.path().join("docs/large.md"),
+            "Unrelated historical explanation.\n".repeat(1000),
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("src/feature.rs"),
+            "pub fn locally_ready() -> bool { true }\n",
+        )
+        .unwrap();
+        commit(
+            temp.path(),
+            "Implement a small feature alongside a large document",
+        );
+        let observed = collect(temp.path(), Some(&baseline), None).unwrap();
+        assert!(
+            observed
+                .evidence
+                .iter()
+                .any(|e| e.kind == "target_patch" && e.text.contains("pub fn locally_ready")),
+            "large aggregate output must not discard all code"
+        );
+    }
+
+    /// An older candidate cannot make a newer target-only file look like a candidate deletion.
+    #[test]
+    fn candidate_diff_does_not_delete_newer_target_files() {
+        let temp = fixture();
+        let baseline = collect(temp.path(), None, None).unwrap();
+        fixture_git(temp.path(), &["checkout", "-b", "older-candidate"]);
+        std::fs::write(
+            temp.path().join("candidate.rs"),
+            "pub fn candidate_ready() {}\n",
+        )
+        .unwrap();
+        commit(temp.path(), "Implement candidate behavior");
+        fixture_git(temp.path(), &["checkout", "main"]);
+        std::fs::write(
+            temp.path().join("new_contract.rs"),
+            "pub fn newer_target_contract() {}\n",
+        )
+        .unwrap();
+        commit(temp.path(), "Add a newer target contract");
+        let observed = collect(temp.path(), Some(&baseline), None).unwrap();
+        let candidate = observed
+            .evidence
+            .iter()
+            .find(|e| e.kind == "endpoint_patch" && e.reference.starts_with("older-candidate@"))
+            .unwrap();
+        assert!(candidate.text.contains("candidate_ready"));
+        assert!(
+            !candidate.text.contains("-pub fn newer_target_contract"),
+            "older target absence is not a candidate deletion"
+        );
+    }
+
+    /// A modest new source file larger than the old 4 KiB limit remains observable as draft code.
+    #[test]
+    fn medium_untracked_source_is_not_discarded_whole() {
+        let temp = fixture();
+        let baseline = collect(temp.path(), None, None).unwrap();
+        std::fs::write(
+            temp.path().join("environment.rs"),
+            format!(
+                "{}pub fn local_environment() {{}}\n",
+                "// Relevant environment implementation.\n".repeat(180)
+            ),
+        )
+        .unwrap();
+        let observed = collect(temp.path(), Some(&baseline), None).unwrap();
+        assert!(
+            observed
+                .evidence
+                .iter()
+                .any(|e| e.kind == "draft_text" && e.text.contains("local_environment")),
+            "bounded source must not disappear because a coarse file limit was hit"
+        );
+    }
+
+    /// Large new files preserve bounded local-code excerpts instead of disappearing entirely.
+    #[test]
+    fn oversized_draft_keeps_labeled_tail_evidence() {
+        let temp = fixture();
+        let baseline = collect(temp.path(), None, None).unwrap();
+        std::fs::write(
+            temp.path().join("large_environment.rs"),
+            format!(
+                "{}pub fn locally_observable_tail() {{}}\n",
+                "// Relevant environment input.\n".repeat(900)
+            ),
+        )
+        .unwrap();
+        let observed = collect(temp.path(), Some(&baseline), None).unwrap();
+        let content = observed
+            .evidence
+            .iter()
+            .find(|row| row.kind == "draft_text")
+            .unwrap();
+        assert!(content.text.contains("locally_observable_tail"));
+        assert!(content.text.contains("middle content omitted"));
+        assert!(
+            observed
+                .omissions
+                .iter()
+                .any(|text| text.contains("size bound"))
+        );
+    }
+
     /// Identity pins the canonical common directory/checkout and validates integration refs.
     #[test]
     fn identify_pins_common_dir_and_validates_integration_refs() {
@@ -1902,12 +2276,13 @@ mod tests {
             !reverted.evidence.iter().any(|e| e.kind == "target_patch"),
             "reverted net target change is empty against the baseline"
         );
-        let patch = reverted
-            .evidence
-            .iter()
-            .find(|e| e.kind == "endpoint_patch" && e.reference.starts_with("feature@"))
-            .unwrap();
-        assert!(patch.text.contains("feature line"));
+        assert!(
+            !reverted
+                .evidence
+                .iter()
+                .any(|e| e.kind == "endpoint_patch" && e.reference.starts_with("feature@")),
+            "an ancestor branch cannot resurrect reverted work"
+        );
         assert_ne!(merged.semantic_digest, reverted.semantic_digest);
     }
 
@@ -1954,6 +2329,7 @@ mod tests {
             Instant::now() + READ_BUDGET,
             &mut remaining,
             None,
+            &[],
         )
         .unwrap();
         assert!(
@@ -1984,6 +2360,7 @@ mod tests {
                     fixture_git(temp.path(), &["branch", "raced"]);
                 }
             }),
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -2016,6 +2393,7 @@ mod tests {
                 counter.set(round + 1);
                 fixture_git(temp.path(), &["branch", &format!("raced-{round}")]);
             }),
+            &[],
         )
         .unwrap();
         assert!(

@@ -13,7 +13,7 @@ use state::{Archive, Bundle, Locked, Outcome, Pending, Plan, Report};
 use std::{fs, io::Read, path::PathBuf};
 
 /// Prompt semantics included in cache identities; bump after changing inference rules.
-const PROMPT_REVISION: u32 = 4;
+const PROMPT_REVISION: u32 = 5;
 /// Maximum complete encoded socket request, leaving room below Agent Run's 1 MiB wire cap.
 const REQUEST_CAP: usize = 900 * 1024;
 
@@ -129,7 +129,9 @@ impl Config {
                 .socket
                 .unwrap_or_else(|| user_home.join(".agent-run/api.sock")),
             provider: settings.provider.unwrap_or_else(|| "opencode-zen".into()),
-            model: settings.model.unwrap_or_else(|| "space-bunny-free".into()),
+            model: settings
+                .model
+                .unwrap_or_else(|| "longcat-2.5-preview-free".into()),
             profile: settings
                 .profile
                 .unwrap_or_else(|| "progress-summary".into()),
@@ -536,11 +538,6 @@ pub fn status(config: &Config, args: StatusArgs) -> Result<String> {
                 "Save an agreed plan before requesting status.",
             )
         })?;
-        let mut snapshot = git::collect(
-            &args.repository,
-            Some(&plan.baseline),
-            Some(&plan.baseline.repository.integration_ref),
-        )?;
         let excluded = locked
             .state
             .reports
@@ -555,6 +552,25 @@ pub fn status(config: &Config, args: StatusArgs) -> Result<String> {
             )
             .collect::<Vec<_>>();
         let developers=client.developers(&identity.common_dir,&excluded).unwrap_or_else(|e|json!({"items":[],"complete":false,"omissions":[format!("Agent Run activity unavailable ({})",e.code)]}));
+        let focus: Vec<PathBuf> = developers
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|row| {
+                matches!(
+                    row["status"].as_str(),
+                    Some("created" | "starting" | "running" | "cancelling")
+                )
+            })
+            .filter_map(|row| row["workdir"].as_str().map(PathBuf::from))
+            .collect();
+        let mut snapshot = git::collect_focused(
+            &args.repository,
+            Some(&plan.baseline),
+            Some(&plan.baseline.repository.integration_ref),
+            &focus,
+        )?;
         if let Some(items) = developers.get("items").and_then(Value::as_array) {
             for item in items {
                 if let Some(id) = item.get("agent_id").and_then(Value::as_str) {
@@ -599,6 +615,7 @@ pub fn status(config: &Config, args: StatusArgs) -> Result<String> {
             ));
         }
         let bundle = Bundle {
+            prompt_revision: PROMPT_REVISION,
             summary: settings.summary,
             plan,
             snapshot,

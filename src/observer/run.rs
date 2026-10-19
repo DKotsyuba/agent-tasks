@@ -55,6 +55,12 @@ pub struct Receipt {
 struct Agent {
     /// Exact stable run identity.
     agent_id: String,
+    /// Immutable upstream creation time; absent historical fixtures retain deterministic ordering.
+    #[serde(default)]
+    created_at: Option<f64>,
+    /// Latest execution start, distinct from the stable agent's original creation time.
+    #[serde(default)]
+    started_at: Option<f64>,
     /// Current execution sequence, which may differ after an explicit resume.
     sequence: u32,
     /// Actual workdir, absent when upstream has no repository association.
@@ -179,11 +185,40 @@ impl Client {
     pub fn developers(&self, common_dir: &Path, excluded: &[String]) -> Result<Value> {
         let deadline = Instant::now() + OBSERVATION_BUDGET;
         let common_dir = common_dir.canonicalize().map_err(io_error)?;
-        let (agents, mut complete) = self.agents(deadline, None)?;
+        let (mut agents, mut complete) = self.agents(deadline, None)?;
+        agents.sort_by(|a, b| {
+            worker_priority(&a.status)
+                .cmp(&worker_priority(&b.status))
+                .then_with(|| {
+                    b.created_at
+                        .partial_cmp(&a.created_at)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| b.agent_id.cmp(&a.agent_id))
+        });
         let mut omissions = Vec::new();
         if !complete {
             omissions.push(json!({"reason": "agent_inventory_incomplete"}));
         }
+        let active_since = agents
+            .iter()
+            .filter(|agent| {
+                worker_priority(&agent.status) == 0
+                    && !excluded.contains(&agent.agent_id)
+                    && !matches!(agent.profile.as_str(), "summary" | "progress-summary")
+                    && !agent
+                        .task_summary
+                        .starts_with("You are a read-only progress summarizer.")
+            })
+            .filter_map(|agent| {
+                let identity =
+                    super::git::identify(agent.workdir.as_deref()?, Some("HEAD")).ok()?;
+                (identity.common_dir == common_dir)
+                    .then_some(agent.started_at.or(agent.created_at))
+                    .flatten()
+            })
+            .min_by(f64::total_cmp);
+        let mut older_failures = 0;
         let mut items = Vec::new();
         for agent in agents {
             if Instant::now() >= deadline {
@@ -209,6 +244,17 @@ impl Client {
             if identity.common_dir != common_dir {
                 continue;
             }
+            if worker_priority(&agent.status) == 2
+                && active_since.is_some_and(|since| {
+                    agent
+                        .started_at
+                        .or(agent.created_at)
+                        .is_some_and(|created| created < since)
+                })
+            {
+                older_failures += 1;
+                continue;
+            }
             if items.len() == DEVELOPER_LIMIT || Instant::now() >= deadline {
                 complete = false;
                 omissions.push(json!({"agent_id": agent.agent_id, "reason": "developer_budget"}));
@@ -232,7 +278,7 @@ impl Client {
             }
             match self.call_until(
                 "transcript",
-                &json!({"agent_id": agent.agent_id, "view": "blocks", "tail_blocks": 4}),
+                &json!({"agent_id": agent.agent_id, "view": "blocks", "tail_blocks": 32}),
                 deadline.min(Instant::now() + CALL_BUDGET),
             ) {
                 Ok(transcript) => match transcript_evidence(transcript, &agent.agent_id) {
@@ -256,7 +302,24 @@ impl Client {
                     );
                 }
             }
+            if agent.status == "succeeded" && agent.answer_sha256.is_some() {
+                match self.answer_content(&agent, deadline) {
+                    Ok(content) => {
+                        let (excerpt, omitted) = bounded_text(&content, TRANSCRIPT_BYTES);
+                        row["sealed_answer"] = json!({"content":excerpt,"source_sha256":agent.answer_sha256,"sequence":agent.sequence,"omitted_bytes":omitted,"meaning":"Retained answer bytes verified; assertions about tests/source still require matching evidence."});
+                        complete &= omitted == 0;
+                    }
+                    Err(error) => {
+                        complete = false;
+                        omissions.push(json!({"agent_id":agent.agent_id,"reason":"worker_answer_unavailable","code":error.code}));
+                    }
+                }
+            }
             items.push(row);
+        }
+        if older_failures > 0 {
+            omissions.push(json!({"reason":"older_terminal_failures_outside_current_episode","count":older_failures}));
+            complete = false;
         }
         items.sort_by(|left, right| left["agent_id"].as_str().cmp(&right["agent_id"].as_str()));
         omissions.sort_by_key(Value::to_string);
@@ -282,16 +345,30 @@ impl Client {
         if !execution_state(&before.status)? {
             return Ok(None);
         }
+        let content = self.answer_content(&before, deadline)?;
+        let output: Value = serde_json::from_str(&content)
+            .map_err(|_| Error::new("analysis_invalid", "Analysis answer is not valid JSON."))?;
+        if output.get("analysis_input_id").and_then(Value::as_str) != Some(input_id)
+            || output.get("plan_revision").and_then(Value::as_u64) != Some(plan_revision)
+        {
+            return Err(answer_mismatch());
+        }
+        Ok(Some(output))
+    }
+
+    /// Read one successful execution's sealed text with exact sequence/hash fences before and after.
+    /// The returned bytes may contain untrusted developer assertions, never acceptance authority.
+    fn answer_content(&self, before: &Agent, deadline: Instant) -> Result<String> {
         let hash = before
             .answer_sha256
             .as_deref()
             .ok_or_else(answer_unavailable)?;
         let answer = self.call_until(
             "answer",
-            &json!({"agent_id": receipt.agent_id}),
+            &json!({"agent_id": before.agent_id}),
             deadline.min(Instant::now() + CALL_BUDGET),
         )?;
-        if answer.get("agent_id").and_then(Value::as_str) != Some(receipt.agent_id.as_str()) {
+        if answer.get("agent_id").and_then(Value::as_str) != Some(before.agent_id.as_str()) {
             return Err(answer_mismatch());
         }
         if answer.get("available").and_then(Value::as_bool) != Some(true)
@@ -310,18 +387,17 @@ impl Client {
         if format!("{:x}", Sha256::digest(content.as_bytes())) != hash {
             return Err(answer_mismatch());
         }
-        let after = self.execution(receipt, deadline)?;
+        let after = self.execution(
+            &Receipt {
+                agent_id: before.agent_id.clone(),
+                sequence: before.sequence,
+            },
+            deadline,
+        )?;
         if after.status != "succeeded" || after.answer_sha256.as_deref() != Some(hash) {
             return Err(answer_mismatch());
         }
-        let output: Value = serde_json::from_str(content)
-            .map_err(|_| Error::new("analysis_invalid", "Analysis answer is not valid JSON."))?;
-        if output.get("analysis_input_id").and_then(Value::as_str) != Some(input_id)
-            || output.get("plan_revision").and_then(Value::as_u64) != Some(plan_revision)
-        {
-            return Err(answer_mismatch());
-        }
-        Ok(Some(output))
+        Ok(content.to_owned())
     }
 
     /// Performs one connection/frame exchange under a caller's absolute deadline.
@@ -703,6 +779,42 @@ fn answer_mismatch() -> Error {
     )
 }
 
+/// Active execution evidence wins observation capacity; successful answers precede old failures.
+fn worker_priority(status: &str) -> u8 {
+    match status {
+        "created" | "starting" | "running" | "cancelling" => 0,
+        "succeeded" => 1,
+        _ => 2,
+    }
+}
+
+/// Prefer concrete check results and final summaries; this selects evidence, never certifies tests.
+fn transcript_priority(message: &Value) -> u8 {
+    let content = message.get("content").and_then(Value::as_str).unwrap_or("");
+    if message.get("role").and_then(Value::as_str) == Some("tool_result")
+        && [
+            "test result:",
+            " passed",
+            " failed",
+            "Exit code:",
+            "exit_code",
+            "returncode",
+        ]
+        .iter()
+        .any(|needle| content.contains(needle))
+    {
+        0
+    } else if message.get("role").and_then(Value::as_str) == Some("assistant")
+        && ["CHECKS", "Checks:", "UNFINISHED", "Remaining"]
+            .iter()
+            .any(|needle| content.contains(needle))
+    {
+        1
+    } else {
+        2
+    }
+}
+
 /// Keeps stable health state only; silence durations and observation clocks are omitted.
 fn stable_health(health: Option<&Value>) -> Value {
     match health {
@@ -751,7 +863,14 @@ fn transcript_evidence(value: Value, agent_id: &str) -> Result<(Value, bool)> {
         .ok_or_else(protocol_data)?;
     let mut bytes_left = TRANSCRIPT_BYTES;
     let mut events = Vec::new();
-    for message in messages.iter().take(TRANSCRIPT_EVENTS) {
+    let mut selected: Vec<_> = messages.iter().collect();
+    selected.sort_by_key(|message| {
+        (
+            transcript_priority(message),
+            std::cmp::Reverse(message.get("seq").and_then(Value::as_u64).unwrap_or(0)),
+        )
+    });
+    for message in selected.into_iter().take(TRANSCRIPT_EVENTS) {
         let content = message
             .get("content")
             .and_then(Value::as_str)
@@ -817,6 +936,7 @@ fn transcript_evidence(value: Value, agent_id: &str) -> Result<(Value, bool)> {
         }
         events.push(event);
     }
+    events.sort_by_key(|message| message["seq"].as_u64());
     let omitted_messages = messages.len() - events.len();
     complete &= omitted_messages == 0;
     Ok((
@@ -1443,6 +1563,151 @@ mod tests {
             "run_protocol"
         );
         fake.finish();
+    }
+
+    /// Active work wins bounded transcript capacity over older failed executions.
+    #[test]
+    fn developer_priority_preserves_current_work() {
+        let _guard = SOCKETS.lock().unwrap();
+        let repository = tempfile::tempdir_in(scratch()).unwrap();
+        fixture_git(repository.path(), &["init", "--quiet", "-b", "main"]);
+        fixture_git(
+            repository.path(),
+            &["commit", "--quiet", "--allow-empty", "-m", "Baseline"],
+        );
+        let mut rows: Vec<Value> = (0..17)
+            .map(|i| {
+                let mut row = agent(&format!("old-{i:02}"), 1, "failed", None);
+                row["workdir"] = json!(repository.path());
+                row["created_at"] = json!(i);
+                row
+            })
+            .collect();
+        let mut active = agent("current", 1, "running", None);
+        active["workdir"] = json!(repository.path());
+        active["created_at"] = json!(99);
+        rows.push(active);
+        let mut script = vec![("list_agents", page(rows, 0, 18, None))];
+        let ids = std::iter::once("current".to_owned());
+        for id in ids {
+            script.push(("transcript",json!({"agent_id":id,"messages":[{"seq":1,"role":"assistant","content":"Current implementation and remaining work","content_complete":true}],"complete":true})));
+        }
+        let fake = Fake::new(script);
+        let observed = fake
+            .client
+            .developers(&repository.path().join(".git"), &[])
+            .unwrap();
+        assert!(
+            observed["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["agent_id"] == "current"),
+            "active work must not be displaced by old failures"
+        );
+        fake.finish();
+    }
+
+    /// Worker handoff text is included only after its sealed bytes and execution identity verify.
+    #[test]
+    fn developer_answer_preserves_sealed_check_context() {
+        let _guard = SOCKETS.lock().unwrap();
+        let repository = tempfile::tempdir_in(scratch()).unwrap();
+        fixture_git(repository.path(), &["init", "--quiet", "-b", "main"]);
+        fixture_git(
+            repository.path(),
+            &["commit", "--quiet", "--allow-empty", "-m", "Baseline"],
+        );
+        let content =
+            "CHECKS: source tree abc; test result: ok. 64 passed. Remaining: Rust consumers.";
+        let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+        let mut worker = agent("worker", 1, "succeeded", Some(&hash));
+        worker["workdir"] = json!(repository.path());
+        let mut result = answer(content);
+        result["agent_id"] = json!("worker");
+        let fake = Fake::new(vec![
+            ("list_agents", page(vec![worker.clone()], 0, 1, None)),
+            (
+                "transcript",
+                json!({"agent_id":"worker","messages":[],"complete":true}),
+            ),
+            ("answer", result),
+            ("list_agents", page(vec![worker], 0, 1, None)),
+        ]);
+        let observed = fake
+            .client
+            .developers(&repository.path().join(".git"), &[])
+            .unwrap();
+        assert_eq!(observed["items"][0]["sealed_answer"]["content"], content);
+        assert_eq!(observed["items"][0]["sealed_answer"]["source_sha256"], hash);
+        assert!(
+            observed["items"][0]["sealed_answer"]["meaning"]
+                .as_str()
+                .unwrap()
+                .contains("assertions")
+        );
+        fake.finish();
+    }
+
+    /// A plausible developer handoff with forged bytes is omitted instead of becoming check evidence.
+    #[test]
+    fn developer_answer_rejects_changed_content() {
+        let _guard = SOCKETS.lock().unwrap();
+        let repository = tempfile::tempdir_in(scratch()).unwrap();
+        fixture_git(repository.path(), &["init", "--quiet", "-b", "main"]);
+        fixture_git(
+            repository.path(),
+            &["commit", "--quiet", "--allow-empty", "-m", "Baseline"],
+        );
+        let content = "CHECKS: 64 passed";
+        let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+        let mut worker = agent("worker", 1, "succeeded", Some(&hash));
+        worker["workdir"] = json!(repository.path());
+        let mut result = answer(content);
+        result["agent_id"] = json!("worker");
+        result["content"] = json!("Forged success claim");
+        let fake = Fake::new(vec![
+            ("list_agents", page(vec![worker], 0, 1, None)),
+            (
+                "transcript",
+                json!({"agent_id":"worker","messages":[],"complete":true}),
+            ),
+            ("answer", result),
+        ]);
+        let observed = fake
+            .client
+            .developers(&repository.path().join(".git"), &[])
+            .unwrap();
+        assert!(observed["items"][0].get("sealed_answer").is_none());
+        assert_eq!(observed["complete"], false);
+        assert!(
+            observed["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["code"] == "answer_mismatch")
+        );
+        fake.finish();
+    }
+
+    /// Large source-reading output cannot consume the budget before a concrete recent test result.
+    #[test]
+    fn transcript_prioritizes_check_results_with_explicit_omissions() {
+        let (view,complete)=transcript_evidence(json!({"agent_id":"worker","complete":true,"messages":[
+            {"seq":1,"role":"tool_result","name":"Read","content":"source line\n".repeat(TRANSCRIPT_BYTES),"content_complete":true},
+            {"seq":2,"role":"tool_result","name":"command","content":"Exit code: 0\ntest result: ok. 64 passed; 0 failed","content_complete":true}
+        ]}),"worker").unwrap();
+        assert!(
+            view["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["content"].as_str().unwrap().contains("64 passed"))
+        );
+        assert!(
+            !complete,
+            "discarded source-reading history must remain disclosed"
+        );
     }
 
     /// Paginates native workers, excludes analyzer/profile runs, and removes telemetry.
