@@ -1,5 +1,11 @@
 # Observer qualification
 
+## 1.1.2 partial readiness
+
+The offline source gate passed 128 tests, formatting, strict Clippy and rustdoc. Readiness now includes evidenced local sub-blocks while completed-outcome and integration counts remain independent. Unknown estimates produce ranges, and old reports remain readable. A sealed MiniMax seven-outcome answer was replayed against the current application: two complete implementations, positive credit for a genuinely partial port, and no positive credit for missing, reverted or unrelated work. The retained provider answer and frozen request were unchanged; the replay used a disposable observation cache without another inference.
+
+Earlier positive credit based only on reverted history was correctly rejected before the prompt was clarified. A subsequent answer had valid readiness estimates but overlong findings; compact attention text is now bounded by the application while validated full detail is retained. Control characters, invalid citations and unsupported percentages remain rejection conditions. Fresh installed-host delivery is a separate deployment check; the finite replay is not a broad model-quality guarantee.
+
 ## 1.1.1 corrections
 
 The pinned offline source gate passed 123 tests, formatting, strict Clippy, rustdoc and tool discovery. Current defaults use `opencode-zen/minimax-m3.1-flash-free` with the existing read-only `progress-summary` profile. This route passed the seven-outcome real-provider synthetic harness: two implementations, one integrated, and zero false completion marks for misleading text, partial code, a revert, a draft or unrelated work. This is a finite semantic sample, not a large-repository quality guarantee.
