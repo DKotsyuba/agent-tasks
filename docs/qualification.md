@@ -1,4 +1,14 @@
-# Observer 1.0 qualification
+# Observer qualification
+
+## 1.1.1 corrections
+
+The pinned offline source gate passed 123 tests, formatting, strict Clippy, rustdoc and tool discovery. Current defaults use `opencode-zen/minimax-m3.1-flash-free` with the existing read-only `progress-summary` profile. This route passed the seven-outcome real-provider synthetic harness: two implementations, one integrated, and zero false completion marks for misleading text, partial code, a revert, a draft or unrelated work. This is a finite semantic sample, not a large-repository quality guarantee.
+
+Worker messages are supplied once as citable sources. Requests separately enforce the existing API's 512 KiB task-text limit and the encoded transport ceiling. A live large-repository control request was admitted after duplicate context was removed; its model answer omitted required outcome fields and was correctly rejected. No accepted large-repository summary is claimed from that sample.
+
+The historical qualification below describes version 1.0 and its then-selected model; it does not qualify retired routes for current use.
+
+## 1.0 historical qualification
 
 Validated on 2026-10-18 on macOS 27 arm64 with pinned Rust 1.98.1. The release retains legacy 0.10 history as its parent; source, authenticated CI payload publication and owner installation remain distinct checks. Qualified native target: aarch64-apple-darwin. Qualified independent MCP client: Inspector CLI 2.7.0 with Node 24.4.0.
 
@@ -26,7 +36,7 @@ Fresh Inspector processes retained all three tools in legacy and modern negotiat
 
 ## Real model and minimal profile
 
-The selected configurable route is `opencode-zen/space-bunny-free`. The installed `progress-summary` profile passed the actual seven-outcome semantic harness: two coherent committed implementations, one integrated; misleading completion text, a partial implementation, a reverted implementation with its retained old branch, a draft and unrelated work produced zero false completion marks in this finite sample. Pinned compact verification checked counts, separate report lines and bounded presentation.
+The version 1.0 route was `opencode-zen/space-bunny-free`. The installed `progress-summary` profile passed the actual seven-outcome semantic harness: two coherent committed implementations, one integrated; misleading completion text, a partial implementation, a reverted implementation with its retained old branch, a draft and unrelated work produced zero false completion marks in this finite sample. Pinned compact verification checked counts, separate report lines and bounded presentation.
 
 The profile selects no skills or developer MCP servers, disables the known global search-server cap, and requests no source writes or network. OpenCode native permissions deny editing by default and its runner refuses shell approval asks for read-only profiles. These are native permission controls, not a claim of OS filesystem/network isolation. Actual analysis needed only the supplied snapshot and its private finish callback. Existing runs retain their frozen settings; other deployments must inspect their own global selections.
 
