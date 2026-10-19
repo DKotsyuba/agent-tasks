@@ -13,7 +13,7 @@ use state::{Archive, Bundle, Locked, Outcome, Pending, Plan, Report};
 use std::{fs, io::Read, path::PathBuf};
 
 /// Prompt semantics included in cache identities; bump after changing inference rules.
-const PROMPT_REVISION: u32 = 8;
+const PROMPT_REVISION: u32 = 9;
 /// Maximum complete encoded socket request, leaving room below Agent Run's 1 MiB wire cap.
 const REQUEST_CAP: usize = 900 * 1024;
 /// Maximum task text accepted by the existing Agent Run API, before JSON encoding.

@@ -2500,6 +2500,13 @@ async fn live_semantic_qualification() {
                 "False completion or missed coherent implementation: {row}"
             );
         }
+        for id in ["o2", "o4", "o6"] {
+            let row = rows.iter().find(|row| row["id"] == id).unwrap();
+            assert!(
+                row["progress_percent"].is_null() || row["progress_percent"] == 0,
+                "missing, reverted or unrelated code must not earn current progress: {row}"
+            );
+        }
         let partial = rows.iter().find(|row| row["id"] == "o3").unwrap();
         assert!(
             partial["progress_percent"]
