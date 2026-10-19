@@ -604,19 +604,20 @@ impl Collector {
         let (tips, listing, branches) = self.ref_state()?;
         let before = self.fingerprint(&tips, &listing, &branches, &self.target_sha);
         self.changed_paths.clear();
+        // Small post-baseline commit facts must not be starved by large patch bodies.
+        let mut evidence: Vec<Evidence> = Vec::new();
+        if let Some(base) = baseline {
+            self.commit_evidence(&tips, base, &mut evidence);
+        }
         let draft_allowance = self.remaining;
         let mut drafts = Vec::new();
         self.draft_evidence(&listing, baseline, &mut drafts);
         if let Some(probe) = probe {
             probe();
         }
-        let mut evidence: Vec<Evidence> = Vec::new();
         self.target_evidence(baseline, &mut evidence);
         self.endpoint_patches(&branches, &listing, &mut evidence);
         self.target_blobs(&mut evidence);
-        if let Some(base) = baseline {
-            self.commit_evidence(&tips, base, &mut evidence);
-        }
         let draft_bytes = serde_json::to_vec(&drafts)?;
         evidence.extend(drafts);
         let mut end_drafts = Vec::new();
@@ -806,7 +807,8 @@ impl Collector {
 
     /// Captures integration-target facts: current code inventory (`target_content`), the
     /// baseline-to-current net change (`target_patch`), recent history subjects
-    /// (`target_history`) and the target commit message. History subjects alone are never
+    /// (`target_history`). Commit messages are retained only for post-baseline progress;
+    /// history subjects alone are never
     /// integration proof; the inventory and the net patch describe current target code.
     fn target_evidence(&mut self, baseline: Option<&Snapshot>, evidence: &mut Vec<Evidence>) {
         if !self.room() {
@@ -866,7 +868,6 @@ impl Collector {
                 push(evidence, "target_history", &root, &reference, &text);
             }
         }
-        self.commit_message(&target, evidence);
     }
 
     /// Recovers the baseline snapshot's integration target SHA from its `target_history`
@@ -1188,7 +1189,6 @@ impl Collector {
                 }
             }
         }
-        reachable.remove(self.target_sha.as_str());
         let total = reachable.len();
         for (index, sha) in reachable.into_iter().enumerate() {
             if index >= COMMIT_LIMIT {
@@ -2249,6 +2249,29 @@ mod tests {
         );
     }
 
+    /// An unchanged integration tip is historical context, not a newly performed commit.
+    #[test]
+    fn unchanged_baseline_does_not_report_a_new_commit() {
+        let temp = fixture();
+        let baseline = collect(temp.path(), None, None).unwrap();
+        let current = collect(temp.path(), Some(&baseline), None).unwrap();
+        assert!(
+            !current.evidence.iter().any(|row| row.kind == "commit"),
+            "target history is not post-plan work"
+        );
+        std::fs::write(temp.path().join("new.rs"), "pub fn new_work() {}\n").unwrap();
+        let sha = commit(temp.path(), "Add new work");
+        let updated = collect(temp.path(), Some(&baseline), None).unwrap();
+        assert_eq!(
+            updated
+                .evidence
+                .iter()
+                .filter(|row| row.kind == "commit" && row.reference == sha)
+                .count(),
+            1
+        );
+    }
+
     /// Identity pins the canonical common directory/checkout and validates integration refs.
     #[test]
     fn identify_pins_common_dir_and_validates_integration_refs() {
@@ -2319,7 +2342,6 @@ mod tests {
         assert!(facts.contains("outside.lnk"), "{facts}");
         let kinds: Vec<_> = snapshot.evidence.iter().map(|e| e.kind.as_str()).collect();
         for kind in [
-            "commit",
             "target_content",
             "target_history",
             "staged",
@@ -2454,6 +2476,7 @@ mod tests {
         let side_tip = commit(temp.path(), "feat: side work");
         fixture_git(temp.path(), &["checkout", "main"]);
         let snapshot = collect(temp.path(), None, None).unwrap();
+        let target_tip = commit(temp.path(), "feat: current work");
         std::fs::remove_file(temp.path().join(format!(
             ".git/objects/{}/{}",
             &side_tip[..2],
@@ -2468,8 +2491,11 @@ mod tests {
                 .any(|omission| omission.contains("Commit enumeration"))
         );
         assert!(
-            partial.evidence.iter().any(|e| e.kind == "commit"),
-            "readable target commit facts remain"
+            partial
+                .evidence
+                .iter()
+                .any(|e| e.kind == "commit" && e.reference == target_tip),
+            "readable post-baseline target commit facts remain"
         );
     }
 

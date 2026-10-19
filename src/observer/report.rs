@@ -410,7 +410,12 @@ pub fn compact(report: &Report, previous: Option<&Report>) -> Result<String> {
         .snapshot
         .evidence
         .iter()
-        .filter(|source| source.kind == "commit")
+        .filter(|source| {
+            source.kind == "commit"
+                && !report.bundle.plan.baseline.tips.contains(&source.reference)
+                && report.bundle.plan.baseline.target_sha.as_deref()
+                    != Some(source.reference.as_str())
+        })
         .map(|source| source.reference.as_str())
         .collect::<BTreeSet<_>>()
         .len();
