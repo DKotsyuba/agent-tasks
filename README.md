@@ -58,4 +58,6 @@ Done is an estimate of implementation, not test acceptance. Draft-only work is i
 
 Use the pinned Rust toolchain and prepared locked dependencies. `cargo xtask check` checks formatting, Clippy, tests, rustdoc and the actual catalog snapshot. Scratch and test temporary paths must use the project-authorized temporary directory.
 
+Version 1.1 reads existing observer reports with the original Russian defaults. Retain pre-upgrade configuration and per-repository observer snapshots for executable rollback: older binaries may reject the new settings or frozen preferences. Preserve newer records rather than deleting them to start an older binary.
+
 Version 1.0 keeps observer state separate from retained legacy data. Installation and managed model/Bridge configuration are explicit operations. Source and native-client qualification cover macOS arm64 and MCP Inspector CLI 2.7.0; the real automatic-message scenario was also observed in Codex Desktop. See [architecture](docs/architecture.md), [qualification](docs/qualification.md), and [activation integration](docs/integration.md) for exact evidence and limits.
