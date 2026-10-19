@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Preserve bounded per-file implementation and large-draft excerpts instead of discarding complete change sets on overflow; prioritize active worktrees and compare candidates to their merge base.
+- Retain partial worker observations across unrelated inventory movement and include sequence/hash-verified handoff text with explicit coverage limits.
+- Show local achievements and remaining outcome conditions with disjoint completion/work counters, without developer progress records.
+- Use the qualified free LongCat route by default after Space Bunny became unavailable; keep all model selection explicit with no paid fallback.
+
 ## 1.1.0
 
 - Configure Russian or English owner reports and bounded custom wording prompts through [summary], with preferences frozen into each analysis and cache identity.
