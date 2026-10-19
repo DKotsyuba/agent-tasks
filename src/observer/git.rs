@@ -41,6 +41,8 @@ use std::{
 const READ_BUDGET: Duration = Duration::from_secs(20);
 /// Aggregate Git output budget; the serialized snapshot stays well below the 1 MiB wire frame.
 const TOTAL_CAP: usize = 384 * 1024;
+/// Independent final metadata-check allowance; verification bytes never expand model evidence.
+const REF_CHECK_CAP: usize = 65 * 1024;
 /// Cap for the final serialized snapshot, leaving headroom inside the 1 MiB frame.
 const FRAME_LIMIT: usize = 900 * 1024;
 /// Maximum retained original commit message bytes, including subject and line endings.
@@ -487,7 +489,7 @@ fn collect_until(
     for round in 0..2 {
         collector.omissions.clear();
         let (tips, evidence, changed) = collector.snapshot_once(baseline, probe)?;
-        if !changed || round == 1 {
+        if !changed || round == 1 || collector.remaining < REF_CHECK_CAP {
             if changed {
                 collector.omit(
                     "Repository refs or drafts changed during collection; evidence may be mixed.",
@@ -591,7 +593,8 @@ impl Collector {
     }
 
     /// Freezes one attempt: tips, evidence, and whether refs moved between start and end
-    /// fingerprints. Racing attempts are retried once by `collect_until`, never silently mixed.
+    /// fingerprints. Racing attempts retry only with sufficient budget; unavailable verification
+    /// preserves the first observation with explicit unknown consistency, never false completeness.
     fn snapshot_once(
         &mut self,
         baseline: Option<&Snapshot>,
@@ -616,21 +619,33 @@ impl Collector {
         }
         let draft_bytes = serde_json::to_vec(&drafts)?;
         evidence.extend(drafts);
-        let (end_tips, end_listing, end_branches) = self.ref_state()?;
-        let end_target = self.require_target_sha()?;
         let mut end_drafts = Vec::new();
-        // Validation repeats the same bounded draft allowance, rather than mistaking a spent
-        // collection budget for a content race. These bytes never enter the model input twice.
+        // Metadata verification has a separate finite allowance; content exhaustion must
+        // preserve this observation, not fail after gathering valid code and worker facts.
         let mut validation = Collector {
             root: self.root.clone(),
             target_ref: self.target_ref.clone(),
-            target_sha: end_target.clone(),
+            target_sha: self.target_sha.clone(),
             deadline: self.deadline,
-            remaining: draft_allowance,
+            remaining: REF_CHECK_CAP,
             omissions: Vec::new(),
             focus: self.focus.clone(),
             changed_paths: Vec::new(),
         };
+        let verification = validation.require_target_sha().and_then(|target| {
+            validation.target_sha = target.clone();
+            validation.ref_state().map(|refs| (target, refs))
+        });
+        let (end_target, (end_tips, end_listing, end_branches)) = match verification {
+            Ok(observed) => observed,
+            Err(error) => {
+                self.omit(format!("Final reference verification was unavailable ({}); snapshot consistency is unknown.", error.code));
+                return Ok((tips.into_iter().collect(), evidence, false));
+            }
+        };
+        // Draft comparison repeats only the original finite draft allowance and never
+        // inserts its duplicate content into the model's snapshot.
+        validation.remaining = draft_allowance;
         validation.draft_evidence(&end_listing, baseline, &mut end_drafts);
         let changed = before
             != self.fingerprint(&end_tips, &end_listing, &end_branches, &end_target)
@@ -2195,6 +2210,43 @@ mod tests {
                     .any(|text| text.contains("not ingested"))
             );
         }
+    }
+
+    /// A spent content budget cannot erase a valid observation during the final metadata check.
+    #[test]
+    fn metadata_verification_survives_content_budget_exhaustion() {
+        let temp = fixture();
+        let listing = fixture_git(temp.path(), &["worktree", "list", "--porcelain"]);
+        let branches = fixture_git(
+            temp.path(),
+            &[
+                "for-each-ref",
+                "--format=%(objectname)%00%(refname:short)",
+                "refs/heads",
+            ],
+        );
+        let initial_metadata = listing.len() + 2 + branches.len() + 1 + 41;
+        let mut collector = Collector {
+            root: temp.path().to_owned(),
+            target_ref: "refs/heads/main".into(),
+            target_sha: String::new(),
+            deadline: Instant::now() + READ_BUDGET,
+            remaining: initial_metadata + 16,
+            omissions: vec![],
+            focus: vec![],
+            changed_paths: vec![],
+        };
+        let (tips, _, changed) = collector
+            .snapshot_once(None, None)
+            .expect("retain observations with explicit budget omission");
+        assert!(!tips.is_empty());
+        assert!(!changed, "spent content budget is not a source race");
+        assert!(
+            collector
+                .omissions
+                .iter()
+                .any(|text| text.contains("budget"))
+        );
     }
 
     /// Identity pins the canonical common directory/checkout and validates integration refs.
