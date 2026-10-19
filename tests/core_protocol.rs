@@ -477,7 +477,7 @@ impl Broker {
             "Do not depend on harness-specific schema admission"
         );
         assert!(task.contains("SCHEMA:\n"));
-        let mut value = json!({"analysis_input_id":input["analysis_input_id"],"plan_revision":input["plan_revision"],"outcomes":input["outcomes"].as_array().unwrap().iter().map(|o| json!({"id":o["id"],"state":"no_evidence","title":"Fixture outcome","remaining":"Further evidence is needed","summary":"Insufficient observed evidence","evidence":[],"integrated":null})).collect::<Vec<_>>(),"findings":[]});
+        let mut value = json!({"analysis_input_id":input["analysis_input_id"],"plan_revision":input["plan_revision"],"outcomes":input["outcomes"].as_array().unwrap().iter().map(|o| json!({"id":o["id"],"state":"no_evidence","progress_percent":null,"title":"Fixture outcome","remaining":"Further evidence is needed","summary":"Insufficient observed evidence","evidence":[],"integrated":null})).collect::<Vec<_>>(),"findings":[]});
         alter(&mut value);
         run.answer = Some(serde_json::to_string(&value).unwrap());
         self.completed.notify_all();
@@ -576,7 +576,7 @@ fn dispatch(state: &mut FakeState, request: &Value) -> Option<Value> {
             if std::mem::take(&mut state.lose_next_receipt) {
                 if state.complete_lost_start {
                     let input = analysis_input(&run.request);
-                    run.answer = Some(serde_json::to_string(&json!({"analysis_input_id":input["analysis_input_id"],"plan_revision":input["plan_revision"],"outcomes":input["outcomes"].as_array().unwrap().iter().map(|o| json!({"id":o["id"],"state":"no_evidence","title":"Fixture outcome","remaining":"Further evidence is needed","summary":"Insufficient observed evidence","evidence":[],"integrated":null})).collect::<Vec<_>>(),"findings":[]})).unwrap());
+                    run.answer = Some(serde_json::to_string(&json!({"analysis_input_id":input["analysis_input_id"],"plan_revision":input["plan_revision"],"outcomes":input["outcomes"].as_array().unwrap().iter().map(|o| json!({"id":o["id"],"state":"no_evidence","progress_percent":null,"title":"Fixture outcome","remaining":"Further evidence is needed","summary":"Insufficient observed evidence","evidence":[],"integrated":null})).collect::<Vec<_>>(),"findings":[]})).unwrap());
                 }
                 None
             } else {
@@ -2500,6 +2500,13 @@ async fn live_semantic_qualification() {
                 "False completion or missed coherent implementation: {row}"
             );
         }
+        let partial = rows.iter().find(|row| row["id"] == "o3").unwrap();
+        assert!(
+            partial["progress_percent"]
+                .as_u64()
+                .is_some_and(|p| p > 0 && p < 100),
+            "implemented export must contribute partial readiness: {partial}"
+        );
         assert_eq!(
             rows.iter().filter(|r| r["integrated"] == true).count(),
             1,
@@ -2515,7 +2522,7 @@ async fn live_semantic_qualification() {
             false,
         )
         .await;
-        assert!(compact.contains("2/7 готово"), "{compact}");
+        assert!(compact.contains("2/7 завершено"), "{compact}");
         assert!(
             !compact.lines().next().unwrap().contains(" — "),
             "{compact}"
