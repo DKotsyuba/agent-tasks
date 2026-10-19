@@ -21,7 +21,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         definition(
             "status",
-            "On owner request, estimate progress from Git and Agent Run. Default compact Russian report; details only on request. With Bridge configured, one call delivers the final report as a message to the original host-metadata destination; PENDING requires no follow-up. Otherwise, after the completion notice read the exact analysis_id once. Never poll or launch replacement work. Explicit handle reads never start inference. API caller_context is a return destination only, never the persistent server environment.",
+            "On owner request, estimate progress from Git and Agent Run. Compact localized bullet report (Russian by default, configurable in [summary]) with program-computed progress and unique observed commit count; details only on request. Service messages are English. With Bridge configured, one call delivers the final report as a message to the original host-metadata destination; PENDING requires no follow-up. Otherwise, after the completion notice read the exact analysis_id once. Never poll or launch replacement work. Explicit handle reads never start inference. API caller_context is a return destination only, never the persistent server environment.",
             serde_json::to_value(schemars::schema_for!(StatusArgs)).unwrap_or(Value::Null),
             false,
         ),

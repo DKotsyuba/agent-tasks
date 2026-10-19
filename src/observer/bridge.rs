@@ -282,7 +282,7 @@ pub fn completed(
 ) -> Result<()> {
     if let Some(delivery) = &mut locked.state.delivery {
         delivery.ready(format!(
-            "Agent Tasks · план {revision} · снимок {observed_at}\n{compact}"
+            "Agent Tasks · plan {revision} · snapshot {observed_at}\n{compact}"
         ))?;
     }
     Ok(())
@@ -341,7 +341,7 @@ fn terminal_failure(locked: &mut Locked) -> Result<()> {
         .and_then(|p| p.terminal.as_deref())
         && let Some(delivery) = &mut locked.state.delivery
     {
-        delivery.ready(format!("Agent Tasks: сводку получить не удалось ({code}).\nПредыдущая оценка сохранена; новый прогресс не заявлен."))?;
+        delivery.ready(format!("Agent Tasks: the report could not be retrieved ({code}).\nThe previous estimate is retained; no new progress is claimed."))?;
     }
     Ok(())
 }

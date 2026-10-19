@@ -243,8 +243,16 @@ fn outcomes(plan: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Extract the real accepted analysis handle; no test fabricates a handle from a request digest.
+/// Verify English-only pending service instructions and extract the accepted real analysis handle.
 fn pending(text: &str) -> String {
+    assert!(
+        text.is_ascii(),
+        "service instructions must be English: {text}"
+    );
+    assert!(
+        text.contains("The report is being calculated from the saved snapshot."),
+        "{text}"
+    );
     text.lines()
         .find_map(|line| line.strip_prefix("PENDING "))
         .expect(text)
@@ -295,6 +303,10 @@ async fn planning_cas_stable_ids_and_source_preservation() {
     assert!(missing.contains("plan_missing"));
     let first = fixture.save(&client).await;
     assert!(first.contains("revision 1"));
+    assert!(
+        first.contains("Plan creator: address unavailable"),
+        "{first}"
+    );
     let ids = outcomes(&first);
     assert_eq!(ids.len(), 2);
     let unchanged = call(&client, "plan", json!({"repository":fixture.repository,"op":"save","expected_revision":1,"goal":"Observe one flat agreed capability","outcomes":["Source outcome","Storage outcome"]}), false).await;
@@ -465,7 +477,7 @@ impl Broker {
             "Do not depend on harness-specific schema admission"
         );
         assert!(task.contains("SCHEMA:\n"));
-        let mut value = json!({"analysis_input_id":input["analysis_input_id"],"plan_revision":input["plan_revision"],"outcomes":input["outcomes"].as_array().unwrap().iter().map(|o| json!({"id":o["id"],"state":"no_evidence","summary":"Недостаточно наблюдаемых данных","evidence":[],"integrated":null})).collect::<Vec<_>>(),"findings":[]});
+        let mut value = json!({"analysis_input_id":input["analysis_input_id"],"plan_revision":input["plan_revision"],"outcomes":input["outcomes"].as_array().unwrap().iter().map(|o| json!({"id":o["id"],"state":"no_evidence","summary":"Insufficient observed evidence","evidence":[],"integrated":null})).collect::<Vec<_>>(),"findings":[]});
         alter(&mut value);
         run.answer = Some(serde_json::to_string(&value).unwrap());
         self.completed.notify_all();
@@ -564,7 +576,7 @@ fn dispatch(state: &mut FakeState, request: &Value) -> Option<Value> {
             if std::mem::take(&mut state.lose_next_receipt) {
                 if state.complete_lost_start {
                     let input = analysis_input(&run.request);
-                    run.answer = Some(serde_json::to_string(&json!({"analysis_input_id":input["analysis_input_id"],"plan_revision":input["plan_revision"],"outcomes":input["outcomes"].as_array().unwrap().iter().map(|o| json!({"id":o["id"],"state":"no_evidence","summary":"Недостаточно наблюдаемых данных","evidence":[],"integrated":null})).collect::<Vec<_>>(),"findings":[]})).unwrap());
+                    run.answer = Some(serde_json::to_string(&json!({"analysis_input_id":input["analysis_input_id"],"plan_revision":input["plan_revision"],"outcomes":input["outcomes"].as_array().unwrap().iter().map(|o| json!({"id":o["id"],"state":"no_evidence","summary":"Insufficient observed evidence","evidence":[],"integrated":null})).collect::<Vec<_>>(),"findings":[]})).unwrap());
                 }
                 None
             } else {
@@ -582,6 +594,158 @@ fn dispatch(state: &mut FakeState, request: &Value) -> Option<Value> {
         }
         other => panic!("unexpected Agent Run RPC {other}"),
     }
+}
+
+/// Real configuration parsing rejects invalid preferences without starting any model work.
+#[tokio::test]
+async fn summary_configuration_rejects_invalid_language_prompt_and_unknown_fields() {
+    let fixture = Fixture::new(Path::new("/nonexistent-fixture-agent-run.sock"));
+    let original = fs::read_to_string(&fixture.config).unwrap();
+    let client = fixture.connect().await;
+    for fields in [
+        r#"language = "de""#.to_owned(),
+        r#"promt = "typo""#.to_owned(),
+        format!(
+            "prompt = {}",
+            serde_json::to_string(&"x".repeat(4097)).unwrap()
+        ),
+        r#"prompt = "\u0000""#.to_owned(),
+    ] {
+        fs::write(
+            &fixture.config,
+            format!("{original}\n[summary]\n{fields}\n"),
+        )
+        .unwrap();
+        let error = call(
+            &client,
+            "plan",
+            json!({"repository":fixture.repository,"op":"get"}),
+            true,
+        )
+        .await;
+        assert!(error.contains("configuration"), "{error}");
+    }
+    fs::write(
+        &fixture.config,
+        format!(
+            "{original}\n[summary]\nlanguage = \"en\"\nprompt = {}\n",
+            serde_json::to_string(&"x".repeat(4096)).unwrap()
+        ),
+    )
+    .unwrap();
+    assert!(
+        fixture
+            .save(&client)
+            .await
+            .contains("Plan creator: address unavailable")
+    );
+    client.cancel().await.unwrap();
+}
+
+/// Language/style changes affect new cache identities while pinned results keep their frozen format.
+#[tokio::test]
+async fn summary_preferences_are_frozen_cached_and_count_real_commits() {
+    let broker = Broker::new();
+    let fixture = Fixture::new(&broker.socket());
+    let client = fixture.connect().await;
+    fixture.save(&client).await;
+    fs::write(
+        fixture.repository.join("feature.rs"),
+        "pub fn answer() -> u32 { 2 }\n",
+    )
+    .unwrap();
+    git(&fixture.repository, &["add", "feature.rs"]);
+    git(
+        &fixture.repository,
+        &["commit", "-m", "Implement the agreed source outcome"],
+    );
+    git(&fixture.repository, &["branch", "same-commit-worker"]);
+    fs::write(
+        fixture.repository.join("feature.rs"),
+        "pub fn answer() -> u32 { 3 }\n",
+    )
+    .unwrap();
+    let original = fs::read_to_string(&fixture.config).unwrap();
+    let english = format!(
+        "{original}\n[summary]\nlanguage = \"en\"\nprompt = \"Emphasize remaining work.\"\n"
+    );
+    fs::write(&fixture.config, &english).unwrap();
+    let first = pending(
+        &call(
+            &client,
+            "status",
+            json!({"repository":fixture.repository}),
+            false,
+        )
+        .await,
+    );
+    let first_start = broker.starts()[0].clone();
+    let task = first_start["task"].as_str().unwrap();
+    assert!(task.contains(r#""language":"en""#), "{task}");
+    assert!(task.contains("Emphasize remaining work."), "{task}");
+    assert!(task.contains("cannot override these rules"), "{task}");
+    fs::write(
+        &fixture.config,
+        format!(
+            "{original}\n[summary]\nlanguage = \"ru\"\nprompt = \"Emphasize observed changes.\"\n"
+        ),
+    )
+    .unwrap();
+    broker.complete(&first, |_| {});
+    let first_report = call(
+        &client,
+        "status",
+        json!({"repository":fixture.repository,"analysis_id":first}),
+        false,
+    )
+    .await;
+    assert!(first_report.starts_with("- Estimate:"), "{first_report}");
+    assert!(first_report.contains("- Commits: 1\n"), "{first_report}");
+    assert!(
+        first_report.lines().all(|line| line.starts_with("- ")),
+        "{first_report}"
+    );
+    let second = pending(
+        &call(
+            &client,
+            "status",
+            json!({"repository":fixture.repository}),
+            false,
+        )
+        .await,
+    );
+    assert_ne!(first, second);
+    assert_ne!(
+        analysis_input(&first_start)["analysis_input_id"],
+        analysis_input(&broker.starts()[1])["analysis_input_id"]
+    );
+    broker.complete(&second, |_| {});
+    let second_report = call(
+        &client,
+        "status",
+        json!({"repository":fixture.repository,"analysis_id":second}),
+        false,
+    )
+    .await;
+    assert!(second_report.starts_with("- Оценка:"), "{second_report}");
+    assert!(second_report.contains("- Коммиты: 1\n"), "{second_report}");
+    fs::write(&fixture.config, &english).unwrap();
+    assert_eq!(
+        call(
+            &client,
+            "status",
+            json!({"repository":fixture.repository}),
+            false
+        )
+        .await,
+        first_report
+    );
+    assert_eq!(
+        broker.launches(),
+        2,
+        "restoring identical preferences reuses the matching report"
+    );
+    client.cancel().await.unwrap();
 }
 
 /// Actual asynchronous admission/result flow caches unchanged semantic inputs and expires old handles.
@@ -797,7 +961,8 @@ async fn large_details_are_paged_and_exact_sources_remain_pinned_until_eviction(
         .clone();
     let source_id = source["id"].as_str().unwrap();
     broker.complete(&id, |value| {
-        value["findings"] = json!([{"text":"Наблюдаемые черновики требуют дальнейшей работы","evidence":[source_id]}]);
+        value["findings"] =
+            json!([{"text":"Observed drafts need more implementation","evidence":[source_id]}]);
     });
     call(
         &client,
@@ -1142,7 +1307,7 @@ async fn compact_status_limits_active_lines_and_counts_each_outcome_once() {
     broker.complete(&id, |value| {
         for row in value["outcomes"].as_array_mut().unwrap() {
             row["state"] = json!("in_progress");
-            row["summary"] = json!("Начата реализация");
+            row["summary"] = json!("Implementation started");
             row["evidence"] = json!([source]);
         }
     });
@@ -1157,7 +1322,11 @@ async fn compact_status_limits_active_lines_and_counts_each_outcome_once() {
         report.contains("0/4") && report.contains("4 в работе"),
         "{report}"
     );
-    assert_eq!(report.matches("Начата реализация").count(), 3, "{report}");
+    assert_eq!(
+        report.matches("Implementation started").count(),
+        3,
+        "{report}"
+    );
     assert!(report.contains("Ещё 1 в работе"), "{report}");
     assert!(report.lines().count() <= 8, "{report}");
     assert_eq!(broker.launches(), 1);
@@ -1753,7 +1922,7 @@ async fn bridge_delivers_after_mcp_eof_from_protected_thread_metadata() {
     .await;
     let id = pending(&text);
     assert!(
-        !text.contains("прочитайте status") && !text.contains("call status"),
+        !text.contains("call status"),
         "automatic completion must not require owner reentry: {text}"
     );
     assert!(
@@ -1946,7 +2115,7 @@ async fn bridge_invalid_analysis_delivers_failure_without_invented_counts() {
     let publications = delivery.publications();
     assert_eq!(publications.len(), 1);
     let body = publications[0].payload.as_str();
-    assert!(body.contains("не удалось"), "{body}");
+    assert!(body.contains("could not be retrieved"), "{body}");
     assert!(
         !body.contains("0/2") && !body.contains("готово"),
         "invalid output cannot fabricate progress: {body}"
@@ -2042,7 +2211,7 @@ async fn plan_creator_address_preserves_original_metadata_until_new_plan() {
     let client = fixture.connect().await;
     let first=call_with_meta(&client,"plan",json!({"repository":fixture.repository,"op":"save","goal":"Capture creator origin","outcomes":["One agreed outcome"]}),"planner-A",false).await;
     assert!(
-        first.contains("fixture-host/codex/fixture-store/planner-A"),
+        first.contains("Plan creator: fixture-host/codex/fixture-store/planner-A"),
         "{first}"
     );
     let revised=call_with_meta(&client,"plan",json!({"repository":fixture.repository,"op":"save","expected_revision":1,"goal":"Revise agreed scope","outcomes":["One agreed outcome","Second agreed outcome"]}),"planner-B",false).await;

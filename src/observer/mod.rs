@@ -13,7 +13,7 @@ use state::{Archive, Bundle, Locked, Outcome, Pending, Plan, Report};
 use std::{fs, io::Read, path::PathBuf};
 
 /// Prompt semantics included in cache identities; bump after changing inference rules.
-const PROMPT_REVISION: u32 = 3;
+const PROMPT_REVISION: u32 = 4;
 /// Maximum complete encoded socket request, leaving room below Agent Run's 1 MiB wire cap.
 const REQUEST_CAP: usize = 900 * 1024;
 
@@ -26,6 +26,9 @@ pub struct Config {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Settings {
+    /// Owner-facing report language and bounded optional style instructions.
+    #[serde(default)]
+    summary: report::SummaryOptions,
     /// Optional dedicated Bridge producer; absent retains legacy explicit result reads.
     bridge: Option<bridge::Settings>,
     /// Optional explicit observer home, always separate from legacy records below it.
@@ -43,6 +46,8 @@ struct Settings {
 }
 /// Resolved nonsecret execution settings.
 struct Effective {
+    /// Validated presentation preferences frozen with each new analysis.
+    summary: report::SummaryOptions,
     /// Optional frozen delivery-only producer configuration.
     bridge: Option<bridge::Settings>,
     /// Local observer storage root.
@@ -95,6 +100,7 @@ impl Config {
                     && std::env::var_os("AGENT_TASKS_CONFIG").is_none() =>
             {
                 Settings {
+                    summary: report::SummaryOptions::default(),
                     bridge: None,
                     home: None,
                     socket: None,
@@ -112,7 +118,9 @@ impl Config {
                 "Unsupported observer settings version.",
             ));
         }
+        settings.summary.validate()?;
         let result = Effective {
+            summary: settings.summary,
             bridge: settings.bridge,
             home: settings
                 .home
@@ -412,7 +420,8 @@ pub fn plan(config: &Config, args: PlanArgs, origin: Option<&Caller>) -> Result<
     Ok(reply)
 }
 
-/// Show the agreed text and internal read-continuation IDs, without another task hierarchy.
+/// Show English service labels, the original agreed text and stable outcome IDs.
+/// Missing creator metadata is explicit; owner-authored plan text is never translated.
 fn plan_text(plan: &Plan) -> Result<String> {
     let lines = plan
         .outcomes
@@ -421,11 +430,11 @@ fn plan_text(plan: &Plan) -> Result<String> {
         .collect::<Vec<_>>()
         .join("\n");
     Ok(format!(
-        "PLAN revision {}\nАвтор плана: {}\n{}\n{}\n",
+        "PLAN revision {}\nPlan creator: {}\n{}\n{}\n",
         plan.revision,
         plan.creator_address
             .as_deref()
-            .unwrap_or("адрес недоступен"),
+            .unwrap_or("address unavailable"),
         plan.goal,
         lines
     ))
@@ -564,7 +573,7 @@ pub fn status(config: &Config, args: StatusArgs) -> Result<String> {
             }
         }
         let input_id = state::digest(
-            &json!({"repository":identity.key,"plan_revision":plan.revision,"goal":plan.goal,"outcomes":plan.outcomes,"git":snapshot.semantic_digest,"developers":developers,"socket":settings.socket,"provider":settings.provider,"model":settings.model,"profile":settings.profile,"prompt":PROMPT_REVISION}),
+            &json!({"repository":identity.key,"plan_revision":plan.revision,"goal":plan.goal,"outcomes":plan.outcomes,"git":snapshot.semantic_digest,"developers":developers,"socket":settings.socket,"provider":settings.provider,"model":settings.model,"profile":settings.profile,"summary":settings.summary,"prompt":PROMPT_REVISION}),
         )?;
         if let Some(index) = locked
             .state
@@ -590,6 +599,7 @@ pub fn status(config: &Config, args: StatusArgs) -> Result<String> {
             ));
         }
         let bundle = Bundle {
+            summary: settings.summary,
             plan,
             snapshot,
             developers,
@@ -655,6 +665,7 @@ pub fn status(config: &Config, args: StatusArgs) -> Result<String> {
 }
 
 /// Submit/reconcile the exact original intent, then make one bounded completion observation.
+/// Pending instructions are always English; a completed report uses its frozen summary preferences.
 fn settle(locked: &mut Locked, view: &View) -> Result<String> {
     let mut pending =
         locked.state.pending.clone().ok_or_else(|| {
@@ -701,14 +712,14 @@ fn settle(locked: &mut Locked, view: &View) -> Result<String> {
         pending.bundle.plan.revision,
     ) {
         Ok(None) => Ok(format!(
-            "PENDING {}\nСводка рассчитывается по сохранённому снимку.\n{}",
+            "PENDING {}\nThe report is being calculated from the saved snapshot.\n{}",
             receipt.agent_id,
             if locked.state.delivery.is_some() {
-                "Готовая сводка придёт сообщением через Bridge; повторный вызов не требуется."
+                "The completed report will arrive through Bridge; no follow-up call is required."
             } else if pending.request["orchestrator"].is_null() {
-                "Уведомления не привязаны; следующий явный запрос получит тот же результат.\n"
+                "Notifications are not bound; the next explicit request will retrieve the same result.\n"
             } else {
-                "После уведомления прочитайте status с этим analysis_id; повторный запуск не нужен.\n"
+                "After the completion notice, call status with this analysis_id; do not restart the analysis.\n"
             }
         )),
         Ok(Some(value)) => {

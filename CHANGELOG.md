@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Configure Russian or English owner reports and bounded custom wording prompts through [summary], with preferences frozen into each analysis and cache identity.
+- Render compact progress as a bullet list with program-computed unique post-baseline commit counts and explicit lower bounds for incomplete Git evidence.
+- Keep agent-facing service messages, plan metadata, documentation and model instructions in English while preserving localized owner output and existing reports.
+
 ## 1.0.1
 
 - Resolve the native temporary-directory alias in test fixtures before passing an observer home, retaining the production symlink protection on macOS CI.

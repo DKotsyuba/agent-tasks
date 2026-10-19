@@ -58,6 +58,9 @@ pub struct Plan {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bundle {
+    /// Frozen report language/style; older records retain the default Russian report.
+    #[serde(default)]
+    pub summary: super::report::SummaryOptions,
     /// Immutable plan revision interpreted by this analysis.
     pub plan: Plan,
     /// Frozen Git evidence, with explicit omissions.
