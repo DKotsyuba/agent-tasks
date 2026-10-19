@@ -131,6 +131,7 @@ pub fn schema(bundle: &Bundle) -> Result<Value> {
 }
 
 /// Explain the fixed inference task without granting repository text any instruction authority.
+/// Runtime items occur once as citable Git evidence; developer coverage metadata is separate.
 pub fn prompt(bundle: &Bundle, previous: Option<&Report>) -> Result<String> {
     bundle.summary.validate()?;
     let previous = previous.map(|r| &r.analysis);
@@ -139,7 +140,7 @@ pub fn prompt(bundle: &Bundle, previous: Option<&Report>) -> Result<String> {
         serde_json::to_string(&bundle.summary)?,
         serde_json::to_string(&schema(bundle)?)?,
         serde_json::to_string(
-            &json!({"analysis_input_id":bundle.input_id,"plan_revision":bundle.plan.revision,"goal":bundle.plan.goal,"outcomes":bundle.plan.outcomes,"baseline":json!({"target_sha":bundle.plan.baseline.target_sha,"tips":bundle.plan.baseline.tips,"integration_ref":bundle.plan.baseline.repository.integration_ref,"note":"Initial drafts were compared by the collector; baseline metadata is not current implementation evidence."}),"git":bundle.snapshot,"developers":bundle.developers,"previous":previous})
+            &json!({"analysis_input_id":bundle.input_id,"plan_revision":bundle.plan.revision,"goal":bundle.plan.goal,"outcomes":bundle.plan.outcomes,"baseline":json!({"target_sha":bundle.plan.baseline.target_sha,"tips":bundle.plan.baseline.tips,"integration_ref":bundle.plan.baseline.repository.integration_ref,"note":"Initial drafts were compared by the collector; baseline metadata is not current implementation evidence."}),"git":bundle.snapshot,"developers":{"complete":bundle.developers["complete"],"omissions":bundle.developers["omissions"],"note":"Worker items are included once as runtime entries in git.evidence."},"previous":previous})
         )?
     ))
 }
@@ -508,6 +509,22 @@ mod tests {
             developers: json!({"items":[],"complete":true,"omissions":[]}),
             input_id: "input".into(),
         }
+    }
+    /// Worker bodies are retained once so duplicate context cannot exceed the API task limit.
+    #[test]
+    fn prompt_keeps_runtime_body_once() {
+        let mut supplied = bundle(1, "runtime");
+        let worker = json!({"agent_id":"worker", "content":"UNIQUE_WORKER_BODY".repeat(16 * 1024)});
+        supplied.developers =
+            json!({"items":[worker],"complete":false,"omissions":["partial inventory"]});
+        supplied.snapshot.evidence[0].text = serde_json::to_string(&worker).unwrap();
+        let task = prompt(&supplied, None).unwrap();
+        assert!(task.len() <= 512 * 1024);
+        assert_eq!(task.matches("UNIQUE_WORKER_BODY").count(), 16 * 1024);
+        let input: Value = serde_json::from_str(task.split("INPUT:\n").nth(1).unwrap()).unwrap();
+        assert_eq!(input["developers"]["complete"], false);
+        assert_eq!(input["developers"]["omissions"][0], "partial inventory");
+        assert!(input["developers"].get("items").is_none());
     }
     /// Produce a schema-valid candidate whose source/state can be varied adversarially.
     fn answer(n: usize, state: &str, integrated: bool) -> Value {

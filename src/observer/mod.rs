@@ -13,9 +13,11 @@ use state::{Archive, Bundle, Locked, Outcome, Pending, Plan, Report};
 use std::{fs, io::Read, path::PathBuf};
 
 /// Prompt semantics included in cache identities; bump after changing inference rules.
-const PROMPT_REVISION: u32 = 6;
+const PROMPT_REVISION: u32 = 7;
 /// Maximum complete encoded socket request, leaving room below Agent Run's 1 MiB wire cap.
 const REQUEST_CAP: usize = 900 * 1024;
+/// Maximum task text accepted by the existing Agent Run API, before JSON encoding.
+const TASK_CAP: usize = 512 * 1024;
 
 /// Lazy settings location; discovery never accesses configuration or repository files.
 #[derive(Clone)]
@@ -623,6 +625,12 @@ pub fn status(config: &Config, args: StatusArgs) -> Result<String> {
             input_id,
         };
         let task = report::prompt(&bundle, locked.state.reports.last())?;
+        if task.len() > TASK_CAP {
+            return Err(Error::new(
+                "evidence_limit",
+                "Collected evidence exceeds Agent Run's 512 KiB task limit; no model was started.",
+            ));
+        }
         locked.state.generation = locked
             .state
             .generation
