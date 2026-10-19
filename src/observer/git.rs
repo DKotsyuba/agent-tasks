@@ -17,8 +17,8 @@
 //! - `target_history`: reference is `<integration-ref>@<target-sha>`; text lists the
 //!   integration endpoint's recent subjects, making merges, reverts and re-lands visible.
 //! - `endpoint_patch`: reference is `<branch-or-detached>@<tip-sha>`; text is the bounded
-//!   two-dot content diff `target..tip`. A retained feature branch after a target revert
-//!   still shows its feature lines here, so completion never rests on ancestry alone.
+//!   merge-base-to-tip change set. Older target-only files are not candidate deletions;
+//!   ancestor endpoints are skipped and cannot resurrect a reverted implementation.
 //! - `staged` / `unstaged`: per linked worktree draft patches against the index/HEAD.
 //! - `untracked`: per linked worktree list of non-ignored new file paths.
 //! - `draft_text`: bounded content of one eligible new text file; secrets, binaries,
@@ -332,7 +332,7 @@ fn path_text(path: &Path) -> Result<String> {
 }
 
 /// Returns this repository's worktrees (primary checkout included) as canonical
-/// (path, HEAD) pairs, sorted by path, bounded to [`WORKTREE_LIMIT`].
+/// (path, HEAD) pairs sorted by path; Collector later prioritizes and caps retained records.
 fn worktree_listing(
     root: &Path,
     deadline: Instant,
@@ -355,7 +355,7 @@ fn worktree_listing(
 }
 
 /// Parses porcelain worktree records into canonical (path, HEAD) pairs; entries without a
-/// resolvable path are dropped silently and excess entries stay beyond [`WORKTREE_LIMIT`].
+/// resolvable path are dropped; valid records stay available for caller-side prioritization.
 fn parse_worktrees(raw: &str) -> Vec<(PathBuf, Option<String>)> {
     let mut listing: Vec<(PathBuf, Option<String>)> = Vec::new();
     for record in raw.split("\n\n") {
@@ -489,7 +489,9 @@ fn collect_until(
         let (tips, evidence, changed) = collector.snapshot_once(baseline, probe)?;
         if !changed || round == 1 {
             if changed {
-                collector.omit("Repository refs changed during collection; evidence may be mixed.");
+                collector.omit(
+                    "Repository refs or drafts changed during collection; evidence may be mixed.",
+                );
             }
             *remaining = collector.remaining;
             return finalize(
@@ -1083,7 +1085,13 @@ impl Collector {
     /// Observe actual current target blobs for candidate paths; absence is not proof of deletion.
     /// Oversized, binary or unavailable blobs remain explicit unknown evidence.
     fn target_blobs(&mut self, evidence: &mut Vec<Evidence>) {
-        for path in self.changed_paths.clone().into_iter().take(8) {
+        let paths = self.changed_paths.clone();
+        let mut inspected_content = 0;
+        for (index, path) in paths.iter().enumerate() {
+            if inspected_content == 8 {
+                self.omit(format!("Current target content reached its eight-file bound; {} changed paths were not inspected.", paths.len() - index));
+                break;
+            }
             if !self.room() {
                 break;
             }
@@ -1103,6 +1111,7 @@ impl Collector {
             if matches!(&present, Ok(names) if names.trim().is_empty()) {
                 continue;
             }
+            inspected_content += 1;
             if let Soft::Text(text) = self.soft(
                 &self.root.clone(),
                 &["show", &object],
@@ -1439,7 +1448,12 @@ impl Collector {
             return None;
         }
         if bytes.len() > limit {
-            self.omit(format!("Draft file {relative} exceeded its size bound; only labeled head/tail excerpts are retained."));
+            if bytes.contains(&0) {
+                self.omit(format!(
+                    "Draft file {relative} is binary and was not ingested."
+                ));
+                return None;
+            }
             let half = limit / 2;
             let head = &bytes[..half];
             let head = match std::str::from_utf8(head) {
@@ -1447,12 +1461,20 @@ impl Collector {
                 Err(error) if error.error_len().is_none() => {
                     std::str::from_utf8(&head[..error.valid_up_to()]).ok()?
                 }
-                Err(_) => return None,
+                Err(_) => {
+                    self.omit(format!(
+                        "Draft file {relative} is not valid UTF-8 and was not ingested."
+                    ));
+                    return None;
+                }
             };
             let mut tail = Vec::new();
             if file.seek(SeekFrom::End(-(half as i64))).is_err()
                 || file.take(half as u64).read_to_end(&mut tail).is_err()
             {
+                self.omit(format!(
+                    "Draft file {relative} tail was unavailable; no excerpts were retained."
+                ));
                 return None;
             }
             let tail = tail
@@ -1460,14 +1482,28 @@ impl Collector {
                 .position(|byte| *byte == b'\n')
                 .map(|at| &tail[at + 1..])
                 .unwrap_or(&[]);
-            if bytes.contains(&0) || tail.contains(&0) {
+            if tail.contains(&0) {
+                self.omit(format!(
+                    "Draft file {relative} is binary and was not ingested."
+                ));
                 return None;
             }
-            let tail = std::str::from_utf8(tail).ok()?;
+            let tail = match std::str::from_utf8(tail) {
+                Ok(text) => text,
+                Err(_) => {
+                    self.omit(format!(
+                        "Draft file {relative} is not valid UTF-8 and was not ingested."
+                    ));
+                    return None;
+                }
+            };
             let excerpt = format!(
                 "[Partial draft: file head; middle content omitted]\n{head}\n[Partial draft: file tail]\n{tail}"
             );
             self.remaining = self.remaining.saturating_sub(excerpt.len());
+            self.omit(format!(
+                "Draft file {relative} exceeded its size bound; labeled excerpts are retained."
+            ));
             return Some(excerpt);
         }
         if bytes.contains(&0) {
@@ -2089,6 +2125,76 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("size bound"))
         );
+    }
+
+    /// Normal target absence does not bury existing code, and skipped target coverage is disclosed.
+    #[test]
+    fn target_content_bound_is_explicit_after_absent_draft_paths() {
+        let temp = fixture();
+        for i in 0..10 {
+            std::fs::write(
+                temp.path().join(format!("code-{i}.rs")),
+                "pub fn local_code() {}\n",
+            )
+            .unwrap();
+        }
+        let sha = commit(temp.path(), "Add current target source");
+        let mut paths: Vec<String> = (0..12).map(|i| format!("new-draft-{i}.rs")).collect();
+        paths.extend((0..10).map(|i| format!("code-{i}.rs")));
+        let mut collector = Collector {
+            root: temp.path().to_owned(),
+            target_ref: "refs/heads/main".into(),
+            target_sha: sha,
+            deadline: Instant::now() + READ_BUDGET,
+            remaining: TOTAL_CAP,
+            omissions: vec![],
+            focus: vec![],
+            changed_paths: paths,
+        };
+        let mut evidence = Vec::new();
+        collector.target_blobs(&mut evidence);
+        assert!(
+            !evidence.is_empty(),
+            "absent draft paths must not consume all target content slots"
+        );
+        assert!(evidence.len() < 10);
+        assert!(
+            collector
+                .omissions
+                .iter()
+                .any(|text| text.contains("changed paths were not inspected"))
+        );
+    }
+
+    /// Rejected large binary/invalid text never claims that an excerpt was successfully retained.
+    #[test]
+    fn rejected_large_draft_does_not_claim_retained_excerpts() {
+        for byte in [0, 255] {
+            let temp = fixture();
+            let baseline = collect(temp.path(), None, None).unwrap();
+            let mut bytes = vec![b'a'; DRAFT_FILE_CAP + 2048];
+            bytes[0] = byte;
+            std::fs::write(temp.path().join("invalid.rs"), bytes).unwrap();
+            let observed = collect(temp.path(), Some(&baseline), None).unwrap();
+            assert!(
+                !observed
+                    .evidence
+                    .iter()
+                    .any(|entry| entry.kind == "draft_text")
+            );
+            assert!(
+                !observed
+                    .omissions
+                    .iter()
+                    .any(|text| text.contains("excerpts are retained"))
+            );
+            assert!(
+                observed
+                    .omissions
+                    .iter()
+                    .any(|text| text.contains("not ingested"))
+            );
+        }
     }
 
     /// Identity pins the canonical common directory/checkout and validates integration refs.

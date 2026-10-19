@@ -178,7 +178,9 @@ impl Client {
 
     /// Observes workers in the canonical Git common directory, excluding supplied
     /// analyzer IDs and summary profiles. Returns stable allowlisted facts plus
-    /// bounded transcript messages, with explicit omissions and `complete=false`
+    /// bounded transcript/check messages and sequence/hash-fenced sealed answers. Historical
+    /// failures outside this repository's active episode are explicitly omitted. Retained answer
+    /// bytes do not independently verify their assertions. Uses `complete=false`
     /// for missing workdirs/logs, inaccessible Git state, or collection ceilings.
     /// Matching workdir alone does not prove relevance to a particular plan.
     /// Never changes source, starts an agent, or includes observation/delivery clocks.
@@ -542,7 +544,7 @@ impl Client {
         Ok(value["result"].take())
     }
 
-    /// Collect bounded inventory pages. Full observations require one stable revision;
+    /// Collect bounded inventory pages; moving inventories retain validated partial views.
     /// a point read returns immediately on the exact sought ID and is fenced by that
     /// execution's own sequence/hash, not unrelated worker or delivery changes.
     /// A moving point scan that misses its target remains incomplete, never proof of loss.
@@ -559,7 +561,7 @@ impl Client {
                 deadline.min(Instant::now() + CALL_BUDGET),
             )?)?;
             let moved = revision.as_ref().is_some_and(|old| old != &page.revision);
-            if page.revision.is_null() || (sought.is_none() && moved) {
+            if page.revision.is_null() {
                 return Err(Error::new(
                     "run_changed",
                     "Agent Run inventory changed during pagination.",
@@ -567,8 +569,15 @@ impl Client {
             }
             changed |= moved;
             revision = Some(page.revision);
-            if page.items.len() > PAGE_SIZE || page.total < offset + page.items.len() {
+            if page.items.len() > PAGE_SIZE {
                 return Err(protocol_data());
+            }
+            if page.total < offset + page.items.len() {
+                return if changed {
+                    Ok((agents, false))
+                } else {
+                    Err(protocol_data())
+                };
             }
             let next = offset + page.items.len();
             for agent in page.items {
@@ -584,8 +593,15 @@ impl Client {
                     return Ok((vec![agent], false));
                 }
                 if !seen.insert(agent.agent_id.clone()) {
-                    if sought.is_none() {
+                    if sought.is_none() && !changed {
                         return Err(protocol_data());
+                    }
+                    if let Some(known) = agents
+                        .iter_mut()
+                        .find(|known| known.agent_id == agent.agent_id)
+                        && agent.sequence >= known.sequence
+                    {
+                        *known = agent;
                     }
                     changed = true;
                     continue;
@@ -602,6 +618,7 @@ impl Client {
                     offset = cursor
                 }
                 None if next == page.total && page.complete => return Ok((agents, !changed)),
+                _ if changed => return Ok((agents, false)),
                 _ => return Err(protocol_data()),
             }
         }
@@ -1530,7 +1547,7 @@ mod tests {
         fake.finish();
     }
 
-    /// Moving revisions and nonadvancing cursors fail rather than skip unseen agents.
+    /// Moving revisions retain explicitly partial views; malformed stable cursors still fail.
     #[test]
     fn pagination_revision_and_cursor_failures() {
         let _guard = SOCKETS.lock().unwrap();
@@ -1543,13 +1560,16 @@ mod tests {
             ),
             ("list_agents", changed),
         ]);
+        let (retained, complete) = fake
+            .client
+            .agents(Instant::now() + CALL_BUDGET, None)
+            .unwrap();
         assert_eq!(
-            fake.client
-                .agents(Instant::now() + CALL_BUDGET, None)
-                .unwrap_err()
-                .code,
-            "run_changed"
+            retained.len(),
+            2,
+            "unrelated inventory movement must not erase known worker views"
         );
+        assert!(!complete, "moving inventory cannot claim full coverage");
         fake.finish();
         let fake = Fake::new(vec![(
             "list_agents",
@@ -1562,6 +1582,24 @@ mod tests {
                 .code,
             "run_protocol"
         );
+        fake.finish();
+    }
+
+    /// Changed overlapping pages keep the latest observed execution rather than dropping all workers.
+    #[test]
+    fn moving_inventory_preserves_latest_duplicate_sequence() {
+        let _guard = SOCKETS.lock().unwrap();
+        let first = page(vec![agent("worker", 1, "running", None)], 0, 2, Some(1));
+        let mut last = page(vec![agent("worker", 2, "running", None)], 1, 2, None);
+        last["revision"] = json!(2);
+        let fake = Fake::new(vec![("list_agents", first), ("list_agents", last)]);
+        let (items, complete) = fake
+            .client
+            .agents(Instant::now() + CALL_BUDGET, None)
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].sequence, 2);
+        assert!(!complete);
         fake.finish();
     }
 
